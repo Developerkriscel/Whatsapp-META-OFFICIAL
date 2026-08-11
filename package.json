@@ -1,0 +1,36 @@
+{
+  "name": "whatsapp-saas",
+  "version": "1.0.0",
+  "description": "WhatsApp Business API SaaS Platform - Multi-tenant with Super Admin + Client Panel",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "pnpm -r --parallel dev",
+    "dev:api": "pnpm --filter api dev",
+    "dev:web": "pnpm --filter web dev",
+    "build": "pnpm -r build",
+    "build:api": "pnpm --filter api build",
+    "build:web": "pnpm --filter web build",
+    "db:migrate": "pnpm --filter api db:migrate",
+    "db:seed": "pnpm --filter api db:seed",
+    "db:studio": "pnpm --filter api db:studio",
+    "db:push": "pnpm --filter api db:push",
+    "stripe:setup": "tsx scripts/create-stripe-products.ts",
+    "lint": "pnpm -r lint",
+    "typecheck": "pnpm -r typecheck",
+    "test": "pnpm -r test",
+    "clean": "pnpm -r clean && rm -rf node_modules"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "typescript": "^5.3.3"
+  },
+  "engines": {
+    "node": ">=20.0.0",
+    "pnpm": ">=8.0.0"
+  },
+  "packageManager": "pnpm@8.15.0",
+  "dependencies": {
+    "puppeteer": "^25.3.0"
+  }
+}

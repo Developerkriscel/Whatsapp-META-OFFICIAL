@@ -1,0 +1,9 @@
+/.env
+node_modules/
+**/node_modules/
+dist/
+**/dist/
+*.log
+*.tar.gz
+*.pdf
+test-screenshots/

@@ -1,0 +1,23 @@
+{
+  "name": "@whatsapp-saas/config",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./rbac": "./src/rbac.ts",
+    "./plans": "./src/plans.ts",
+    "./api-routes": "./src/api-routes.ts",
+    "./guards": "./src/guards.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "zod": "^3.22.4"
+  },
+  "devDependencies": {
+    "typescript": "^5.3.3"
+  }
+}

@@ -1,0 +1,830 @@
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* =============================================
+   APPLE DESIGN SYSTEM — iOS 18 Style Tokens
+   ============================================= */
+:root {
+  /* Apple System Colors */
+  --apple-blue: #007AFF;
+  --apple-indigo: #5856D6;
+  --apple-green: #34C759;
+  --apple-orange: #FF9500;
+  --apple-red: #FF3B30;
+  --apple-purple: #AF52DE;
+  --apple-pink: #FF2D55;
+  --apple-teal: #5AC8FA;
+  --apple-yellow: #FFCC00;
+
+  /* WhatsApp Brand Colors */
+  --wa-green: #25D366;
+  --wa-teal: #128C7E;
+  --wa-dark-teal: #075E54;
+  --wa-light-green: #DCF8C6;
+  --wa-pale-green: #E8F5E9;
+
+  /* Apple Gray Scale */
+  --apple-gray-1: #8E8E93;
+  --apple-gray-2: #636366;
+  --apple-gray-3: #48484A;
+  --apple-gray-4: #3A3A3C;
+  --apple-gray-5: #2C2C2E;
+  --apple-gray-6: #1C1C1E;
+
+  /* Apple Background Colors */
+  --apple-bg: #F5F5F7;
+  --apple-bg-secondary: #FFFFFF;
+  --apple-bg-tertiary: rgba(120, 120, 128, 0.12);
+  --apple-bg-elevated: rgba(255, 255, 255, 0.8);
+
+  /* Apple Text Colors */
+  --apple-text-primary: #1D1D1F;
+  --apple-text-secondary: #86868B;
+  --apple-text-tertiary: #AEAEB2;
+
+  /* Apple SF Pro Font Stack */
+  font-family: 'DM Sans', -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'SF Pro Display', 'Helvetica Neue', Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  font-synthesis: none;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+  background-color: var(--apple-bg);
+  background-image:
+    radial-gradient(ellipse at 20% 10%, rgba(37, 211, 102, 0.09) 0%, transparent 50%),
+    radial-gradient(ellipse at 80% 90%, rgba(18, 140, 126, 0.07) 0%, transparent 50%),
+    radial-gradient(ellipse at 50% 50%, rgba(0, 122, 255, 0.04) 0%, transparent 60%);
+  color: var(--apple-text-primary);
+}
+
+/* ===== APPLE SCROLLBAR ===== */
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.12);
+  border-radius: 10px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.2);
+}
+
+/* =============================================
+   APPLE GLASS MORPHISM — 25px Blur
+   ============================================= */
+
+/* Light Glass */
+.glass {
+  background: rgba(255, 255, 255, 0.68);
+  backdrop-filter: saturate(180%) blur(25px);
+  -webkit-backdrop-filter: saturate(180%) blur(25px);
+  border: 0.5px solid rgba(255, 255, 255, 0.5);
+  border-radius: 20px;
+}
+
+/* Strong Glass */
+.glass-strong {
+  background: rgba(255, 255, 255, 0.82);
+  backdrop-filter: saturate(200%) blur(25px);
+  -webkit-backdrop-filter: saturate(200%) blur(25px);
+  border: 0.5px solid rgba(255, 255, 255, 0.65);
+  border-radius: 20px;
+}
+
+/* Dark Glass */
+.glass-dark {
+  background: rgba(29, 29, 31, 0.72);
+  backdrop-filter: saturate(180%) blur(25px);
+  -webkit-backdrop-filter: saturate(180%) blur(25px);
+  border: 0.5px solid rgba(255, 255, 255, 0.08);
+  border-radius: 20px;
+}
+
+/* Elevated Glass Card */
+.glass-card {
+  background: rgba(255, 255, 255, 0.75);
+  backdrop-filter: saturate(200%) blur(25px);
+  -webkit-backdrop-filter: saturate(200%) blur(25px);
+  border: 0.5px solid rgba(255, 255, 255, 0.6);
+  border-radius: 18px;
+  box-shadow:
+    0 8px 32px rgba(0, 0, 0, 0.06),
+    0 2px 8px rgba(0, 0, 0, 0.04),
+    inset 0 1px 0 rgba(255, 255, 255, 0.8);
+}
+
+/* Floating Glass Panel */
+.glass-panel {
+  background: rgba(255, 255, 255, 0.7);
+  backdrop-filter: saturate(180%) blur(25px);
+  -webkit-backdrop-filter: saturate(180%) blur(25px);
+  border: 0.5px solid rgba(255, 255, 255, 0.55);
+  border-radius: 16px;
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.05);
+}
+
+/* Glass Navigation */
+.glass-nav {
+  background: rgba(255, 255, 255, 0.75);
+  backdrop-filter: saturate(180%) blur(25px);
+  -webkit-backdrop-filter: saturate(180%) blur(25px);
+  border: 0.5px solid rgba(255, 255, 255, 0.5);
+}
+
+/* =============================================
+   APPLE COLOR SYSTEM
+   ============================================= */
+
+/* Blue — Primary */
+.text-apple-blue { color: var(--apple-blue); }
+.bg-apple-blue { background-color: var(--apple-blue); }
+.bg-gradient-blue-apple {
+  background: linear-gradient(135deg, #007AFF 0%, #0A84FF 100%);
+}
+.bg-gradient-blue-soft {
+  background: linear-gradient(135deg, #E5F1FF 0%, #D0E8FF 100%);
+}
+
+/* Indigo — Secondary */
+.text-apple-indigo { color: var(--apple-indigo); }
+.bg-apple-indigo { background-color: var(--apple-indigo); }
+.bg-gradient-indigo-apple {
+  background: linear-gradient(135deg, #5856D6 0%, #6E6CD8 100%);
+}
+.bg-gradient-indigo-soft {
+  background: linear-gradient(135deg, #EBEBFA 0%, #DCDCFA 100%);
+}
+
+/* Green — Success */
+.text-apple-green { color: var(--apple-green); }
+.bg-apple-green { background-color: var(--apple-green); }
+.bg-gradient-green-apple {
+  background: linear-gradient(135deg, #34C759 0%, #30D158 100%);
+}
+.bg-gradient-green-soft {
+  background: linear-gradient(135deg, #E5F5EB 0%, #D0EDD8 100%);
+}
+
+/* Orange — Warning */
+.text-apple-orange { color: var(--apple-orange); }
+.bg-apple-orange { background-color: var(--apple-orange); }
+.bg-gradient-orange-apple {
+  background: linear-gradient(135deg, #FF9500 0%, #FF951C 100%);
+}
+.bg-gradient-orange-soft {
+  background: linear-gradient(135deg, #FFF3E0 0%, #FFE8C8 100%);
+}
+
+/* Red — Destructive */
+.text-apple-red { color: var(--apple-red); }
+.bg-apple-red { background-color: var(--apple-red); }
+.bg-gradient-red-apple {
+  background: linear-gradient(135deg, #FF3B30 0%, #FF453A 100%);
+}
+.bg-gradient-red-soft {
+  background: linear-gradient(135deg, #FFE5E3 0%, #FFD5D0 100%);
+}
+
+/* Purple — Special */
+.text-apple-purple { color: var(--apple-purple); }
+.bg-apple-purple { background-color: var(--apple-purple); }
+.bg-gradient-purple-apple {
+  background: linear-gradient(135deg, #AF52DE 0%, #BF5AE0 100%);
+}
+.bg-gradient-purple-soft {
+  background: linear-gradient(135deg, #F5E6FA 0%, #EDD5F5 100%);
+}
+
+/* Pink */
+.text-apple-pink { color: var(--apple-pink); }
+.bg-apple-pink { background-color: var(--apple-pink); }
+.bg-gradient-pink-apple {
+  background: linear-gradient(135deg, #FF2D55 0%, #FF375F 100%);
+}
+.bg-gradient-pink-soft {
+  background: linear-gradient(135deg, #FFE6ED 0%, #FFD5E0 100%);
+}
+
+/* Teal */
+.text-apple-teal { color: var(--apple-teal); }
+.bg-apple-teal { background-color: var(--apple-teal); }
+.bg-gradient-teal-apple {
+  background: linear-gradient(135deg, #5AC8FA 0%, #64CAFC 100%);
+}
+.bg-gradient-teal-soft {
+  background: linear-gradient(135deg, #E6F7FE 0%, #D0F0FD 100%);
+}
+
+/* Gray */
+.text-apple-gray { color: var(--apple-gray-1); }
+.bg-apple-gray { background-color: var(--apple-gray-1); }
+
+/* =============================================
+   WHATSAPP BRAND COLORS
+   ============================================= */
+
+/* WhatsApp Green — Primary */
+.text-wa-green { color: var(--wa-green); }
+.bg-wa-green { background-color: var(--wa-green); }
+.bg-wa-gradient {
+  background: linear-gradient(135deg, #25D366 0%, #128C7E 100%);
+}
+.bg-wa-soft {
+  background: linear-gradient(135deg, rgba(37, 211, 102, 0.08) 0%, rgba(18, 140, 126, 0.08) 100%);
+}
+.bg-wa-badge {
+  background-color: rgba(37, 211, 102, 0.15);
+}
+.text-wa-badge {
+  color: #1a8a3a;
+}
+.shadow-wa {
+  box-shadow: 0 4px 16px rgba(37, 211, 102, 0.25);
+}
+
+/* WhatsApp Teal — Secondary */
+.text-wa-teal { color: var(--wa-teal); }
+.bg-wa-teal { background-color: var(--wa-teal); }
+.bg-wa-teal-gradient {
+  background: linear-gradient(135deg, #128C7E 0%, #075E54 100%);
+}
+.bg-wa-teal-soft {
+  background: rgba(18, 140, 126, 0.1);
+}
+.text-wa-dark { color: var(--wa-dark-teal); }
+.shadow-wa-teal {
+  box-shadow: 0 4px 16px rgba(18, 140, 126, 0.25);
+}
+
+/* Chat bubble gradients */
+.bg-wa-bubble-out {
+  background: linear-gradient(135deg, rgba(37, 211, 102, 0.12) 0%, rgba(37, 211, 102, 0.06) 100%);
+  border-left: 3px solid var(--wa-green);
+}
+.bg-wa-bubble-in {
+  background: linear-gradient(135deg, rgba(18, 140, 126, 0.08) 0%, rgba(18, 140, 126, 0.04) 100%);
+  border-left: 3px solid var(--wa-teal);
+}
+
+/* Status indicator — WhatsApp online green dot */
+.wt-online-dot {
+  width: 10px;
+  height: 10px;
+  background-color: var(--wa-green);
+  border-radius: 50%;
+  border: 2px solid white;
+  box-shadow: 0 0 0 2px var(--wa-green);
+  animation: wa-pulse 2s ease-in-out infinite;
+}
+@keyframes wa-pulse {
+  0%, 100% { box-shadow: 0 0 0 2px var(--wa-green); }
+  50% { box-shadow: 0 0 0 4px rgba(37, 211, 102, 0.3); }
+}
+
+/* WhatsApp gradient text */
+.text-gradient-wa {
+  background: linear-gradient(135deg, #25D366 0%, #128C7E 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* Platform CTA — WhatsApp brand applied to primary action */
+.btn-wa-primary {
+  background: linear-gradient(135deg, #25D366 0%, #128C7E 100%);
+  color: white;
+  box-shadow: 0 4px 16px rgba(37, 211, 102, 0.3);
+}
+.btn-wa-primary:hover {
+  background: linear-gradient(135deg, #20BD5A 0%, #0E7A6E 100%);
+  box-shadow: 0 6px 20px rgba(37, 211, 102, 0.4);
+  transform: translateY(-1px);
+}
+.btn-wa-primary:active {
+  transform: scale(0.97);
+}
+
+/* Glow variants */
+.glow-wa { box-shadow: 0 4px 20px rgba(37, 211, 102, 0.2); }
+.glow-wa-strong { box-shadow: 0 4px 24px rgba(37, 211, 102, 0.35); }
+
+/* Badge variants */
+.badge-wa-green {
+  background-color: rgba(37, 211, 102, 0.15);
+  color: #1a8a3a;
+  border: 1px solid rgba(37, 211, 102, 0.2);
+}
+
+/* Text Colors */
+.text-primary-apple { color: var(--apple-text-primary); }
+.text-secondary-apple { color: var(--apple-text-secondary); }
+.text-tertiary-apple { color: var(--apple-text-tertiary); }
+
+/* =============================================
+   APPLE CARD
+   ============================================= */
+.card-apple {
+  background: rgba(255, 255, 255, 0.88);
+  backdrop-filter: saturate(180%) blur(25px);
+  -webkit-backdrop-filter: saturate(180%) blur(25px);
+  border: 0.5px solid rgba(255, 255, 255, 0.7);
+  border-radius: 18px;
+  box-shadow:
+    0 2px 12px rgba(0, 0, 0, 0.04),
+    0 8px 24px rgba(0, 0, 0, 0.04),
+    inset 0 1px 0 rgba(255, 255, 255, 0.9);
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.card-apple:hover {
+  transform: translateY(-2px);
+  box-shadow:
+    0 4px 16px rgba(0, 0, 0, 0.06),
+    0 12px 32px rgba(0, 0, 0, 0.06),
+    inset 0 1px 0 rgba(255, 255, 255, 0.9);
+  border-color: rgba(255, 255, 255, 0.85);
+}
+
+/* =============================================
+   APPLE BUTTONS
+   ============================================= */
+.btn-apple {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 11px 22px;
+  border-radius: 12px;
+  font-weight: 600;
+  font-size: 15px;
+  letter-spacing: -0.01em;
+  cursor: pointer;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  border: none;
+  outline: none;
+  -webkit-tap-highlight-color: transparent;
+  user-select: none;
+}
+
+.btn-apple:active {
+  transform: scale(0.97);
+}
+
+/* Primary Blue Button */
+.btn-apple-blue {
+  background: linear-gradient(135deg, #007AFF 0%, #0A84FF 100%);
+  color: white;
+  box-shadow: 0 2px 8px rgba(0, 122, 255, 0.3);
+}
+.btn-apple-blue:hover {
+  background: linear-gradient(135deg, #0066D6 0%, #0072D9 100%);
+  box-shadow: 0 4px 14px rgba(0, 122, 255, 0.4);
+  transform: translateY(-1px);
+}
+
+/* Primary Green Button */
+.btn-apple-green {
+  background: linear-gradient(135deg, #34C759 0%, #30D158 100%);
+  color: white;
+  box-shadow: 0 2px 8px rgba(52, 199, 89, 0.3);
+}
+.btn-apple-green:hover {
+  background: linear-gradient(135deg, #2CAF4A 0%, #28B552 100%);
+  box-shadow: 0 4px 14px rgba(52, 199, 89, 0.4);
+  transform: translateY(-1px);
+}
+
+/* Outline Button */
+.btn-apple-outline {
+  background: transparent;
+  color: var(--apple-blue);
+  border: 1.5px solid var(--apple-blue);
+}
+.btn-apple-outline:hover {
+  background: rgba(0, 122, 255, 0.08);
+}
+
+/* Ghost Button */
+.btn-apple-ghost {
+  background: rgba(120, 120, 128, 0.12);
+  color: var(--apple-blue);
+}
+.btn-apple-ghost:hover {
+  background: rgba(120, 120, 128, 0.18);
+}
+
+/* Full Width */
+.btn-apple-full {
+  width: 100%;
+}
+
+/* =============================================
+   APPLE INPUT
+   ============================================= */
+.input-apple {
+  width: 100%;
+  padding: 13px 16px;
+  background: rgba(120, 120, 128, 0.08);
+  border: 0.5px solid rgba(0, 0, 0, 0.06);
+  border-radius: 12px;
+  font-size: 15px;
+  color: var(--apple-text-primary);
+  transition: all 0.2s ease;
+  letter-spacing: -0.01em;
+  outline: none;
+}
+
+.input-apple:focus {
+  background: white;
+  border-color: var(--apple-blue);
+  box-shadow: 0 0 0 4px rgba(0, 122, 255, 0.12);
+}
+
+.input-apple::placeholder {
+  color: var(--apple-text-tertiary);
+}
+
+/* =============================================
+   APPLE BADGE
+   ============================================= */
+.badge-apple {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border-radius: 10px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0;
+}
+
+/* =============================================
+   APPLE PROGRESS BAR
+   ============================================= */
+.progress-apple {
+  width: 100%;
+  height: 6px;
+  background: rgba(120, 120, 128, 0.12);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.progress-apple-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--apple-blue), #0A84FF);
+  border-radius: 3px;
+  transition: width 0.5s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* =============================================
+   APPLE SHADOWS & GLOWS
+   ============================================= */
+.shadow-apple-sm {
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06), 0 1px 2px rgba(0, 0, 0, 0.04);
+}
+.shadow-apple {
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.08), 0 2px 4px rgba(0, 0, 0, 0.04);
+}
+.shadow-apple-lg {
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1), 0 4px 8px rgba(0, 0, 0, 0.06);
+}
+.shadow-apple-blue {
+  box-shadow: 0 4px 16px rgba(0, 122, 255, 0.25);
+}
+.shadow-apple-green {
+  box-shadow: 0 4px 16px rgba(52, 199, 89, 0.25);
+}
+.shadow-apple-red {
+  box-shadow: 0 4px 16px rgba(255, 59, 48, 0.25);
+}
+
+/* =============================================
+   APPLE BACKGROUND EFFECTS
+   ============================================= */
+.bg-grid-apple {
+  background-image:
+    linear-gradient(rgba(37, 211, 102, 0.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(37, 211, 102, 0.03) 1px, transparent 1px);
+  background-size: 48px 48px;
+}
+
+/* Apple Hero Blobs */
+.blob-apple-1 {
+  position: absolute;
+  width: 600px;
+  height: 600px;
+  background: radial-gradient(circle, rgba(37, 211, 102, 0.14) 0%, rgba(37, 211, 102, 0.06) 50%, transparent 70%);
+  border-radius: 50%;
+  filter: blur(80px);
+  animation: blob-apple 10s ease-in-out infinite;
+  pointer-events: none;
+}
+
+.blob-apple-2 {
+  position: absolute;
+  width: 500px;
+  height: 500px;
+  background: radial-gradient(circle, rgba(18, 140, 126, 0.12) 0%, rgba(18, 140, 126, 0.04) 50%, transparent 70%);
+  border-radius: 50%;
+  filter: blur(70px);
+  animation: blob-apple 10s ease-in-out infinite;
+  animation-delay: -4s;
+  pointer-events: none;
+}
+
+.blob-apple-3 {
+  position: absolute;
+  width: 400px;
+  height: 400px;
+  background: radial-gradient(circle, rgba(0, 122, 255, 0.1) 0%, rgba(0, 122, 255, 0.03) 50%, transparent 70%);
+  border-radius: 50%;
+  filter: blur(50px);
+  animation: blob-apple 10s ease-in-out infinite;
+  animation-delay: -7s;
+  pointer-events: none;
+}
+
+@keyframes blob-apple {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  33% { transform: translate(30px, -45px) scale(1.04); }
+  66% { transform: translate(-20px, 20px) scale(0.97); }
+}
+
+/* ===== FLOAT ANIMATION ===== */
+@keyframes float-apple {
+  0%, 100% { transform: translateY(0px); }
+  50% { transform: translateY(-8px); }
+}
+
+.animate-float-apple {
+  animation: float-apple 5s ease-in-out infinite;
+}
+
+/* =============================================
+   APPLE STATUS BAR
+   ============================================= */
+.status-bar-apple {
+  height: 44px;
+  background: rgba(255, 255, 255, 0.78);
+  backdrop-filter: saturate(180%) blur(25px);
+  -webkit-backdrop-filter: saturate(180%) blur(25px);
+  border-radius: 16px;
+}
+
+/* =============================================
+   LEGACY COMPATIBILITY (maps to Apple tokens)
+   ============================================= */
+.bg-ios-gray { background-color: var(--apple-bg); }
+.text-ios-secondary { color: var(--apple-text-secondary); }
+.text-ios-dark { color: var(--apple-text-primary); }
+.text-primary-600 { color: var(--apple-blue); }
+.text-primary-500 { color: var(--apple-blue); }
+.text-primary-700 { color: #0060C7; }
+.bg-primary-100 { background-color: rgba(0, 122, 255, 0.1); }
+.bg-primary-500 { background-color: var(--apple-blue); }
+.bg-primary-600 { background-color: #0066D6; }
+.bg-black\/5 { background-color: rgba(0, 0, 0, 0.05); }
+.bg-black\/20 { background-color: rgba(0, 0, 0, 0.2); }
+.border-black\/5 { border-color: rgba(0, 0, 0, 0.05); }
+.border-black\/10 { border-color: rgba(0, 0, 0, 0.10); }
+.shadow-ios { box-shadow: 0 2px 12px rgba(0, 0, 0, 0.06), 0 1px 3px rgba(0, 0, 0, 0.04); }
+.shadow-ios-lg { box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1), 0 4px 8px rgba(0, 0, 0, 0.06); }
+.shadow-ios-green { box-shadow: 0 4px 16px rgba(52, 199, 89, 0.3); }
+.shadow-ios-blue { box-shadow: 0 4px 16px rgba(0, 122, 255, 0.3); }
+.shadow-ios-red { box-shadow: 0 4px 16px rgba(255, 59, 48, 0.3); }
+.glow-green { box-shadow: 0 4px 20px rgba(52, 199, 89, 0.2); }
+.glow-green-strong { box-shadow: 0 4px 24px rgba(52, 199, 89, 0.3); }
+.glow-blue { box-shadow: 0 4px 20px rgba(0, 122, 255, 0.2); }
+.glow-blue-strong { box-shadow: 0 4px 24px rgba(0, 122, 255, 0.3); }
+.rounded-ios { border-radius: 12px; }
+.rounded-ios-lg { border-radius: 16px; }
+.rounded-ios-xl { border-radius: 20px; }
+.rounded-ios-2xl { border-radius: 24px; }
+
+/* Legacy card */
+.card {
+  background: rgba(255, 255, 255, 0.88);
+  backdrop-filter: saturate(180%) blur(25px);
+  -webkit-backdrop-filter: saturate(180%) blur(25px);
+  border: 0.5px solid rgba(255, 255, 255, 0.7);
+  border-radius: 18px;
+  box-shadow:
+    0 2px 12px rgba(0, 0, 0, 0.04),
+    0 8px 24px rgba(0, 0, 0, 0.04),
+    inset 0 1px 0 rgba(255, 255, 255, 0.9);
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.card:hover {
+  transform: translateY(-2px);
+  box-shadow:
+    0 4px 16px rgba(0, 0, 0, 0.06),
+    0 12px 32px rgba(0, 0, 0, 0.06),
+    inset 0 1px 0 rgba(255, 255, 255, 0.9);
+  border-color: rgba(255, 255, 255, 0.85);
+}
+
+/* Legacy buttons */
+.btn-primary {
+  background: linear-gradient(135deg, #007AFF 0%, #0A84FF 100%);
+  color: white;
+  border: none;
+  padding: 11px 22px;
+  border-radius: 12px;
+  font-weight: 600;
+  font-size: 15px;
+  cursor: pointer;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  box-shadow: 0 2px 8px rgba(0, 122, 255, 0.3);
+  letter-spacing: -0.01em;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.btn-primary:hover {
+  background: linear-gradient(135deg, #0066D6 0%, #0072D9 100%);
+  box-shadow: 0 4px 14px rgba(0, 122, 255, 0.4);
+  transform: translateY(-1px);
+}
+
+.btn-primary:active {
+  transform: scale(0.97);
+  box-shadow: 0 1px 4px rgba(0, 122, 255, 0.3);
+}
+
+.btn-outline {
+  background: transparent;
+  color: var(--apple-blue);
+  border: 1.5px solid var(--apple-blue);
+  padding: 10px 22px;
+  border-radius: 12px;
+  font-weight: 600;
+  font-size: 15px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.btn-outline:hover {
+  background: rgba(0, 122, 255, 0.08);
+}
+
+/* Legacy input */
+.input {
+  width: 100%;
+  padding: 13px 16px;
+  background: rgba(120, 120, 128, 0.08);
+  border: 0.5px solid rgba(0, 0, 0, 0.06);
+  border-radius: 12px;
+  font-size: 15px;
+  color: var(--apple-text-primary);
+  transition: all 0.2s ease;
+  letter-spacing: -0.01em;
+  outline: none;
+}
+
+.input:focus {
+  background: white;
+  border-color: var(--apple-blue);
+  box-shadow: 0 0 0 4px rgba(0, 122, 255, 0.12);
+}
+
+.input::placeholder {
+  color: var(--apple-text-tertiary);
+}
+
+/* Progress bar legacy */
+.progress-bar {
+  width: 100%;
+  height: 6px;
+  background: rgba(120, 120, 128, 0.12);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.progress-bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--apple-blue), #0A84FF);
+  border-radius: 3px;
+  transition: width 0.5s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* ===== GRADIENTS ===== */
+.bg-gradient-blue {
+  background: linear-gradient(135deg, #007AFF 0%, #0A84FF 100%);
+}
+
+.bg-gradient-green {
+  background: linear-gradient(135deg, #34C759 0%, #30D158 100%);
+}
+
+.bg-gradient-hero {
+  background: linear-gradient(135deg, #1D1D1F 0%, #2D2D30 50%, #1D1D1F 100%);
+}
+
+/* ===== LEGACY BLOB (maps to apple blobs) ===== */
+.blob-1 {
+  position: absolute;
+  width: 600px;
+  height: 600px;
+  background: radial-gradient(circle, rgba(0, 122, 255, 0.14) 0%, rgba(0, 122, 255, 0.06) 50%, transparent 70%);
+  border-radius: 50%;
+  filter: blur(80px);
+  animation: blob-apple 10s ease-in-out infinite;
+  pointer-events: none;
+}
+
+.blob-2 {
+  position: absolute;
+  width: 500px;
+  height: 500px;
+  background: radial-gradient(circle, rgba(88, 86, 214, 0.12) 0%, rgba(88, 86, 214, 0.04) 50%, transparent 70%);
+  border-radius: 50%;
+  filter: blur(70px);
+  animation: blob-apple 10s ease-in-out infinite;
+  animation-delay: -4s;
+  pointer-events: none;
+}
+
+.blob-3 {
+  position: absolute;
+  width: 400px;
+  height: 400px;
+  background: radial-gradient(circle, rgba(52, 199, 89, 0.1) 0%, rgba(52, 199, 89, 0.03) 50%, transparent 70%);
+  border-radius: 50%;
+  filter: blur(50px);
+  animation: blob-apple 10s ease-in-out infinite;
+  animation-delay: -7s;
+  pointer-events: none;
+}
+
+/* Legacy badge */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border-radius: 10px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0;
+}
+
+.badge-green {
+  background: rgba(52, 199, 89, 0.12);
+  color: #248a3d;
+}
+
+/* Legacy animate-float */
+.animate-float {
+  animation: float-apple 5s ease-in-out infinite;
+}
+
+/* Status bar legacy */
+.status-bar {
+  height: 44px;
+  background: rgba(255, 255, 255, 0.78);
+  backdrop-filter: saturate(180%) blur(25px);
+  -webkit-backdrop-filter: saturate(180%) blur(25px);
+  border-radius: 16px;
+}
+
+/* bg-grid-green legacy */
+.bg-grid-green {
+  background-image:
+    linear-gradient(rgba(0, 122, 255, 0.025) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(0, 122, 255, 0.025) 1px, transparent 1px);
+  background-size: 48px 48px;
+}
+
+/* ===== TEXT GRADIENT ===== */
+.text-gradient-blue {
+  background: linear-gradient(135deg, #007AFF 0%, #0A84FF 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.text-gradient-green {
+  background: linear-gradient(135deg, #34C759 0%, #30D158 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
