@@ -6,8 +6,473 @@
 
 import { FastifyInstance } from 'fastify';
 import { z } from 'zod';
+import crypto from 'crypto';
+import {
+  getMetaAuthUrl,
+  exchangeCodeForToken,
+  getLongLivedToken,
+  getWhatsAppBusinessAccounts,
+  getPhoneNumbers,
+  verifyPhoneNumber,
+  requestPhoneVerification,
+  verifyPhoneCode,
+  setupWebhook,
+  type MetaOAuthConfig,
+} from '../services/metaOAuth.js';
 
 export async function registerWhatsAppRoutes(app: FastifyInstance): Promise<void> {
+
+  // ============================================
+  // META OAUTH EMBEDDED SIGNUP FLOW
+  // ============================================
+
+  /**
+   * GET /whatsapp/oauth/url - Get Meta OAuth URL for onboarding
+   */
+  app.get('/whatsapp/oauth/url', async (request, reply) => {
+    if (!request.authUser.tenantId) {
+      return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
+    }
+
+    // Get platform Meta credentials
+    const config: MetaOAuthConfig = {
+      appId: process.env.META_APP_ID || '',
+      appSecret: process.env.META_APP_SECRET || '',
+      redirectUri: `${process.env.APP_URL || 'http://localhost:3001'}/api/v1/whatsapp/oauth/callback`,
+    };
+
+    if (!config.appId || !config.appSecret) {
+      return reply.status(400).send({
+        success: false,
+        error: {
+          code: 'META_NOT_CONFIGURED',
+          message: 'Meta App credentials not configured. Please contact support.',
+        },
+      });
+    }
+
+    // Generate state token for CSRF protection (contains tenant ID)
+    const state = Buffer.from(JSON.stringify({
+      tenantId: request.authUser.tenantId,
+      userId: request.authUser.id,
+      nonce: crypto.randomBytes(16).toString('hex'),
+    })).toString('base64');
+
+    const authUrl = getMetaAuthUrl(config, state);
+
+    return { success: true, data: { authUrl, state } };
+  });
+
+  /**
+   * GET /whatsapp/oauth/callback - Handle Meta OAuth callback
+   */
+  app.get('/whatsapp/oauth/callback', async (request, reply) => {
+    const { code, state, error, error_reason } = request.query as {
+      code?: string;
+      state?: string;
+      error?: string;
+      error_reason?: string;
+    };
+
+    // Handle OAuth error
+    if (error) {
+      return reply.redirect(`/whatsapp-settings?error=${encodeURIComponent(error_reason || error)}`);
+    }
+
+    if (!code || !state) {
+      return reply.redirect('/whatsapp-settings?error=missing_params');
+    }
+
+    // Decode and validate state
+    let stateData: { tenantId: string; userId: string; nonce: string };
+    try {
+      stateData = JSON.parse(Buffer.from(state, 'base64').toString());
+    } catch {
+      return reply.redirect('/whatsapp-settings?error=invalid_state');
+    }
+
+    // Verify the tenant matches
+    if (stateData.tenantId !== request.authUser.tenantId) {
+      return reply.redirect('/whatsapp-settings?error=tenant_mismatch');
+    }
+
+    try {
+      const config: MetaOAuthConfig = {
+        appId: process.env.META_APP_ID || '',
+        appSecret: process.env.META_APP_SECRET || '',
+        redirectUri: `${process.env.APP_URL || 'http://localhost:3001'}/api/v1/whatsapp/oauth/callback`,
+      };
+
+      // Exchange code for short-lived token
+      const shortLivedToken = await exchangeCodeForToken(config, code);
+
+      // Get long-lived token (valid for 60 days)
+      const longLivedToken = await getLongLivedToken(config, shortLivedToken.access_token);
+
+      // Get WhatsApp Business Accounts
+      const wabas = await getWhatsAppBusinessAccounts(longLivedToken.access_token);
+
+      // Store credentials and WABAs in tenant settings
+      await app.prisma.whatsAppCredentials.upsert({
+        where: { tenantId: stateData.tenantId },
+        create: {
+          tenantId: stateData.tenantId,
+          accessToken: longLivedToken.access_token,
+          // Don't store app secret directly - keep in env
+        },
+        update: {
+          accessToken: longLivedToken.access_token,
+        },
+      });
+
+      // Store WABAs for selection
+      // Return to frontend for user to select WABA and phone number
+      return reply.redirect(`/whatsapp-settings?oauth=success&wabas=${encodeURIComponent(JSON.stringify(wabas))}`);
+
+    } catch (err: any) {
+      app.log.error('Meta OAuth error:', err.message);
+      return reply.redirect(`/whatsapp-settings?error=${encodeURIComponent(err.message)}`);
+    }
+  });
+
+  /**
+   * POST /whatsapp/oauth/select-waba - Select a WABA and get phone numbers
+   */
+  app.post('/whatsapp/oauth/select-waba', async (request, reply) => {
+    if (!request.authUser.tenantId) {
+      return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
+    }
+
+    const schema = z.object({
+      wabaId: z.string(),
+      wabaName: z.string(),
+    });
+
+    const { wabaId, wabaName } = schema.parse(request.body);
+
+    // Get stored access token
+    const credentials = await app.prisma.whatsAppCredentials.findUnique({
+      where: { tenantId: request.authUser.tenantId },
+    });
+
+    if (!credentials?.accessToken) {
+      return reply.status(400).send({
+        success: false,
+        error: { code: 'NO_TOKEN', message: 'Please complete Meta OAuth first' },
+      });
+    }
+
+    // Get phone numbers for selected WABA
+    const phoneNumbers = await getPhoneNumbers(credentials.accessToken, wabaId);
+
+    // Store WABA info
+    await app.prisma.whatsAppCredentials.update({
+      where: { tenantId: request.authUser.tenantId },
+      data: {
+        wabaId: wabaId,
+        wabaName: wabaName,
+      },
+    });
+
+    return {
+      success: true,
+      data: {
+        wabaId,
+        wabaName,
+        phoneNumbers,
+      },
+    };
+  });
+
+  /**
+   * POST /whatsapp/oauth/connect-phone - Connect a specific phone number
+   */
+  app.post('/whatsapp/oauth/connect-phone', async (request, reply) => {
+    if (!request.authUser.tenantId) {
+      return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
+    }
+
+    const schema = z.object({
+      phoneNumberId: z.string(),
+      displayName: z.string().optional(),
+    });
+
+    const { phoneNumberId, displayName } = schema.parse(request.body);
+
+    // Get stored access token
+    const credentials = await app.prisma.whatsAppCredentials.findUnique({
+      where: { tenantId: request.authUser.tenantId },
+    });
+
+    if (!credentials?.accessToken || !credentials.wabaId) {
+      return reply.status(400).send({
+        success: false,
+        error: { code: 'NO_TOKEN', message: 'Please complete Meta OAuth first' },
+      });
+    }
+
+    // Verify phone number ownership
+    const verifiedPhone = await verifyPhoneNumber(credentials.accessToken, credentials.wabaId, phoneNumberId);
+
+    if (!verifiedPhone) {
+      return reply.status(400).send({
+        success: false,
+        error: { code: 'VERIFICATION_FAILED', message: 'Could not verify phone number ownership' },
+      });
+    }
+
+    // Create phone number record
+    const phone = await app.prisma.phoneNumber.create({
+      data: {
+        tenantId: request.authUser.tenantId,
+        phoneNumber: verifiedPhone.display_phone_number,
+        displayName: displayName || verifiedPhone.verified_name,
+        metaPhoneId: phoneNumberId,
+        wabaId: credentials.wabaId,
+        status: 'connected',
+        canSendMarketing: true,
+        canSendUtility: true,
+        canSendAuth: true,
+      },
+    });
+
+    // Setup webhook for this phone number
+    await setupWebhook(
+      credentials.accessToken,
+      credentials.wabaId,
+      phoneNumberId,
+      `${process.env.APP_URL || 'http://localhost:3001'}/api/v1/webhooks/whatsapp`,
+      process.env.META_WEBHOOK_VERIFY_TOKEN || 'whatsapp_webhook_verify_token'
+    );
+
+    return {
+      success: true,
+      data: phone,
+      message: 'Phone number connected successfully!',
+    };
+  });
+
+  // ============================================
+  // WHATSAPP HEALTH CENTER - Connection Status Overview
+  // ============================================
+
+  /**
+   * GET /whatsapp/health - Get WhatsApp connection health status
+   */
+  app.get('/whatsapp/health', async (request, reply) => {
+    if (!request.authUser.tenantId) {
+      return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
+    }
+
+    // Get credentials
+    const credentials = await app.prisma.whatsAppCredentials.findUnique({
+      where: { tenantId: request.authUser.tenantId },
+    });
+
+    // Get all phone numbers with usage stats
+    const phoneNumbers = await app.prisma.phoneNumber.findMany({
+      where: { tenantId: request.authUser.tenantId },
+      include: {
+        _count: {
+          select: {
+            messages: true,
+          },
+        },
+      },
+    });
+
+    // Calculate health metrics
+    const connectedCount = phoneNumbers.filter(p => p.status === 'connected').length;
+    const disconnectedCount = phoneNumbers.filter(p => p.status === 'disconnected').length;
+
+    // Get token expiry info (estimate from stored token)
+    const tokenStatus = credentials?.accessToken
+      ? { isValid: true, hasToken: true }
+      : { isValid: false, hasToken: false, needsReauth: true };
+
+    // Get recent webhook activity (last 24 hours)
+    const last24Hours = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    const recentWebhookActivity = await app.prisma.webhookLog.count({
+      where: {
+        tenantId: request.authUser.tenantId,
+        createdAt: { gte: last24Hours },
+      },
+    });
+
+    return {
+      success: true,
+      data: {
+        overall: {
+          connected: connectedCount,
+          disconnected: disconnectedCount,
+          total: phoneNumbers.length,
+          healthScore: phoneNumbers.length > 0
+            ? Math.round((connectedCount / phoneNumbers.length) * 100)
+            : 0,
+        },
+        credentials: {
+          hasToken: !!credentials?.accessToken,
+          tokenStatus: tokenStatus.isValid ? 'valid' : 'missing',
+          needsReauth: tokenStatus.needsReauth,
+        },
+        webhook: {
+          recentActivity: recentWebhookActivity,
+          configured: !!credentials?.webhookUrl,
+        },
+        phones: phoneNumbers.map(p => ({
+          id: p.id,
+          phoneNumber: p.phoneNumber,
+          displayName: p.displayName,
+          status: p.status,
+          qualityScore: p.qualityScore,
+          wabaId: p.wabaId,
+          metaPhoneId: p.metaPhoneId,
+          verifiedAt: p.verifiedAt,
+          canSendMarketing: p.canSendMarketing,
+          canSendUtility: p.canSendUtility,
+          canSendAuth: p.canSendAuth,
+          dailySentLimit: p.dailySentLimit,
+          todaySentCount: p.todaySentCount,
+          messagesLast30Days: p._count.messages,
+        })),
+      },
+    };
+  });
+
+  /**
+   * GET /whatsapp/health/:phoneId - Get detailed health for specific phone
+   */
+  app.get('/whatsapp/health/:phoneId', async (request, reply) => {
+    if (!request.authUser.tenantId) {
+      return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
+    }
+
+    const { phoneId } = z.object({ phoneId: z.string() }).parse(request.params);
+
+    const phone = await app.prisma.phoneNumber.findFirst({
+      where: { id: phoneId, tenantId: request.authUser.tenantId },
+    });
+
+    if (!phone) {
+      return reply.status(404).send({ success: false, error: { code: 'NOT_FOUND' } });
+    }
+
+    // Get message stats for last 30 days
+    const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    const messages = await app.prisma.message.findMany({
+      where: {
+        phoneNumberId: phoneId,
+        createdAt: { gte: thirtyDaysAgo },
+      },
+      select: { status: true, createdAt: true },
+    });
+
+    // Calculate delivery metrics
+    const sent = messages.filter(m => m.status === 'SENT').length;
+    const delivered = messages.filter(m => m.status === 'DELIVERED').length;
+    const read = messages.filter(m => m.status === 'READ').length;
+    const failed = messages.filter(m => m.status === 'FAILED').length;
+
+    // Get last webhook received
+    const lastWebhook = await app.prisma.webhookLog.findFirst({
+      where: { tenantId: request.authUser.tenantId },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    // Get quality trends (if available)
+    const qualityHistory = await app.prisma.phoneNumberQualityLog.findMany({
+      where: { phoneNumberId: phoneId },
+      orderBy: { createdAt: 'desc' },
+      take: 30,
+    });
+
+    return {
+      success: true,
+      data: {
+        phone: {
+          id: phone.id,
+          phoneNumber: phone.phoneNumber,
+          displayName: phone.displayName,
+          status: phone.status,
+          qualityScore: phone.qualityScore,
+          verifiedAt: phone.verifiedAt,
+          canSendMarketing: phone.canSendMarketing,
+          canSendUtility: phone.canSendUtility,
+          canSendAuth: phone.canSendAuth,
+        },
+        metrics: {
+          last30Days: {
+            totalSent: messages.length,
+            delivered,
+            read,
+            failed,
+            deliveryRate: sent > 0 ? Math.round((delivered / sent) * 100) : 0,
+            readRate: delivered > 0 ? Math.round((read / delivered) * 100) : 0,
+          },
+          limits: {
+            dailyLimit: phone.dailySentLimit,
+            todaySent: phone.todaySentCount,
+            remaining: phone.dailySentLimit - phone.todaySentCount,
+          },
+        },
+        webhook: {
+          lastReceived: lastWebhook?.createdAt || null,
+          lastEventType: lastWebhook?.event || null,
+        },
+        qualityHistory,
+      },
+    };
+  });
+
+  // ============================================
+  // WEBHOOK LOGS - Developer Webhook Debugging UI
+  // ============================================
+
+  /**
+   * GET /whatsapp/webhook-logs - Get webhook activity logs
+   */
+  app.get('/whatsapp/webhook-logs', async (request, reply) => {
+    if (!request.authUser.tenantId) {
+      return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
+    }
+
+    const query = z.object({
+      page: z.coerce.number().min(1).default(1),
+      limit: z.coerce.number().min(1).max(100).default(20),
+      phoneId: z.string().optional(),
+      eventType: z.string().optional(),
+      status: z.string().optional(),
+    }).parse(request.query);
+
+    const { page, limit, phoneId, eventType, status } = query;
+    const skip = (page - 1) * limit;
+
+    const where: any = { tenantId: request.authUser.tenantId };
+    if (phoneId) where.phoneNumberId = phoneId;
+    if (eventType) where.event = eventType;
+    if (status) where.status = status;
+
+    const [logs, total] = await Promise.all([
+      app.prisma.webhookLog.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        skip,
+        take: limit,
+      }),
+      app.prisma.webhookLog.count({ where }),
+    ]);
+
+    return {
+      success: true,
+      data: logs,
+      meta: {
+        page,
+        limit,
+        total,
+        totalPages: Math.ceil(total / limit),
+      },
+    };
+  });
 
   // ============================================
   // GET /whatsapp/phone-numbers — List tenant's phone numbers
