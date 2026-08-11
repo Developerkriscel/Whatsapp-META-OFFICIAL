@@ -4,6 +4,7 @@ import { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { requirePermission } from '../middleware/auth.js';
 import { WhatsAppAPIClient, getDefaultConfig } from '@whatsapp-saas/config/guards';
+import { syncTemplatesFromMeta, submitTemplateToMeta, fetchMetaTemplates } from '../services/metaTemplate.js';
 
 // Validation schemas
 const paginationSchema = z.object({
@@ -36,11 +37,29 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
     if (days < 7) return `${days} days ago`;
     return new Date(date).toLocaleDateString();
   }
+
+  /**
+   * Normalize phone number for consistent storage and comparison
+   * - Removes spaces, dashes, parentheses
+   * - Ensures E.164 format with leading +
+   */
+  function normalizePhone(phone: string): string {
+    // Remove all non-digit characters except leading +
+    let normalized = phone.replace(/[^\d+]/g, '');
+
+    // Ensure leading + for E.164 format
+    if (!normalized.startsWith('+')) {
+      normalized = '+' + normalized;
+    }
+
+    return normalized;
+  }
   // ============================================
   // DASHBOARD
   // ============================================
 
-  app.get('/dashboard', async (request, reply) => {
+  // Main dashboard overview endpoint (alias)
+  app.get('/dashboard/overview', async (request, reply) => {
     const tenantId = request.authUser.tenantId;
 
     if (!tenantId) {
@@ -69,6 +88,59 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
     ]);
 
     // Calculate delivery rate
+    const messageStats = await app.prisma.message.groupBy({
+      by: ['status'],
+      where: { tenantId, direction: 'OUTGOING', createdAt: { gte: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) } },
+      _count: true,
+    });
+
+    const totalSent = messageStats.reduce((sum, s) => sum + s._count, 0);
+    const delivered = messageStats.find(s => s.status === 'DELIVERED')?._count || 0;
+    const read = messageStats.find(s => s.status === 'READ')?._count || 0;
+
+    return {
+      success: true,
+      data: {
+        totalContacts,
+        totalConversations,
+        openConversations,
+        messagesThisMonth,
+        activeAgents,
+        deliveryRate: totalSent > 0 ? Math.round((delivered / totalSent) * 100) : 0,
+        readRate: delivered > 0 ? Math.round((read / delivered) * 100) : 0,
+      },
+    };
+  });
+
+  // Alias /dashboard to /dashboard/overview
+  app.get('/dashboard', async (request, reply) => {
+    // Redirect to the overview handler
+    const tenantId = request.authUser.tenantId;
+
+    if (!tenantId) {
+      return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
+    }
+
+    const [
+      totalContacts,
+      totalConversations,
+      openConversations,
+      messagesThisMonth,
+      activeAgents,
+    ] = await Promise.all([
+      app.prisma.contact.count({ where: { tenantId, isActive: true } }),
+      app.prisma.conversation.count({ where: { tenantId } }),
+      app.prisma.conversation.count({ where: { tenantId, status: 'OPEN' } }),
+      app.prisma.message.count({
+        where: {
+          tenantId,
+          direction: 'OUTGOING',
+          createdAt: { gte: new Date(new Date().setDate(1)) },
+        },
+      }),
+      app.prisma.user.count({ where: { tenantId, isActive: true, role: { in: ['AGENT', 'MANAGER', 'ADMIN', 'OWNER'] } } }),
+    ]);
+
     const messageStats = await app.prisma.message.groupBy({
       by: ['status'],
       where: { tenantId, direction: 'OUTGOING', createdAt: { gte: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) } },
@@ -280,6 +352,29 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
 
     const { tags, email, ...rest } = schema.parse(request.body);
 
+    // Normalize phone number: remove spaces, dashes, parentheses
+    const normalizedPhone = normalizePhone(rest.phone);
+
+    // Check for existing contact by normalized phone (tenant-scoped)
+    const existingContact = await app.prisma.contact.findFirst({
+      where: {
+        tenantId: request.authUser.tenantId,
+        phone: normalizedPhone,
+      },
+    });
+
+    if (existingContact) {
+      return reply.status(409).send({
+        success: false,
+        error: {
+          code: 'DUPLICATE_CONTACT',
+          message: 'A contact with this phone number already exists',
+          existingContactId: existingContact.id,
+          existingContactName: existingContact.name || 'Unknown',
+        },
+      });
+    }
+
     // Plan contact limit enforcement
     const tenant = await app.prisma.tenant.findUnique({
       where: { id: request.authUser.tenantId },
@@ -305,7 +400,8 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
 
     const contact = await app.prisma.contact.create({
       data: {
-        ...rest,
+        phone: normalizedPhone,
+        name: rest.name,
         email: email || undefined,
         tenantId: request.authUser.tenantId,
       },
@@ -425,6 +521,8 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
             company: contact.company,
             country: 'US',
             isActive: true,
+            consentStatus: 'UNKNOWN', // Imported contacts need explicit consent
+            consentSource: 'import',
           },
         });
         results.imported++;
@@ -470,6 +568,179 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
     reply.header('Content-Type', 'text/csv');
     reply.header('Content-Disposition', `attachment; filename="contacts-export-${new Date().toISOString().split('T')[0]}.csv"`);
     return csvRows;
+  });
+
+  // ============================================
+  // CONTACT CONSENT MANAGEMENT
+  // ============================================
+
+  /**
+   * GET /contacts/consent-stats - Get consent statistics
+   */
+  app.get('/contacts/consent-stats', async (request, reply) => {
+    if (!request.authUser.tenantId) {
+      return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
+    }
+
+    const [optedIn, optedOut, unknown] = await Promise.all([
+      app.prisma.contact.count({
+        where: { tenantId: request.authUser.tenantId, consentStatus: 'OPTED_IN' },
+      }),
+      app.prisma.contact.count({
+        where: { tenantId: request.authUser.tenantId, consentStatus: 'OPTED_OUT' },
+      }),
+      app.prisma.contact.count({
+        where: { tenantId: request.authUser.tenantId, consentStatus: 'UNKNOWN' },
+      }),
+    ]);
+
+    return {
+      success: true,
+      data: {
+        optedIn,
+        optedOut,
+        unknown,
+        total: optedIn + optedOut + unknown,
+        consentRate: optedIn + optedOut > 0
+          ? Math.round((optedIn / (optedIn + optedOut + unknown)) * 100)
+          : 0,
+      },
+    };
+  });
+
+  /**
+   * POST /contacts/:contactId/opt-in - Opt contact in for marketing
+   */
+  app.post('/contacts/:contactId/opt-in', async (request, reply) => {
+    if (!request.authUser.tenantId) {
+      return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
+    }
+
+    const { contactId } = z.object({ contactId: z.string() }).parse(request.params);
+
+    const contact = await app.prisma.contact.findFirst({
+      where: { id: contactId, tenantId: request.authUser.tenantId },
+    });
+
+    if (!contact) {
+      return reply.status(404).send({ success: false, error: { code: 'NOT_FOUND' } });
+    }
+
+    const updated = await app.prisma.contact.update({
+      where: { id: contactId },
+      data: {
+        consentStatus: 'OPTED_IN',
+        optInAt: new Date(),
+        blocked: false,
+        consentSource: 'manual',
+      },
+    });
+
+    return { success: true, data: updated };
+  });
+
+  /**
+   * POST /contacts/:contactId/opt-out - Opt contact out (STOP)
+   */
+  app.post('/contacts/:contactId/opt-out', async (request, reply) => {
+    if (!request.authUser.tenantId) {
+      return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
+    }
+
+    const { contactId } = z.object({ contactId: z.string() }).parse(request.params);
+
+    const contact = await app.prisma.contact.findFirst({
+      where: { id: contactId, tenantId: request.authUser.tenantId },
+    });
+
+    if (!contact) {
+      return reply.status(404).send({ success: false, error: { code: 'NOT_FOUND' } });
+    }
+
+    const updated = await app.prisma.contact.update({
+      where: { id: contactId },
+      data: {
+        consentStatus: 'OPTED_OUT',
+        optOutAt: new Date(),
+        blocked: true,
+        consentSource: contact.consentSource || 'manual',
+      },
+    });
+
+    // Create notification
+    await app.prisma.notification.create({
+      data: {
+        tenantId: request.authUser.tenantId!,
+        type: 'CONTACT_OPT_OUT',
+        title: 'Contact Opted Out',
+        message: `${contact.name || contact.phone} has opted out from marketing messages`,
+        priority: 'NORMAL',
+      },
+    });
+
+    return { success: true, data: updated };
+  });
+
+  /**
+   * POST /contacts/bulk-opt-in - Bulk opt-in contacts
+   */
+  app.post('/contacts/bulk-opt-in', async (request, reply) => {
+    if (!request.authUser.tenantId) {
+      return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
+    }
+
+    const schema = z.object({
+      contactIds: z.array(z.string()).min(1).max(1000),
+    });
+
+    const { contactIds } = schema.parse(request.body);
+
+    const result = await app.prisma.contact.updateMany({
+      where: {
+        id: { in: contactIds },
+        tenantId: request.authUser.tenantId,
+        consentStatus: { not: 'OPTED_IN' },
+      },
+      data: {
+        consentStatus: 'OPTED_IN',
+        optInAt: new Date(),
+        blocked: false,
+        consentSource: 'bulk_import',
+      },
+    });
+
+    return { success: true, data: { updated: result.count } };
+  });
+
+  /**
+   * POST /contacts/bulk-opt-out - Bulk opt-out contacts
+   */
+  app.post('/contacts/bulk-opt-out', async (request, reply) => {
+    if (!request.authUser.tenantId) {
+      return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
+    }
+
+    const schema = z.object({
+      contactIds: z.array(z.string()).min(1).max(1000),
+    });
+
+    const { contactIds } = schema.parse(request.body);
+
+    const result = await app.prisma.contact.updateMany({
+      where: {
+        id: { in: contactIds },
+        tenantId: request.authUser.tenantId,
+        consentStatus: { not: 'OPTED_OUT' },
+      },
+      data: {
+        consentStatus: 'OPTED_OUT',
+        optOutAt: new Date(),
+        blocked: true,
+        consentSource: 'bulk_import',
+      },
+    });
+
+    return { success: true, data: { updated: result.count } };
   });
 
   // ============================================
@@ -602,6 +873,26 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
     }
 
     return { success: true, data: conversation };
+  });
+
+  app.get('/conversations/:conversationId/messages', async (request, reply) => {
+    const { conversationId } = z.object({ conversationId: z.string() }).parse(request.params);
+
+    const conversation = await app.prisma.conversation.findFirst({
+      where: { id: conversationId, tenantId: request.authUser.tenantId },
+      include: {
+        messages: {
+          orderBy: { createdAt: 'asc' },
+          include: { sender: { select: { id: true, name: true, avatarUrl: true } } },
+        },
+      },
+    });
+
+    if (!conversation) {
+      return reply.status(404).send({ success: false, error: { code: 'NOT_FOUND', message: 'Conversation not found' } });
+    }
+
+    return { success: true, data: conversation.messages };
   });
 
   app.patch('/conversations/:conversationId', async (request, reply) => {
@@ -937,6 +1228,32 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
     };
   });
 
+  /**
+   * GET /campaigns/:campaignId - Get single campaign
+   */
+  app.get('/campaigns/:campaignId', async (request, reply) => {
+    if (!request.authUser.tenantId) {
+      return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
+    }
+
+    const { campaignId } = z.object({ campaignId: z.string() }).parse(request.params);
+
+    const campaign = await app.prisma.campaign.findFirst({
+      where: { id: campaignId, tenantId: request.authUser.tenantId },
+      include: {
+        template: true,
+        phoneNumber: true,
+        createdBy: { select: { id: true, name: true, email: true } },
+      },
+    });
+
+    if (!campaign) {
+      return reply.status(404).send({ success: false, error: { code: 'NOT_FOUND', message: 'Campaign not found' } });
+    }
+
+    return { success: true, data: campaign };
+  });
+
   app.post('/campaigns', async (request, reply) => {
     const schema = z.object({
       name: z.string().min(1),
@@ -974,6 +1291,11 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
         where: { segmentId: { in: body.segmentIds } },
       });
       totalRecipients = segmentContacts.length;
+    } else if (body.audienceType === 'all') {
+      // Count all active contacts for 'all' audience type
+      totalRecipients = await app.prisma.contact.count({
+        where: { tenantId: request.authUser.tenantId, isActive: true },
+      });
     }
 
     const campaign = await app.prisma.campaign.create({
@@ -1346,10 +1668,113 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
       data: { status: 'PENDING', submittedAt: new Date() },
     });
 
-    // TODO: In production, this would submit to Meta WhatsApp API
-    // For now, we just update the local status
+    // Submit to Meta WhatsApp API
+    const credentials = await app.prisma.whatsAppCredentials.findUnique({
+      where: { tenantId: request.authUser.tenantId! },
+    });
+
+    if (credentials?.accessToken && credentials.wabaId) {
+      try {
+        const metaResult = await submitTemplateToMeta(credentials.accessToken, credentials.wabaId, {
+          name: template.name,
+          category: template.category,
+          language: template.language,
+          components: template.components as any || [],
+        });
+
+        // Update with Meta template ID
+        await app.prisma.template.update({
+          where: { id: templateId },
+          data: { metaTemplateId: metaResult.id },
+        });
+      } catch (error: any) {
+        // If Meta submission fails, revert to DRAFT
+        await app.prisma.template.update({
+          where: { id: templateId },
+          data: { status: 'DRAFT', submittedAt: null },
+        });
+        return reply.status(400).send({
+          success: false,
+          error: {
+            code: 'META_SUBMIT_FAILED',
+            message: `Failed to submit to Meta: ${error.message}`,
+          },
+        });
+      }
+    }
 
     return { success: true, data: updated };
+  });
+
+  /**
+   * POST /templates/sync - Sync templates from Meta WhatsApp API
+   */
+  app.post('/templates/sync', async (request, reply) => {
+    if (!request.authUser.tenantId) {
+      return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
+    }
+
+    try {
+      const result = await syncTemplatesFromMeta(app.prisma, request.authUser.tenantId);
+
+      return {
+        success: true,
+        data: {
+          message: `Synced ${result.synced} new templates, updated ${result.updated} existing templates`,
+          synced: result.synced,
+          updated: result.updated,
+          errors: result.errors,
+        },
+      };
+    } catch (error: any) {
+      return reply.status(400).send({
+        success: false,
+        error: {
+          code: 'SYNC_FAILED',
+          message: error.message,
+        },
+      });
+    }
+  });
+
+  /**
+   * GET /templates/meta - List templates from Meta (without saving)
+   */
+  app.get('/templates/meta', async (request, reply) => {
+    if (!request.authUser.tenantId) {
+      return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
+    }
+
+    const credentials = await app.prisma.whatsAppCredentials.findUnique({
+      where: { tenantId: request.authUser.tenantId },
+    });
+
+    if (!credentials?.accessToken || !credentials.wabaId) {
+      return reply.status(400).send({
+        success: false,
+        error: {
+          code: 'NOT_CONNECTED',
+          message: 'WhatsApp Business Account not connected',
+        },
+      });
+    }
+
+    try {
+      const templates = await fetchMetaTemplates(credentials.accessToken, credentials.wabaId);
+
+      return {
+        success: true,
+        data: templates,
+      };
+    } catch (error: any) {
+      return reply.status(400).send({
+        success: false,
+        error: {
+          code: 'FETCH_FAILED',
+          message: error.message,
+        },
+      });
+    }
   });
 
   app.get('/templates/:templateId', async (request, reply) => {
@@ -1723,7 +2148,7 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
     // For now, just mark as paused
     const updated = await app.prisma.campaign.update({
       where: { id: campaignId },
-      data: { status: 'PAUSED' as any },
+      data: { status: 'PAUSED' as const },
     });
 
     return { success: true, data: updated };
@@ -1744,7 +2169,7 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
       return reply.status(404).send({ success: false, error: { code: 'NOT_FOUND' } });
     }
 
-    if ((campaign.status as any) !== 'PAUSED') {
+    if (campaign.status !== 'PAUSED' && campaign.status !== 'PAUSED') {
       return reply.status(400).send({
         success: false,
         error: { code: 'INVALID_STATUS', message: 'Only paused campaigns can be resumed' },
@@ -1753,7 +2178,7 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
 
     const updated = await app.prisma.campaign.update({
       where: { id: campaignId },
-      data: { status: 'SENDING' as any },
+      data: { status: 'SENDING' as const },
     });
 
     return { success: true, data: updated };
@@ -2531,6 +2956,340 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
 
     return { success: true, data: flows };
   });
+
+  // ============================================
+  // NOTIFICATIONS
+  // ============================================
+
+  /**
+   * GET /notifications - List notifications for current user/tenant
+   */
+  app.get('/notifications', async (request, reply) => {
+    if (!request.authUser.tenantId) {
+      return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
+    }
+
+    const query = paginationSchema.extend({
+      unreadOnly: z.string().optional().transform(v => v === 'true'),
+      type: z.string().optional(),
+    }).parse(request.query);
+
+    const { page, limit, sort, order, unreadOnly, type } = query;
+    const skip = (page - 1) * limit;
+
+    const where: any = {
+      tenantId: request.authUser.tenantId,
+      isDeleted: false,
+      OR: [
+        { userId: request.authUser.id },
+        { userId: null }, // Tenant-wide notifications
+      ],
+    };
+
+    if (unreadOnly) {
+      where.isRead = false;
+    }
+
+    if (type) {
+      where.type = type;
+    }
+
+    const [notifications, total, unreadCount] = await Promise.all([
+      (app.prisma as any).notification.findMany({
+        where,
+        orderBy: { [sort]: order },
+        skip,
+        take: limit,
+      }),
+      (app.prisma as any).notification.count({ where }),
+      (app.prisma as any).notification.count({
+        where: {
+          tenantId: request.authUser.tenantId,
+          isRead: false,
+          isDeleted: false,
+          OR: [
+            { userId: request.authUser.id },
+            { userId: null },
+          ],
+        },
+      }),
+    ]);
+
+    return {
+      success: true,
+      data: notifications,
+      meta: {
+        page,
+        limit,
+        total,
+        totalPages: Math.ceil(total / limit),
+        unreadCount,
+      },
+    };
+  });
+
+  /**
+   * GET /notifications/unread-count - Get unread notification count
+   */
+  app.get('/notifications/unread-count', async (request, reply) => {
+    if (!request.authUser.tenantId) {
+      return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
+    }
+
+    const count = await (app.prisma as any).notification.count({
+      where: {
+        tenantId: request.authUser.tenantId,
+        isRead: false,
+        isDeleted: false,
+        OR: [
+          { userId: request.authUser.id },
+          { userId: null },
+        ],
+      },
+    });
+
+    return { success: true, data: { count } };
+  });
+
+  /**
+   * PATCH /notifications/:notificationId/read - Mark single notification as read
+   */
+  app.patch('/notifications/:notificationId/read', async (request, reply) => {
+    if (!request.authUser.tenantId) {
+      return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
+    }
+
+    const { notificationId } = z.object({ notificationId: z.string() }).parse(request.params);
+
+    const notification = await (app.prisma as any).notification.findFirst({
+      where: {
+        id: notificationId,
+        tenantId: request.authUser.tenantId,
+        OR: [
+          { userId: request.authUser.id },
+          { userId: null },
+        ],
+      },
+    });
+
+    if (!notification) {
+      return reply.status(404).send({ success: false, error: { code: 'NOT_FOUND' } });
+    }
+
+    const updated = await (app.prisma as any).notification.update({
+      where: { id: notificationId },
+      data: { isRead: true, readAt: new Date() },
+    });
+
+    return { success: true, data: updated };
+  });
+
+  /**
+   * POST /notifications/mark-all-read - Mark all notifications as read
+   */
+  app.post('/notifications/mark-all-read', async (request, reply) => {
+    if (!request.authUser.tenantId) {
+      return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
+    }
+
+    const result = await (app.prisma as any).notification.updateMany({
+      where: {
+        tenantId: request.authUser.tenantId,
+        isRead: false,
+        isDeleted: false,
+        OR: [
+          { userId: request.authUser.id },
+          { userId: null },
+        ],
+      },
+      data: { isRead: true, readAt: new Date() },
+    });
+
+    return { success: true, data: { markedRead: result.count } };
+  });
+
+  /**
+   * DELETE /notifications/:notificationId - Delete a notification
+   */
+  app.delete('/notifications/:notificationId', async (request, reply) => {
+    if (!request.authUser.tenantId) {
+      return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
+    }
+
+    const { notificationId } = z.object({ notificationId: z.string() }).parse(request.params);
+
+    await (app.prisma as any).notification.updateMany({
+      where: {
+        id: notificationId,
+        tenantId: request.authUser.tenantId,
+      },
+      data: { isDeleted: true },
+    });
+
+    return { success: true, data: { message: 'Notification deleted' } };
+  });
+
+  /**
+   * DELETE /notifications - Delete all notifications
+   */
+  app.delete('/notifications', async (request, reply) => {
+    if (!request.authUser.tenantId) {
+      return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
+    }
+
+    const result = await (app.prisma as any).notification.updateMany({
+      where: {
+        tenantId: request.authUser.tenantId,
+        OR: [
+          { userId: request.authUser.id },
+          { userId: null },
+        ],
+      },
+      data: { isDeleted: true },
+    });
+
+    return { success: true, data: { deleted: result.count } };
+  });
+
+  /**
+   * GET /notifications/preferences - Get notification preferences
+   */
+  app.get('/notifications/preferences', async (request, reply) => {
+    if (!request.authUser.tenantId) {
+      return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
+    }
+
+    const settings = await app.prisma.tenantSetting.findUnique({
+      where: { tenantId: request.authUser.tenantId },
+    });
+
+    return {
+      success: true,
+      data: {
+        emailNotifications: settings?.emailNotifications ?? true,
+        deliveryReports: settings?.deliveryReports ?? true,
+        weeklyDigest: settings?.weeklyDigest ?? false,
+        billingAlerts: settings?.billingAlerts ?? true,
+        browserNotifications: settings?.browserNotifications ?? true,
+        smsNotifications: settings?.smsNotifications ?? false,
+      },
+    };
+  });
+
+  /**
+   * PATCH /notifications/preferences - Update notification preferences
+   */
+  app.patch('/notifications/preferences', async (request, reply) => {
+    if (!request.authUser.tenantId) {
+      return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
+    }
+
+    const body = z.object({
+      emailNotifications: z.boolean().optional(),
+      deliveryReports: z.boolean().optional(),
+      weeklyDigest: z.boolean().optional(),
+      billingAlerts: z.boolean().optional(),
+      browserNotifications: z.boolean().optional(),
+      smsNotifications: z.boolean().optional(),
+    }).parse(request.body);
+
+    const updated = await app.prisma.tenantSetting.upsert({
+      where: { tenantId: request.authUser.tenantId },
+      create: {
+        tenantId: request.authUser.tenantId,
+        ...body,
+      },
+      update: body,
+    });
+
+    return {
+      success: true,
+      data: {
+        emailNotifications: updated.emailNotifications,
+        deliveryReports: updated.deliveryReports,
+        weeklyDigest: updated.weeklyDigest,
+        billingAlerts: updated.billingAlerts,
+        browserNotifications: updated.browserNotifications,
+        smsNotifications: updated.smsNotifications,
+      },
+    };
+  });
+
+  /**
+   * INTERNAL: Create a notification (used by other services)
+   */
+  app.post('/notifications/create', async (request, reply) => {
+    // This endpoint should be called internally, not directly by clients
+    // In production, this would be called by other services via API key auth
+    if (!request.authUser.tenantId) {
+      return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
+    }
+
+    const body = z.object({
+      type: z.string(),
+      title: z.string(),
+      message: z.string(),
+      userId: z.string().optional(),
+      referenceType: z.string().optional(),
+      referenceId: z.string().optional(),
+      priority: z.enum(['LOW', 'NORMAL', 'HIGH', 'URGENT']).default('NORMAL'),
+      data: z.any().optional(),
+    }).parse(request.body);
+
+    const notification = await (app.prisma as any).notification.create({
+      data: {
+        tenantId: request.authUser.tenantId,
+        userId: body.userId || request.authUser.id,
+        type: body.type as any,
+        title: body.title,
+        message: body.message,
+        referenceType: body.referenceType,
+        referenceId: body.referenceId,
+        priority: body.priority as any,
+        data: body.data,
+      },
+    });
+
+    return reply.status(201).send({ success: true, data: notification });
+  });
+}
+
+// ============================================
+// Helper: Create Notification (for internal use)
+// ============================================
+
+export async function createNotification(
+  prisma: any,
+  data: {
+    tenantId: string;
+    userId?: string;
+    type: string;
+    title: string;
+    message: string;
+    referenceType?: string;
+    referenceId?: string;
+    priority?: 'LOW' | 'NORMAL' | 'HIGH' | 'URGENT';
+    data?: any;
+  }
+): Promise<void> {
+  try {
+    await prisma.notification.create({
+      data: {
+        tenantId: data.tenantId,
+        userId: data.userId,
+        type: data.type as any,
+        title: data.title,
+        message: data.message,
+        referenceType: data.referenceType,
+        referenceId: data.referenceId,
+        priority: data.priority as any || 'NORMAL',
+        data: data.data,
+      },
+    });
+  } catch (error) {
+    // Don't fail the main operation if notification creation fails
+    console.error('Failed to create notification:', error);
+  }
 }
 
 // ============================================
@@ -2556,14 +3315,30 @@ async function sendCampaignMessages(
   let contactIds: string[] = [];
 
   if (campaign.audienceType === 'contacts' && campaign.contactIds.length > 0) {
-    contactIds = campaign.contactIds;
+    // Filter out opted-out contacts
+    const contacts = await app.prisma.contact.findMany({
+      where: { id: { in: campaign.contactIds }, consentStatus: { not: 'OPTED_OUT' } },
+      select: { id: true },
+    });
+    contactIds = contacts.map(c => c.id);
   } else if (campaign.audienceType === 'segment' && campaign.segmentIds.length > 0) {
-    // Fetch contacts in segments
+    // Fetch contacts in segments (excluding opted-out)
     const segmentContacts = await app.prisma.contactSegment.findMany({
       where: { segmentId: { in: campaign.segmentIds } },
-      select: { contactId: true },
+      include: { contact: { select: { id: true, consentStatus: true } } },
     });
-    contactIds = [...new Set(segmentContacts.map((c) => c.contactId))];
+    contactIds = [...new Set(
+      segmentContacts
+        .filter(sc => sc.contact.consentStatus !== 'OPTED_OUT')
+        .map((c) => c.contactId)
+    )];
+  } else if (campaign.audienceType === 'all') {
+    // Fetch all active contacts for 'all' audience type (excluding opted-out)
+    const allContacts = await app.prisma.contact.findMany({
+      where: { tenantId, isActive: true, consentStatus: { not: 'OPTED_OUT' } },
+      select: { id: true },
+    });
+    contactIds = allContacts.map(c => c.id);
   }
 
   if (contactIds.length === 0) {
