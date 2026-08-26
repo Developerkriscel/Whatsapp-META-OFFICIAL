@@ -213,15 +213,16 @@ export default function WhatsAppSettingsPage() {
     },
   });
 
-  // Billing / Line of Credit status query
-  const billingStatusQuery = useQuery({
-    queryKey: ['whatsapp-billing-status'],
+  // WABA billing info (tenant's own WABA name + ID for Meta deep-link)
+  const wabaInfoQuery = useQuery({
+    queryKey: ['whatsapp-waba-info'],
     queryFn: async () => {
       const res = await api.get('/whatsapp/waba/billing-status');
       return res.data;
     },
     enabled: activeTab === 'billing',
   });
+
 
   // Mutations
   const addPhoneMutation = useMutation({
@@ -1317,162 +1318,163 @@ export default function WhatsAppSettingsPage() {
         </div>
       )}
 
-      {/* Billing / Line of Credit Tab */}
-      {activeTab === 'billing' && (
-        <div className="space-y-6">
-          {/* What is Line of Credit */}
-          <div className="card-apple p-6 border-l-4 border-[#1877F2]">
-            <h2 className="text-lg font-semibold text-ios-dark mb-2 flex items-center gap-2">
-              <CreditCard className="w-5 h-5 text-[#1877F2]" /> Meta Line of Credit
-            </h2>
-            <p className="text-sm text-ios-secondary mb-3">
-              WhatsApp Business API uses Meta's <strong>Line of Credit (LoC)</strong> as the required payment method for conversation charges.
-              Unlike credit cards, LoC allows Meta to invoice your business monthly for WhatsApp conversation fees.
-            </p>
-            <a
-              href="https://business.facebook.com/billing_hub"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="inline-flex items-center gap-2 px-4 py-2 bg-[#1877F2] text-white text-sm font-semibold rounded-apple-lg hover:bg-[#1464D6] transition"
-            >
-              <ExternalLink className="w-4 h-4" />
-              Open Meta Billing Hub
-            </a>
-          </div>
+      {/* Meta Payment Setup Tab */}
+      {activeTab === 'billing' && (() => {
+        const waba = wabaInfoQuery.data?.data;
+        const wabaId = waba?.wabaId;
+        const wabaName = waba?.wabaName;
+        const currency = waba?.currency;
+        const notConnected = waba && !waba.configured;
+        const billingHubUrl = 'https://business.facebook.com/billing_hub/accounts/';
+        const waManagerUrl = wabaId
+          ? `https://business.facebook.com/wa/manage/phone-numbers/?waba_id=${wabaId}`
+          : 'https://business.facebook.com/wa/manage/';
 
-          {/* Current Status */}
-          <div className="card-apple p-6">
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="font-semibold text-ios-dark">Payment Status</h3>
-              <button
-                onClick={() => billingStatusQuery.refetch()}
-                disabled={billingStatusQuery.isFetching}
-                className="btn-apple btn-apple-outline flex items-center gap-2 text-xs"
-              >
-                <RefreshCw className={`w-3.5 h-3.5 ${billingStatusQuery.isFetching ? 'animate-spin' : ''}`} />
-                Refresh
-              </button>
+        return (
+          <div className="space-y-6">
+            {/* Header */}
+            <div className="card-apple p-6 border-l-4 border-[#1877F2]">
+              <h2 className="text-lg font-semibold text-ios-dark mb-2 flex items-center gap-2">
+                <CreditCard className="w-5 h-5 text-[#1877F2]" /> Set Up Payment in Meta
+              </h2>
+              <p className="text-sm text-ios-secondary">
+                WhatsApp conversation charges are billed <strong>directly by Meta</strong> to your business account.
+                You need to add a payment method in your Meta Business Manager so you can start sending messages independently.
+              </p>
             </div>
 
-            {billingStatusQuery.isLoading || billingStatusQuery.isFetching ? (
-              <div className="flex items-center gap-3 text-ios-muted">
-                <Loader2 className="w-5 h-5 animate-spin" />
-                <span className="text-sm">Checking payment status...</span>
+            {/* WABA Info — show which account they need to set up */}
+            {notConnected ? (
+              <div className="card-apple p-5 flex items-start gap-3 border-l-4 border-apple-orange">
+                <AlertTriangle className="w-5 h-5 text-apple-orange shrink-0 mt-0.5" />
+                <div>
+                  <p className="font-semibold text-apple-orange">WhatsApp Not Connected</p>
+                  <p className="text-sm text-ios-secondary mt-1">
+                    Connect your WhatsApp Business Account first (Phone Numbers tab), then come back here to set up payment.
+                  </p>
+                </div>
               </div>
-            ) : (() => {
-              const billing = billingStatusQuery.data?.data;
-              if (!billing?.configured) {
-                return (
-                  <div className="flex items-start gap-3 p-4 bg-apple-orange/10 rounded-apple-lg">
-                    <AlertTriangle className="w-5 h-5 text-apple-orange mt-0.5 shrink-0" />
-                    <div>
-                      <p className="font-medium text-apple-orange">Not Configured</p>
-                      <p className="text-sm text-ios-secondary mt-1">
-                        No WhatsApp Business Account credentials are set up yet. Complete the account connection first.
-                      </p>
-                    </div>
+            ) : wabaInfoQuery.isLoading ? (
+              <div className="card-apple p-6 flex items-center gap-3 text-ios-muted">
+                <Loader2 className="w-5 h-5 animate-spin" />
+                <span className="text-sm">Loading your account info...</span>
+              </div>
+            ) : wabaId ? (
+              <div className="card-apple p-5">
+                <p className="text-xs font-semibold text-ios-muted uppercase tracking-wide mb-3">Your WhatsApp Business Account</p>
+                <div className="flex items-center gap-4">
+                  <div className="w-12 h-12 bg-wa-green/10 rounded-apple-xl flex items-center justify-center shrink-0">
+                    <MessageSquare className="w-6 h-6 text-wa-green" />
                   </div>
-                );
-              }
-              if (billing?.hasLineOfCredit) {
-                return (
-                  <div className="space-y-4">
-                    <div className="flex items-start gap-3 p-4 bg-apple-green/10 rounded-apple-lg">
-                      <CheckCircle className="w-5 h-5 text-apple-green mt-0.5 shrink-0" />
-                      <div>
-                        <p className="font-medium text-apple-green">Line of Credit Active</p>
-                        <p className="text-sm text-ios-secondary mt-1">Your WABA has an active line of credit. WhatsApp conversation charges will be invoiced monthly.</p>
-                      </div>
-                    </div>
-                    <div className="grid grid-cols-2 gap-3 text-sm">
-                      {billing.wabaName && (
-                        <div className="p-3 bg-ios-gray/50 rounded-apple-lg">
-                          <p className="text-ios-muted text-xs">WABA Name</p>
-                          <p className="font-medium text-ios-dark mt-0.5">{billing.wabaName}</p>
-                        </div>
-                      )}
-                      {billing.currency && (
-                        <div className="p-3 bg-ios-gray/50 rounded-apple-lg">
-                          <p className="text-ios-muted text-xs">Billing Currency</p>
-                          <p className="font-medium text-ios-dark mt-0.5">{billing.currency}</p>
-                        </div>
-                      )}
-                      {billing.primaryFundingId && (
-                        <div className="p-3 bg-ios-gray/50 rounded-apple-lg col-span-2">
-                          <p className="text-ios-muted text-xs">Funding ID</p>
-                          <p className="font-mono text-xs text-ios-dark mt-0.5">{billing.primaryFundingId}</p>
-                        </div>
-                      )}
-                    </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="font-semibold text-ios-dark">{wabaName || 'WhatsApp Business Account'}</p>
+                    <p className="text-xs text-ios-muted font-mono mt-0.5">ID: {wabaId}</p>
+                    {currency && <p className="text-xs text-ios-muted mt-0.5">Billing currency: {currency}</p>}
                   </div>
-                );
-              }
-              return (
-                <div className="space-y-4">
-                  <div className="flex items-start gap-3 p-4 bg-apple-red/10 rounded-apple-lg">
-                    <AlertCircle className="w-5 h-5 text-apple-red mt-0.5 shrink-0" />
-                    <div>
-                      <p className="font-medium text-apple-red">No Line of Credit Found</p>
-                      <p className="text-sm text-ios-secondary mt-1">
-                        Your WhatsApp Business Account does not have an active line of credit.
-                        You won't be able to send messages beyond the free tier without setting one up.
-                        {billing?.error && <span className="block mt-1 text-xs text-ios-muted">({billing.error})</span>}
-                      </p>
-                    </div>
-                  </div>
-                  <div className="p-4 bg-ios-gray/50 rounded-apple-lg">
-                    <p className="text-sm font-semibold text-ios-dark mb-2">How to set up Line of Credit:</p>
-                    <ol className="text-sm text-ios-secondary space-y-1.5 list-decimal list-inside">
-                      <li>Go to <strong>Meta Business Manager</strong> → <strong>Billing</strong></li>
-                      <li>Click <strong>Add Payment Method</strong> → select <strong>Invoice / Line of Credit</strong></li>
-                      <li>Complete the credit application (requires business verification)</li>
-                      <li>Once approved, return here to verify the status</li>
-                    </ol>
-                  </div>
-                  <a
-                    href="https://business.facebook.com/billing_hub"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="inline-flex items-center gap-2 px-4 py-2 bg-[#1877F2] text-white text-sm font-semibold rounded-apple-lg hover:bg-[#1464D6] transition"
-                  >
-                    <ExternalLink className="w-4 h-4" />
-                    Set Up Line of Credit
-                  </a>
+                  <CheckCircle className="w-5 h-5 text-wa-green shrink-0" />
                 </div>
-              );
-            })()}
-          </div>
+                <p className="text-xs text-ios-muted mt-3 p-3 bg-ios-gray/50 rounded-apple-lg">
+                  When you open Meta Billing Hub below, log in with the <strong>Facebook account that owns this WABA</strong>. You will see this account in the "WhatsApp Business accounts" tab.
+                </p>
+              </div>
+            ) : null}
 
-          {/* Pricing Info */}
-          <div className="card-apple p-6">
-            <h3 className="font-semibold text-ios-dark mb-3">WhatsApp Conversation Pricing</h3>
-            <p className="text-sm text-ios-secondary mb-3">
-              Meta charges per conversation (24-hour window), not per message. Rates vary by country and conversation category.
-            </p>
-            <div className="grid grid-cols-2 gap-3">
-              {[
-                { label: 'Marketing', desc: 'Business-initiated promotions', color: 'text-apple-purple bg-apple-purple/10' },
-                { label: 'Utility', desc: 'Transactional updates & alerts', color: 'text-apple-blue bg-apple-blue/10' },
-                { label: 'Authentication', desc: 'OTPs and verification', color: 'text-apple-green bg-apple-green/10' },
-                { label: 'Service', desc: 'User-initiated conversations', color: 'text-apple-orange bg-apple-orange/10' },
-              ].map(cat => (
-                <div key={cat.label} className={`p-3 rounded-apple-lg ${cat.color.split(' ')[1]}`}>
-                  <p className={`text-xs font-bold ${cat.color.split(' ')[0]}`}>{cat.label}</p>
-                  <p className="text-xs text-ios-secondary mt-0.5">{cat.desc}</p>
-                </div>
-              ))}
+            {/* Step-by-step guide */}
+            <div className="card-apple p-6">
+              <h3 className="font-semibold text-ios-dark mb-4">How to Add a Payment Method in Meta</h3>
+              <div className="space-y-4">
+                {[
+                  {
+                    step: '1',
+                    title: 'Open Meta Billing Hub',
+                    desc: 'Click the button below. Log in with the Facebook account that manages your WhatsApp Business Account.',
+                    color: 'bg-[#1877F2]/10 text-[#1877F2]',
+                  },
+                  {
+                    step: '2',
+                    title: 'Go to "WhatsApp Business accounts" tab',
+                    desc: 'Inside Billing Hub, click the "WhatsApp Business accounts" tab at the top. Find your WABA in the list.',
+                    color: 'bg-wa-green/10 text-wa-green',
+                  },
+                  {
+                    step: '3',
+                    title: 'Add a payment method',
+                    desc: 'Click "Add payment method" on your WABA. Choose a credit/debit card or request a Line of Credit (monthly invoice, for higher-volume businesses).',
+                    color: 'bg-apple-purple/10 text-apple-purple',
+                  },
+                  {
+                    step: '4',
+                    title: 'Start sending messages',
+                    desc: 'Once your payment method is active, Meta bills you directly each month based on conversations. You are fully independent.',
+                    color: 'bg-apple-green/10 text-apple-green',
+                  },
+                ].map(({ step, title, desc, color }) => (
+                  <div key={step} className="flex items-start gap-4">
+                    <div className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 font-bold text-sm ${color}`}>
+                      {step}
+                    </div>
+                    <div>
+                      <p className="font-semibold text-ios-dark text-sm">{title}</p>
+                      <p className="text-sm text-ios-secondary mt-0.5">{desc}</p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {/* Action buttons */}
+              <div className="flex flex-wrap gap-3 mt-6">
+                <a
+                  href={billingHubUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-2 px-5 py-2.5 bg-[#1877F2] text-white text-sm font-semibold rounded-apple-lg hover:bg-[#1464D6] transition"
+                >
+                  <ExternalLink className="w-4 h-4" />
+                  Open Meta Billing Hub
+                </a>
+                <a
+                  href={waManagerUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-2 px-5 py-2.5 border border-black/10 text-ios-dark text-sm font-semibold rounded-apple-lg hover:bg-ios-gray/50 transition"
+                >
+                  <ExternalLink className="w-4 h-4" />
+                  WhatsApp Manager
+                </a>
+              </div>
             </div>
-            <a
-              href="https://developers.facebook.com/docs/whatsapp/pricing"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="mt-3 inline-flex items-center gap-1 text-sm text-[#1877F2] hover:underline"
-            >
-              View full pricing table <ExternalLink className="w-3.5 h-3.5" />
-            </a>
+
+            {/* Pricing info */}
+            <div className="card-apple p-6">
+              <h3 className="font-semibold text-ios-dark mb-1">Meta Conversation Pricing</h3>
+              <p className="text-sm text-ios-secondary mb-4">
+                Meta charges per conversation (24-hour window), not per message. Rates depend on conversation type and recipient country.
+              </p>
+              <div className="grid grid-cols-2 gap-3">
+                {[
+                  { label: 'Marketing', desc: 'Business-initiated promotions', color: 'text-apple-purple bg-apple-purple/10' },
+                  { label: 'Utility', desc: 'Transactional updates & alerts', color: 'text-apple-blue bg-apple-blue/10' },
+                  { label: 'Authentication', desc: 'OTPs and verification codes', color: 'text-apple-green bg-apple-green/10' },
+                  { label: 'Service', desc: 'Customer-initiated conversations', color: 'text-apple-orange bg-apple-orange/10' },
+                ].map(cat => (
+                  <div key={cat.label} className={`p-3 rounded-apple-lg ${cat.color.split(' ')[1]}`}>
+                    <p className={`text-xs font-bold ${cat.color.split(' ')[0]}`}>{cat.label}</p>
+                    <p className="text-xs text-ios-secondary mt-0.5">{cat.desc}</p>
+                  </div>
+                ))}
+              </div>
+              <a
+                href="https://developers.facebook.com/docs/whatsapp/pricing"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="mt-3 inline-flex items-center gap-1 text-sm text-[#1877F2] hover:underline"
+              >
+                View full pricing table <ExternalLink className="w-3.5 h-3.5" />
+              </a>
+            </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* Add Phone Modal */}
       {showAddModal && (

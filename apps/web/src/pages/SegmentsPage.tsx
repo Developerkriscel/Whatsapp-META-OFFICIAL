@@ -6,6 +6,7 @@
 import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../api/client';
+import SegmentSuggestPanel from '../components/SegmentSuggestPanel';
 import {
   Plus, Search, Users, X, Filter, Trash2, Edit2, MoreVertical, ChevronRight,
   CheckCircle2, AlertCircle, Loader2, RefreshCw, Eye, Play, Pause, Zap
@@ -77,6 +78,7 @@ export default function SegmentsPage() {
   const [showCreate, setShowCreate] = useState(false);
   const [editing, setEditing] = useState<Segment | null>(null);
   const [previewSegment, setPreviewSegment] = useState<Segment | null>(null);
+  const [confirmDeleteSegment, setConfirmDeleteSegment] = useState<Segment | null>(null);
   const [notification, setNotification] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
   const [form, setForm] = useState({
     name: '',
@@ -401,7 +403,7 @@ export default function SegmentsPage() {
                   <RefreshCw className={`w-4 h-4 ${syncMutation.isPending ? 'animate-spin' : ''}`} />
                 </button>
                 <button
-                  onClick={() => { if (confirm('Delete this segment?')) deleteMutation.mutate(segment.id); }}
+                  onClick={() => setConfirmDeleteSegment(segment)}
                   disabled={deleteMutation.isPending}
                   className="btn-apple text-sm py-2 px-3 text-apple-red hover:bg-apple-red/10"
                 >
@@ -478,6 +480,13 @@ export default function SegmentsPage() {
                   </label>
                 </div>
               </div>
+
+              {/* AI Suggest */}
+              {!editing && (
+                <SegmentSuggestPanel
+                  onApply={(matchType, conditions) => setForm({ ...form, matchType, conditions })}
+                />
+              )}
 
               {/* Conditions */}
               <div>
@@ -558,6 +567,38 @@ export default function SegmentsPage() {
                   Cancel
                 </button>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Delete Confirm Modal */}
+      {confirmDeleteSegment && (
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-xl flex items-center justify-center z-50 p-4">
+          <div className="glass-card rounded-apple-xl w-full max-w-sm p-6">
+            <div className="flex items-center gap-3 mb-3">
+              <div className="w-10 h-10 rounded-full bg-apple-red/10 flex items-center justify-center flex-shrink-0">
+                <Trash2 className="w-5 h-5 text-apple-red" />
+              </div>
+              <h3 className="text-lg font-semibold text-ios-dark">Delete segment?</h3>
+            </div>
+            <p className="text-sm text-ios-secondary mb-5">
+              "{confirmDeleteSegment.name}" will be permanently removed. This action cannot be undone.
+            </p>
+            <div className="flex gap-2">
+              <button
+                onClick={() => {
+                  deleteMutation.mutate(confirmDeleteSegment.id);
+                  setConfirmDeleteSegment(null);
+                }}
+                disabled={deleteMutation.isPending}
+                className="flex-1 btn-apple bg-apple-red text-white hover:bg-apple-red/90 disabled:opacity-50"
+              >
+                {deleteMutation.isPending ? 'Deleting...' : 'Delete'}
+              </button>
+              <button onClick={() => setConfirmDeleteSegment(null)} className="flex-1 btn-apple btn-apple-outline">
+                Cancel
+              </button>
             </div>
           </div>
         </div>

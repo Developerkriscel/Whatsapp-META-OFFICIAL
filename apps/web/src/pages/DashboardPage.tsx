@@ -3,7 +3,7 @@
  */
 
 import { useQuery } from '@tanstack/react-query';
-import { api } from '../api/client';
+import { insightsApi } from '../api/client';
 import { useAuth } from '../context/AuthContext';
 import {
   Users,
@@ -17,55 +17,51 @@ import {
   ArrowDownRight,
   Zap,
   BarChart3,
+  Phone,
+  AlertTriangle,
 } from 'lucide-react';
 import { Link } from 'react-router-dom';
 
 export default function DashboardPage() {
   const { user } = useAuth();
 
-  const { data: statsData } = useQuery({
-    queryKey: ['dashboard-stats'],
+  // Fetch insights overview
+  const { data: insightsData, isLoading } = useQuery({
+    queryKey: ['insights-overview'],
     queryFn: async () => {
-      const response = await api.get('/dashboard/stats');
-      return response.data;
+      const response = await insightsApi.overview();
+      return response.data.data;
     },
   });
 
-  const { data: recentData } = useQuery({
-    queryKey: ['dashboard-recent'],
+  // Fetch WhatsApp health
+  const { data: whatsappData } = useQuery({
+    queryKey: ['insights-whatsapp'],
     queryFn: async () => {
-      const response = await api.get('/dashboard/recent');
-      return response.data;
+      const response = await insightsApi.whatsapp();
+      return response.data.data;
     },
   });
 
-  const { data: chartData } = useQuery({
-    queryKey: ['dashboard-chart'],
-    queryFn: async () => {
-      const response = await api.get('/dashboard/chart');
-      return response.data;
-    },
-  });
-
-  const stats = statsData?.data || {
-    totalContacts: 0,
-    activeContacts: 0,
-    messagesSent: 0,
-    messagesDelivered: 0,
-    pendingMessages: 0,
-    weeklyGrowth: 0,
+  // Use insights data
+  const overview = insightsData || {
+    messaging: { totalSent: 0, sentToday: 0, sentThisWeek: 0, sentThisMonth: 0, deliveryRate: 0, readRate: 0 },
+    contacts: { total: 0, optedIn: 0, optedOut: 0, consentRate: 0 },
+    campaigns: { total: 0, thisMonth: 0 },
+    inbox: { openConversations: 0 },
+    whatsapp: { connectedPhones: 0, qualityRatings: [] },
   };
 
-  const recentMessages = recentData?.data?.messages || [];
-
-  const weeklyData = chartData?.data || [];
-
-  const maxMessages = weeklyData.length > 0 ? Math.max(...weeklyData.map((d: { day: string; messages: number }) => d.messages || 0)) : 1;
+  const whatsappHealth = whatsappData || {
+    connectedPhones: 0,
+    qualityRatings: [],
+    webhookFailureRate: 0,
+  };
 
   const quickLinks = [
     { label: 'New Campaign', desc: 'Send bulk messages', icon: Send, href: '/campaigns', color: 'wa-green' },
     { label: 'Contacts', desc: 'Manage your audience', icon: Users, href: '/contacts', color: 'wa-teal' },
-    { label: 'Bot Flows', desc: 'Automate conversations', icon: Zap, href: '/bot-flows', color: 'wa-green' },
+    { label: 'Bot Flows', desc: 'Automate conversations', icon: Zap, href: '/flows', color: 'wa-green' },
     { label: 'Analytics', desc: 'View detailed stats', icon: BarChart3, href: '/analytics', color: 'wa-teal' },
   ];
 
@@ -87,120 +83,73 @@ export default function DashboardPage() {
       {/* Stats Grid */}
       <div className="grid grid-cols-4 gap-4">
         {[
-          { label: 'Total Contacts', value: stats.totalContacts.toLocaleString(), sub: `${stats.activeContacts} active`, icon: Users, color: 'wa-green', trend: '+8%' },
-          { label: 'Messages Sent', value: stats.messagesSent.toLocaleString(), sub: `${((stats.messagesDelivered / stats.messagesSent) * 100).toFixed(1)}% delivered`, icon: Send, color: 'wa-teal', trend: '+12%' },
-          { label: 'Active Now', value: '23', sub: 'conversations', icon: MessageSquare, color: 'wa-green', trend: '+5' },
-          { label: 'Delivery Rate', value: `${((stats.messagesDelivered / stats.messagesSent) * 100).toFixed(1)}%`, sub: `${stats.pendingMessages} pending`, icon: CheckCircle, color: 'wa-teal', trend: '+0.3%' },
-        ].map((stat) => (
-          <div key={stat.label} className="card-apple p-5">
-            <div className="flex items-start justify-between mb-3">
-              <div className={`p-2.5 bg-${stat.color}/20 text-${stat.color} rounded-apple-lg`}>
-                <stat.icon className="w-5 h-5" />
-              </div>
-              <span className={`text-xs font-medium flex items-center gap-0.5 ${
-                stat.trend.startsWith('+') ? 'text-wa-green' : 'text-red-500'
-              }`}>
-                {stat.trend.startsWith('+') ? (
-                  <ArrowUpRight className="w-3 h-3" />
-                ) : (
-                  <ArrowDownRight className="w-3 h-3" />
-                )}
-                {stat.trend}
-              </span>
+          { label: 'Total Contacts', value: overview.contacts.total.toLocaleString(), icon: Users, trend: null, color: 'text-wa-green' },
+          { label: 'Messages Sent', value: overview.messaging.totalSent.toLocaleString(), icon: MessageSquare, trend: null, color: 'text-wa-teal' },
+          { label: 'Open Conversations', value: overview.inbox.openConversations.toLocaleString(), icon: Clock, trend: null, color: 'text-apple-purple' },
+          { label: 'Campaigns', value: overview.campaigns.total.toLocaleString(), icon: Send, trend: null, color: 'text-wa-green' },
+        ].map((stat, i) => (
+          <div key={i} className="card-apple p-4">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-ios-muted text-sm">{stat.label}</span>
+              <stat.icon className={`w-4 h-4 ${stat.color}`} />
             </div>
-            <p className="text-2xl font-bold text-ios-dark">{stat.value}</p>
-            <p className="text-sm text-ios-secondary">{stat.label}</p>
-            <p className="text-xs text-ios-muted mt-0.5">{stat.sub}</p>
+            <p className="text-2xl font-bold text-ios-dark">{isLoading ? '-' : stat.value}</p>
           </div>
         ))}
       </div>
 
-      <div className="grid grid-cols-3 gap-6">
-        {/* Chart */}
-        <div className="col-span-2 card-apple p-6">
-          <div className="flex items-center justify-between mb-6">
-            <div>
-              <h2 className="text-lg font-semibold text-ios-dark">Message Volume</h2>
-              <p className="text-sm text-ios-muted">Last 7 days</p>
-            </div>
-            <div className="flex items-center gap-2 text-sm">
-              <div className="w-3 h-3 bg-wa-green rounded-full" />
-              <span className="text-ios-secondary">Messages sent</span>
-            </div>
+      {/* WhatsApp Health Alert */}
+      {whatsappHealth.qualityRatings?.includes('RED') && (
+        <div className="bg-red-50 border border-red-200 rounded-lg p-4 flex items-center gap-3">
+          <AlertTriangle className="w-5 h-5 text-red-500" />
+          <div>
+            <p className="font-medium text-red-700">WhatsApp Quality Warning</p>
+            <p className="text-sm text-red-600">One or more phone numbers have a poor quality rating. This may affect message delivery.</p>
           </div>
-
-          <div className="flex items-end gap-3 h-40">
-            {weeklyData.map((d: { day: string; messages: number }) => (
-              <div key={d.day} className="flex-1 flex flex-col items-center gap-2">
-                <span className="text-xs text-ios-muted font-medium">{d.messages}</span>
-                <div
-                  className="w-full bg-gradient-to-t from-wa-green/60 to-wa-green rounded-t-lg transition-all hover:from-wa-green/80 hover:to-wa-green"
-                  style={{ height: `${(d.messages / maxMessages) * 100}%`, minHeight: '8px' }}
-                />
-                <span className="text-xs text-ios-muted">{d.day}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-
-        {/* Quick Actions */}
-        <div className="card-apple p-6">
-          <h2 className="text-lg font-semibold text-ios-dark mb-4">Quick Actions</h2>
-          <div className="space-y-3">
-            {quickLinks.map((link) => (
-              <Link
-                key={link.href}
-                to={link.href}
-                className="flex items-center gap-3 p-3 border border-black/5 rounded-apple-lg hover:bg-ios-gray/50 transition group"
-              >
-                <div className={`w-10 h-10 bg-${link.color}/20 text-${link.color} rounded-apple-lg flex items-center justify-center group-hover:scale-105 transition`}>
-                  <link.icon className="w-5 h-5" />
-                </div>
-                <div>
-                  <p className="font-medium text-ios-dark text-sm">{link.label}</p>
-                  <p className="text-xs text-ios-muted">{link.desc}</p>
-                </div>
-              </Link>
-            ))}
-          </div>
-        </div>
-      </div>
-
-      {/* Recent Messages */}
-      <div className="card-apple">
-        <div className="p-4 border-b border-black/5 flex items-center justify-between">
-          <h2 className="font-semibold text-ios-dark">Recent Conversations</h2>
-          <Link to="/conversations" className="text-sm text-wa-green hover:underline">
-            View all
+          <Link to="/whatsapp" className="ml-auto text-sm text-red-700 hover:text-red-800 font-medium">
+            View Details →
           </Link>
         </div>
-        <div className="divide-y divide-black/5">
-          {recentMessages.map((msg: { id: string; contact: { name: string; phone: string }; preview: string; time: string; status: string }) => (
-            <Link
-              key={msg.id}
-              to={`/conversations/${msg.contact.phone}`}
-              className="flex items-center gap-4 p-4 hover:bg-ios-gray/50 transition"
-            >
-              <div className="w-12 h-12 bg-wa-green/20 text-wa-green rounded-full flex items-center justify-center font-semibold text-lg flex-shrink-0">
-                {msg.contact.name.charAt(0)}
-              </div>
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center justify-between">
-                  <p className="font-medium text-ios-dark">{msg.contact.name}</p>
-                  <span className="text-xs text-ios-muted">{msg.time}</span>
-                </div>
-                <p className="text-sm text-ios-secondary truncate mt-0.5">{msg.preview}</p>
-              </div>
-              <div className="flex items-center gap-2 flex-shrink-0">
-                {msg.status === 'read' && (
-                  <span className="text-xs text-wa-green">Read</span>
-                )}
-                {msg.status === 'delivered' && (
-                  <CheckCircle className="w-4 h-4 text-wa-green" />
-                )}
-              </div>
-            </Link>
-          ))}
+      )}
+
+      {/* Quick Actions */}
+      <div className="grid grid-cols-4 gap-4">
+        {quickLinks.map((link, i) => (
+          <Link key={i} to={link.href} className={`card-apple p-4 hover:border-wa-${link.color} transition cursor-pointer`}>
+            <link.icon className={`w-6 h-6 text-wa-${link.color} mb-2`} />
+            <p className="font-medium text-ios-dark">{link.label}</p>
+            <p className="text-xs text-ios-muted">{link.desc}</p>
+          </Link>
+        ))}
+      </div>
+
+      {/* Messaging Summary */}
+      <div className="grid grid-cols-3 gap-4">
+        <div className="card-apple p-4">
+          <h3 className="font-medium text-ios-dark mb-3">Delivery Rate</h3>
+          <div className="flex items-center gap-3">
+            <div className="flex-1 h-2 bg-ios-gray rounded-full overflow-hidden">
+              <div className="h-full bg-wa-green rounded-full" style={{ width: `${overview.messaging.deliveryRate}%` }} />
+            </div>
+            <span className="text-sm font-medium text-wa-green">{overview.messaging.deliveryRate}%</span>
+          </div>
+        </div>
+        <div className="card-apple p-4">
+          <h3 className="font-medium text-ios-dark mb-3">Read Rate</h3>
+          <div className="flex items-center gap-3">
+            <div className="flex-1 h-2 bg-ios-gray rounded-full overflow-hidden">
+              <div className="h-full bg-wa-teal rounded-full" style={{ width: `${overview.messaging.readRate}%` }} />
+            </div>
+            <span className="text-sm font-medium text-wa-teal">{overview.messaging.readRate}%</span>
+          </div>
+        </div>
+        <div className="card-apple p-4">
+          <h3 className="font-medium text-ios-dark mb-3">WhatsApp Numbers</h3>
+          <div className="flex items-center gap-2">
+            <Phone className="w-5 h-5 text-wa-green" />
+            <span className="text-2xl font-bold text-ios-dark">{overview.whatsapp.connectedPhones}</span>
+            <span className="text-sm text-ios-muted">connected</span>
+          </div>
         </div>
       </div>
     </div>

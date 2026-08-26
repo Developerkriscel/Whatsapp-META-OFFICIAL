@@ -2106,8 +2106,9 @@ export async function registerWhatsAppRoutes(app: FastifyInstance): Promise<void
     }
 
     try {
+      // Phase 1: fetch basic WABA info (always accessible with any valid token)
       const res = await fetch(
-        `https://graph.facebook.com/v19.0/${wabaId}?fields=id,name,primary_funding_id,payment_configuration_id,currency&access_token=${token}`
+        `https://graph.facebook.com/v19.0/${wabaId}?fields=id,name,currency&access_token=${token}`
       );
       const data: any = await res.json();
 
@@ -2115,20 +2116,40 @@ export async function registerWhatsAppRoutes(app: FastifyInstance): Promise<void
         return { success: true, data: { configured: true, hasLineOfCredit: false, primaryFundingId: null, wabaId, error: data?.error?.message } };
       }
 
+      // Phase 2: try to read billing fields (requires BSP access — may fail for non-BSPs)
+      let primaryFundingId: string | null = null;
+      let paymentConfigId: string | null = null;
+      let billingError: string | null = null;
+      try {
+        const billingRes = await fetch(
+          `https://graph.facebook.com/v19.0/${wabaId}?fields=primary_funding_id,payment_configuration_id&access_token=${token}`
+        );
+        const billingData: any = await billingRes.json();
+        if (billingRes.ok) {
+          primaryFundingId = billingData.primary_funding_id || null;
+          paymentConfigId = billingData.payment_configuration_id || null;
+        } else {
+          billingError = billingData?.error?.message || 'Failed to read billing info';
+        }
+      } catch {
+        billingError = 'Could not reach Meta billing API';
+      }
+
       return {
         success: true,
         data: {
           configured: true,
-          hasLineOfCredit: !!data.primary_funding_id,
-          primaryFundingId: data.primary_funding_id || null,
-          paymentConfigId: data.payment_configuration_id || null,
+          hasLineOfCredit: !!primaryFundingId,
+          primaryFundingId,
+          paymentConfigId,
           currency: data.currency || null,
           wabaId,
           wabaName: data.name || null,
+          billingError,
         },
       };
     } catch (err: any) {
-      return { success: true, data: { configured: true, hasLineOfCredit: false, primaryFundingId: null, wabaId, error: err.message } };
+      return { success: true, data: { configured: true, hasLineOfCredit: false, primaryFundingId: null, wabaId, billingError: err.message } };
     }
   });
 

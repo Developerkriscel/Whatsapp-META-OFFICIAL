@@ -3,6 +3,7 @@
 import Fastify, { FastifyInstance } from 'fastify';
 import cors from '@fastify/cors';
 import jwt from '@fastify/jwt';
+import cookie from '@fastify/cookie';
 import rawBody from 'fastify-raw-body';
 import { PrismaClient } from '@prisma/client';
 import { authMiddleware, requirePermission, requireOwner } from './middleware/auth.js';
@@ -19,6 +20,14 @@ import { registerInvoiceRoutes } from './routes/invoice.js';
 import { registerWhatsAppRoutes } from './routes/whatsapp.js';
 import { registerCreditRoutes } from './routes/credits.js';
 import { registerSuperadminCreditRoutes } from './routes/superadminCredits.js';
+import { registerSSERoutes } from './routes/sse.js';
+import { registerAutomationRoutes } from './routes/automation.js';
+import { registerTeamRoutes } from './routes/teams.js';
+import { registerInsightsRoutes } from './routes/analytics.js';
+import { registerSystemRoutes } from './routes/monitoring.js';
+import { registerMetaComplianceRoutes } from './routes/metaCompliance.js';
+import { registerAIRoutes } from './routes/ai.js';
+import { registerKnowledgeBaseRoutes } from './routes/knowledgeBase.js';
 
 // Extend Fastify instance with custom properties
 declare module 'fastify' {
@@ -47,6 +56,11 @@ export async function buildApp(): Promise<FastifyInstance> {
     credentials: true,
   });
 
+  // Register cookie support (httpOnly refresh token cookie)
+  await app.register(cookie, {
+    secret: process.env.JWT_SECRET || 'fallback-secret-for-development',
+  });
+
   // Register JWT
   await app.register(jwt, {
     secret: process.env.JWT_SECRET || 'fallback-secret-for-development',
@@ -68,8 +82,23 @@ export async function buildApp(): Promise<FastifyInstance> {
     routes: ['/api/v1/stripe/webhook'],
   });
 
+  // Meta calls the Data Deletion callback as application/x-www-form-urlencoded
+  app.addContentTypeParser('application/x-www-form-urlencoded', { parseAs: 'string' }, (_req, body, done) => {
+    try {
+      done(null, Object.fromEntries(new URLSearchParams(body as string)));
+    } catch (err) {
+      done(err as Error, undefined);
+    }
+  });
+
   // Register auth middleware
   await app.register(authMiddleware);
+
+  // Decorate with RBAC guards (must run after authMiddleware sets request.authUser)
+  app.decorate('requirePermission', (resource: string, action: string) =>
+    requirePermission(resource as any, action as any)
+  );
+  app.decorate('requireOwner', () => requireOwner());
 
   // Health check
   app.get('/health', async () => {
@@ -90,6 +119,14 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(registerSuperadminAdvancedRoutes, { prefix: '/api/v1/superadmin' });
   await app.register(registerWebhookRoutes);
   await app.register(registerStripeWebhook);
+  await app.register(registerSSERoutes, { prefix: '/api/v1' });
+  await app.register(registerAutomationRoutes, { prefix: '/api/v1' });
+  await app.register(registerTeamRoutes, { prefix: '/api/v1' });
+  await app.register(registerInsightsRoutes, { prefix: '/api/v1' });
+  await app.register(registerSystemRoutes);
+  await app.register(registerMetaComplianceRoutes, { prefix: '/api/v1' });
+  await app.register(registerAIRoutes, { prefix: '/api/v1' });
+  await app.register(registerKnowledgeBaseRoutes, { prefix: '/api/v1' });
 
   // Global error handler
   app.setErrorHandler((error, request, reply) => {

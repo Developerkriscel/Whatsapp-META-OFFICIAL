@@ -90,7 +90,7 @@ export default function SuperAdminSettingsPage() {
   useState(() => {
     if (settingsData) {
       setGeneralForm({
-        platformName: settingsData.platformName || 'WA Meta Auto',
+        platformName: settingsData.platformName || 'Kriscel WA',
         supportEmail: settingsData.supportEmail || '',
         tagline: settingsData.tagline || '',
         timezone: settingsData.timezone || 'UTC',

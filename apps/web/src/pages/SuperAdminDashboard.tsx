@@ -29,6 +29,12 @@ interface Tenant {
   trialEndsAt: string | null;
 }
 
+function formatCount(n: number): string {
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M';
+  if (n >= 1_000) return (n / 1_000).toFixed(1) + 'K';
+  return n.toLocaleString();
+}
+
 export default function SuperAdminDashboard() {
   const { data, isLoading } = useQuery<{ data: SuperAdminDashboard }>({
     queryKey: ['superadmin', 'dashboard'],
@@ -66,7 +72,7 @@ export default function SuperAdminDashboard() {
     },
     {
       label: 'Total Messages',
-      value: ((metrics?.totalMessages || 0) / 1000000).toFixed(1) + 'M',
+      value: formatCount(metrics?.totalMessages || 0),
       icon: MessageSquare,
       color: 'purple',
       subtext: 'All time',

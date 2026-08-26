@@ -17,6 +17,7 @@ interface TenantUser {
   isActive: boolean;
   createdAt: string;
   lastLoginAt: string | null;
+  avatarGender?: 'boy' | 'girl' | null;
 }
 
 interface TenantCreditInfo {
@@ -230,6 +231,7 @@ interface TenantDetailModalProps {
 
 function TenantDetailModal({ tenantId, onClose }: TenantDetailModalProps) {
   const [tab, setTab] = useState<'overview' | 'users' | 'credits' | 'billing'>('overview');
+  const [showSuspendConfirm, setShowSuspendConfirm] = useState(false);
   const queryClient = useQueryClient();
 
   const { data: tenantData, isLoading } = useQuery({
@@ -285,6 +287,7 @@ function TenantDetailModal({ tenantId, onClose }: TenantDetailModalProps) {
   const tenant = tenantData;
 
   return createPortal(
+    <>
     <div className="fixed inset-0 bg-black/60 backdrop-blur-md flex items-center justify-center z-[9999] p-4">
       <div className="bg-white rounded-apple-xl w-full max-w-4xl max-h-[90vh] flex flex-col shadow-2xl border border-black/10 overflow-hidden">
         {/* Modal Header */}
@@ -308,7 +311,7 @@ function TenantDetailModal({ tenantId, onClose }: TenantDetailModalProps) {
             </span>
             {tenant.status === 'ACTIVE' || tenant.status === 'TRIAL' ? (
               <button
-                onClick={() => suspendMutation.mutate()}
+                onClick={() => setShowSuspendConfirm(true)}
                 disabled={suspendMutation.isPending}
                 className="px-3 py-1 text-xs border border-red-500/30 text-red-500 rounded-apple-lg hover:bg-red-500/10 disabled:opacity-50"
               >
@@ -328,9 +331,15 @@ function TenantDetailModal({ tenantId, onClose }: TenantDetailModalProps) {
                 try {
                   const res = await api.post(`/superadmin/tenants/${tenantId}/impersonate`);
                   if (res.data?.data?.accessToken) {
+                    const currentToken = localStorage.getItem('accessToken');
+                    const currentUser = localStorage.getItem('user');
+                    if (currentToken && currentUser) {
+                      sessionStorage.setItem('superadmin_accessToken', currentToken);
+                      sessionStorage.setItem('superadmin_user', currentUser);
+                    }
                     localStorage.setItem('accessToken', res.data.data.accessToken);
                     localStorage.setItem('user', JSON.stringify(res.data.data.user));
-                    window.location.href = '/dashboard';
+                    window.location.href = '/';
                   }
                 } catch (err: any) {
                   alert(err.response?.data?.error?.message || 'Failed to impersonate tenant');
@@ -392,7 +401,36 @@ function TenantDetailModal({ tenantId, onClose }: TenantDetailModalProps) {
           {tab === 'billing' && <BillingTab tenantId={tenantId} tenant={tenant} />}
         </div>
       </div>
-    </div>,
+    </div>
+    {showSuspendConfirm && (
+      <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-[10000] p-4">
+        <div className="bg-white rounded-apple-xl w-full max-w-sm shadow-2xl p-6">
+          <h3 className="font-semibold text-lg text-ios-dark mb-2">Suspend {tenant.name}?</h3>
+          <p className="text-sm text-ios-muted mb-5">
+            This immediately blocks all users at this tenant from logging in and sending messages. You can reactivate it at any time.
+          </p>
+          <div className="flex gap-3">
+            <button
+              onClick={() => setShowSuspendConfirm(false)}
+              className="flex-1 px-4 py-2 text-sm font-medium border border-black/10 rounded-apple-lg hover:bg-ios-gray"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={() => {
+                suspendMutation.mutate();
+                setShowSuspendConfirm(false);
+              }}
+              disabled={suspendMutation.isPending}
+              className="flex-1 px-4 py-2 text-sm font-medium bg-red-500 text-white rounded-apple-lg hover:bg-red-600 disabled:opacity-50"
+            >
+              Suspend Tenant
+            </button>
+          </div>
+        </div>
+      </div>
+    )}
+    </>,
     document.body
   );
 }
@@ -606,6 +644,15 @@ function UsersTab({ tenantId, users }: { tenantId: string; users: TenantUser[] }
     },
   });
 
+  const avatarGenderMutation = useMutation({
+    mutationFn: async ({ userId, avatarGender }: { userId: string; avatarGender: 'boy' | 'girl' | null }) => {
+      await api.patch(`/superadmin/tenants/${tenantId}/users/${userId}`, { avatarGender });
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['superadmin-tenant-detail', tenantId] });
+    },
+  });
+
   const deleteUserMutation = useMutation({
     mutationFn: async (userId: string) => {
       await api.delete(`/superadmin/tenants/${tenantId}/users/${userId}`);
@@ -712,6 +759,20 @@ function UsersTab({ tenantId, users }: { tenantId: string; users: TenantUser[] }
                 <span className={`text-xs ${u.isActive ? 'text-wa-green' : 'text-ios-muted'}`}>
                   {u.isActive ? 'Active' : 'Inactive'}
                 </span>
+                <select
+                  value={u.avatarGender || ''}
+                  onChange={(e) => avatarGenderMutation.mutate({
+                    userId: u.id,
+                    avatarGender: e.target.value === '' ? null : (e.target.value as 'boy' | 'girl'),
+                  })}
+                  disabled={avatarGenderMutation.isPending}
+                  className="px-2 py-1 text-xs border border-black/10 rounded bg-white hover:bg-ios-gray/50 transition"
+                  title="Navbar avatar"
+                >
+                  <option value="">Avatar: Auto</option>
+                  <option value="boy">Avatar: Boy</option>
+                  <option value="girl">Avatar: Girl</option>
+                </select>
                 <button
                   onClick={() => resetPasswordMutation.mutate(u.id)}
                   disabled={resetPasswordMutation.isPending}

@@ -4,8 +4,10 @@
  */
 
 import { useState } from 'react';
+import { createPortal } from 'react-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../api/client';
+import CampaignMessageSuggest from '../components/CampaignMessageSuggest';
 import {
   Plus,
   Send,
@@ -67,6 +69,43 @@ interface Template {
   preview: string;
 }
 
+const OPERATOR_LABELS: Record<string, string> = {
+  equals: 'is',
+  not_equals: 'is not',
+  contains: 'contains',
+  not_contains: 'does not contain',
+  starts_with: 'starts with',
+  ends_with: 'ends with',
+  is_empty: 'is empty',
+  is_not_empty: 'is not empty',
+  greater_than: '>',
+  less_than: '<',
+  within_days: 'within (days)',
+};
+
+const FIELD_LABELS: Record<string, string> = {
+  tag: 'Tag',
+  city: 'City',
+  country: 'Country',
+  lastMessageAt: 'Last Message',
+  createdAt: 'Created Date',
+  totalMessagesSent: 'Messages Sent',
+  language: 'Language',
+  company: 'Company',
+};
+
+function describeSegmentQuery(query: any): string {
+  const conditions = query?.conditions || [];
+  if (conditions.length === 0) return 'All contacts';
+  const matchType = query?.type === 'any' ? 'Any' : 'All';
+  const parts = conditions.map((c: any) => {
+    const field = FIELD_LABELS[c.field] || c.field;
+    const op = OPERATOR_LABELS[c.operator] || c.operator;
+    return c.value ? `${field} ${op} "${c.value}"` : `${field} ${op}`;
+  });
+  return conditions.length > 1 ? `${matchType} of: ${parts.join(', ')}` : parts[0];
+}
+
 interface PhoneNumberOption {
   id: string;
   phoneNumber: string;
@@ -88,6 +127,7 @@ export default function CampaignsPage() {
   const [wizardStep, setWizardStep] = useState(1);
   const [tab, setTab] = useState<'all' | 'sent' | 'scheduled' | 'draft' | 'sending'>('all');
   const [showDeleteConfirm, setShowDeleteConfirm] = useState<string | null>(null);
+  const [viewingCampaignId, setViewingCampaignId] = useState<string | null>(null);
   const [notification, setNotification] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
   const queryClient = useQueryClient();
 
@@ -100,7 +140,7 @@ export default function CampaignsPage() {
   // Campaign form state
   const [form, setForm] = useState({
     name: '',
-    segmentId: '',
+    segmentId: 'all',
     templateId: '',
     phoneNumberId: '',
     message: '',
@@ -116,6 +156,10 @@ export default function CampaignsPage() {
       const response = await api.get('/campaigns', { params: { tab } });
       return response.data;
     },
+    // Delivered/read stats and status arrive asynchronously via Meta's
+    // webhooks as the campaign actually sends — poll so this reflects
+    // progress on its own instead of needing a manual refresh.
+    refetchInterval: 15000,
   });
 
   // Fetch segments for audience selection
@@ -170,11 +214,41 @@ export default function CampaignsPage() {
     },
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ['campaigns'] });
-      showNotification('success', 'Campaign created successfully!');
+      // If schedule type is "now", trigger immediate send via POST /campaigns/:id/send
+      if (form.scheduleType === 'now' && data?.data?.id) {
+        api.post(`/campaigns/${data.data.id}/send`)
+          .then(() => {
+            queryClient.invalidateQueries({ queryKey: ['campaigns'] });
+            showNotification('success', 'Campaign created and sending started!');
+          })
+          .catch((err: any) => {
+            const msg = err.response?.data?.error?.message || 'Campaign created but failed to start sending';
+            showNotification('error', msg);
+          });
+      } else {
+        showNotification('success', data?.data?.scheduledAt ? 'Campaign scheduled successfully!' : 'Campaign saved as draft!');
+      }
       resetForm();
     },
     onError: (error: any) => {
       const message = error.response?.data?.error?.message || 'Failed to create campaign';
+      showNotification('error', message);
+    },
+  });
+
+  // Save campaign as draft (no auto-send, unlike createMutation)
+  const saveDraftMutation = useMutation({
+    mutationFn: async (campaign: any) => {
+      const response = await api.post('/campaigns', campaign);
+      return response.data;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['campaigns'] });
+      showNotification('success', 'Campaign saved as draft!');
+      resetForm();
+    },
+    onError: (error: any) => {
+      const message = error.response?.data?.error?.message || 'Failed to save draft';
       showNotification('error', message);
     },
   });
@@ -207,11 +281,32 @@ export default function CampaignsPage() {
     },
   });
 
+  // Send campaign mutation — calls POST /campaigns/:id/send to trigger actual message delivery
+  const sendMutation = useMutation({
+    mutationFn: async (id: string) => {
+      const response = await api.post(`/campaigns/${id}/send`);
+      return response.data;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['campaigns'] });
+      showNotification('success', 'Campaign launched! Messages are being sent.');
+    },
+    onError: (error: any) => {
+      const message = error.response?.data?.error?.message || 'Failed to launch campaign';
+      showNotification('error', message);
+    },
+  });
+
   // Transform data
   const campaigns: Campaign[] = (data?.data || []).map((c: any) => ({
     id: c.id,
     name: c.name || 'Untitled Campaign',
-    status: c.status?.toLowerCase() || 'draft',
+    // Backend CampaignStatus is DRAFT/SCHEDULED/SENDING/COMPLETED/FAILED/
+    // CANCELLED — every other value already matches this page's vocabulary
+    // via plain lowercasing, but COMPLETED has no equivalent here (the page
+    // was written expecting 'sent'), so it fell through to the unstyled
+    // draft fallback and every finished campaign displayed as "Draft".
+    status: c.status === 'COMPLETED' ? 'sent' : (c.status?.toLowerCase() || 'draft'),
     type: c.isDrip ? 'automated' : 'broadcast',
     segment: c.audienceType || 'Unknown',
     sent: c.totalSent || 0,
@@ -226,7 +321,7 @@ export default function CampaignsPage() {
     id: s.id,
     name: s.name,
     contacts: s.totalContacts || 0,
-    criteria: s.query ? JSON.stringify(s.query) : '',
+    criteria: describeSegmentQuery(s.query),
   }));
 
   const templates: Template[] = (templatesData?.data || []).map((t: any) => ({
@@ -248,7 +343,7 @@ export default function CampaignsPage() {
     setWizardStep(1);
     setForm({
       name: '',
-      segmentId: '',
+      segmentId: 'all',
       templateId: '',
       phoneNumberId: '',
       message: '',
@@ -278,7 +373,7 @@ export default function CampaignsPage() {
   };
 
   // Handle form submit
-  const handleSubmit = () => {
+  const buildCampaignPayload = () => {
     // Determine audience type based on selection
     let audienceType: 'all' | 'segment' | 'contacts' = 'segment';
     let segmentIds: string[] = [];
@@ -291,14 +386,31 @@ export default function CampaignsPage() {
       segmentIds = [form.segmentId];
     }
 
-    createMutation.mutate({
+    return {
       name: form.name,
       templateId: form.templateId || null,
       phoneNumberId: form.phoneNumberId || null,
       audienceType,
       segmentIds,
       contactIds,
+    };
+  };
+
+  const handleSubmit = () => {
+    createMutation.mutate({
+      ...buildCampaignPayload(),
       scheduledAt: form.scheduleType === 'scheduled' ? form.scheduledAt : null,
+    });
+  };
+
+  const handleSaveDraft = () => {
+    if (!form.name) {
+      showNotification('error', 'Campaign name is required to save as draft');
+      return;
+    }
+    saveDraftMutation.mutate({
+      ...buildCampaignPayload(),
+      scheduledAt: null,
     });
   };
 
@@ -481,7 +593,11 @@ export default function CampaignsPage() {
             {filtered.map((campaign) => {
               const status = statusColors[campaign.status] || statusColors.draft;
               return (
-                <div key={campaign.id} className="card-apple p-5 hover:shadow-apple-hover transition">
+                <div
+                  key={campaign.id}
+                  onClick={() => setViewingCampaignId(campaign.id)}
+                  className="card-apple p-5 hover:shadow-apple-hover transition cursor-pointer"
+                >
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-4">
                       <div className={`w-12 h-12 rounded-apple-xl flex items-center justify-center ${
@@ -557,14 +673,15 @@ export default function CampaignsPage() {
                         {campaign.status === 'draft' && (
                           <>
                             <button
-                              onClick={() => updateMutation.mutate({ id: campaign.id, status: 'sending' })}
-                              className="p-2 hover:bg-ios-gray rounded-apple-lg transition"
-                              title="Launch"
+                              onClick={(e) => { e.stopPropagation(); sendMutation.mutate(campaign.id); }}
+                              disabled={sendMutation.isPending}
+                              className="p-2 hover:bg-ios-gray rounded-apple-lg transition disabled:opacity-50"
+                              title="Launch campaign"
                             >
                               <Play className="w-4 h-4 text-wa-green" />
                             </button>
                             <button
-                              onClick={() => setShowDeleteConfirm(campaign.id)}
+                              onClick={(e) => { e.stopPropagation(); setShowDeleteConfirm(campaign.id); }}
                               className="p-2 hover:bg-ios-gray rounded-apple-lg transition"
                               title="Delete"
                             >
@@ -574,7 +691,7 @@ export default function CampaignsPage() {
                         )}
                         {campaign.status === 'scheduled' && (
                           <button
-                            onClick={() => updateMutation.mutate({ id: campaign.id, status: 'paused' })}
+                            onClick={(e) => { e.stopPropagation(); updateMutation.mutate({ id: campaign.id, status: 'paused' }); }}
                             className="p-2 hover:bg-ios-gray rounded-apple-lg transition"
                             title="Pause"
                           >
@@ -583,7 +700,7 @@ export default function CampaignsPage() {
                         )}
                         {campaign.status === 'sending' && (
                           <button
-                            onClick={() => updateMutation.mutate({ id: campaign.id, status: 'paused' })}
+                            onClick={(e) => { e.stopPropagation(); updateMutation.mutate({ id: campaign.id, status: 'paused' }); }}
                             className="p-2 hover:bg-ios-gray rounded-apple-lg transition"
                             title="Pause"
                           >
@@ -628,6 +745,10 @@ export default function CampaignsPage() {
               </div>
             </div>
           </div>
+        )}
+
+        {viewingCampaignId && (
+          <CampaignDetailModal campaignId={viewingCampaignId} onClose={() => setViewingCampaignId(null)} />
         )}
       </div>
     );
@@ -811,7 +932,7 @@ export default function CampaignsPage() {
                   </div>
                   <p className="text-xs text-ios-muted">Start from scratch</p>
                 </button>
-                {templates.slice(0, 4).map((template) => (
+                {templates.map((template) => (
                   <button
                     key={template.id}
                     onClick={() => {
@@ -864,6 +985,13 @@ export default function CampaignsPage() {
                   <Zap className="w-4 h-4" />
                   Add Variables
                 </button>
+              </div>
+              <div className="mt-3">
+                <CampaignMessageSuggest
+                  audienceDescription={form.segmentId === 'all' ? 'all contacts' : selectedSegment?.name || 'a segment'}
+                  existingText={form.message}
+                  onApply={(message) => setForm({ ...form, message })}
+                />
               </div>
             </div>
 
@@ -1086,7 +1214,7 @@ export default function CampaignsPage() {
                         ? `${totalContacts} contacts (All)`
                         : selectedSegment
                           ? `${selectedSegment.contacts} contacts (${selectedSegment.name})`
-                          : `${totalContacts} contacts (All)`}
+                          : 'No audience selected'}
                     </p>
                   </div>
                   <div>
@@ -1131,19 +1259,33 @@ export default function CampaignsPage() {
               )}
 
               {/* Warning */}
-              <div className="bg-apple-orange/10 border border-apple-orange/20 rounded-apple-lg p-4">
-                <div className="flex items-start gap-3">
-                  <AlertCircle className="w-5 h-5 text-apple-orange flex-shrink-0 mt-0.5" />
-                  <div className="text-sm">
-                    <p className="font-medium text-ios-dark">Before you launch:</p>
-                    <ul className="text-ios-muted mt-1 space-y-1">
-                      <li>• Ensure your message template is approved by Meta</li>
-                      <li>• Verify recipient contacts have opted in</li>
-                      <li>• Check that all variables are properly mapped</li>
-                    </ul>
+              {!form.templateId ? (
+                <div className="bg-apple-red/10 border border-apple-red/20 rounded-apple-lg p-4">
+                  <div className="flex items-start gap-3">
+                    <AlertCircle className="w-5 h-5 text-apple-red flex-shrink-0 mt-0.5" />
+                    <div className="text-sm">
+                      <p className="font-medium text-ios-dark">A template is required to send this campaign</p>
+                      <p className="text-ios-muted mt-1">
+                        WhatsApp requires an approved message template for broadcast campaigns — custom text can only be used for 1:1 replies within an active conversation. Go back to the Message step and select a template, or save this as a draft.
+                      </p>
+                    </div>
                   </div>
                 </div>
-              </div>
+              ) : (
+                <div className="bg-apple-orange/10 border border-apple-orange/20 rounded-apple-lg p-4">
+                  <div className="flex items-start gap-3">
+                    <AlertCircle className="w-5 h-5 text-apple-orange flex-shrink-0 mt-0.5" />
+                    <div className="text-sm">
+                      <p className="font-medium text-ios-dark">Before you launch:</p>
+                      <ul className="text-ios-muted mt-1 space-y-1">
+                        <li>• Ensure your message template is approved by Meta</li>
+                        <li>• Verify recipient contacts have opted in</li>
+                        <li>• Check that all variables are properly mapped</li>
+                      </ul>
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -1162,10 +1304,11 @@ export default function CampaignsPage() {
 
         <div className="flex items-center gap-3">
           <button
-            onClick={resetForm}
-            className="btn-apple bg-ios-gray text-ios-dark"
+            onClick={handleSaveDraft}
+            disabled={saveDraftMutation.isPending || !form.name}
+            className="btn-apple bg-ios-gray text-ios-dark disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            Save as Draft
+            {saveDraftMutation.isPending ? 'Saving...' : 'Save as Draft'}
           </button>
 
           {wizardStep < 5 ? (
@@ -1184,8 +1327,9 @@ export default function CampaignsPage() {
           ) : (
             <button
               onClick={handleSubmit}
-              disabled={createMutation.isPending}
-              className="btn-apple bg-wa-gradient text-white shadow-wa flex items-center gap-2"
+              disabled={createMutation.isPending || !form.templateId}
+              title={!form.templateId ? 'Select a template on the Message step to launch or schedule this campaign' : undefined}
+              className="btn-apple bg-wa-gradient text-white shadow-wa flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {createMutation.isPending ? (
                 <>
@@ -1208,5 +1352,192 @@ export default function CampaignsPage() {
         </div>
       </div>
     </div>
+  );
+}
+
+// ============================================
+// Campaign Detail Modal
+// ============================================
+
+const MESSAGE_STATUS_STYLE: Record<string, { bg: string; text: string; label: string }> = {
+  PENDING: { bg: 'bg-ios-gray', text: 'text-ios-muted', label: 'Pending' },
+  SENT: { bg: 'bg-wa-teal/20', text: 'text-wa-teal', label: 'Sent' },
+  DELIVERED: { bg: 'bg-apple-green/20', text: 'text-apple-green', label: 'Delivered' },
+  READ: { bg: 'bg-apple-blue/20', text: 'text-apple-blue', label: 'Read' },
+  FAILED: { bg: 'bg-apple-red/20', text: 'text-apple-red', label: 'Failed' },
+};
+
+// Meta's error field sometimes arrives as raw JSON (e.g. from an older send
+// path) rather than the clean human message the newer webhook handler
+// stores — strip it down so the recipient table never shows a wall of JSON.
+function cleanCampaignError(raw?: string | null): string {
+  if (!raw) return '';
+  const jsonStart = raw.indexOf('{');
+  if (jsonStart === -1) return raw;
+  try {
+    const parsed = JSON.parse(raw.slice(jsonStart));
+    return parsed?.error?.message || raw.slice(0, jsonStart).trim() || raw;
+  } catch {
+    return raw;
+  }
+}
+
+interface CampaignRecipientMessage {
+  id: string;
+  contact: { id: string; name: string | null; phone: string } | null;
+  status: string;
+  body: string | null;
+  metaMessageId: string | null;
+  errorCode: string | null;
+  errorMessage: string | null;
+  sentAt: string | null;
+  deliveredAt: string | null;
+  readAt: string | null;
+  failedAt: string | null;
+  createdAt: string;
+}
+
+function CampaignDetailModal({ campaignId, onClose }: { campaignId: string; onClose: () => void }) {
+  // Real-time: the campaign can still be actively sending while this is
+  // open, and Meta's delivery/read receipts keep arriving asynchronously
+  // for a while after — poll both queries so every number on screen (status
+  // badge, aggregate stats, and each recipient row) stays live rather than
+  // freezing at whatever was true the moment the modal opened.
+  const { data: campaignData, isLoading: campaignLoading } = useQuery({
+    queryKey: ['campaign-detail', campaignId],
+    queryFn: async () => (await api.get(`/campaigns/${campaignId}`)).data.data,
+    refetchInterval: 8000,
+  });
+
+  const { data: messagesData, isLoading: messagesLoading } = useQuery({
+    queryKey: ['campaign-messages', campaignId],
+    queryFn: async () => (await api.get(`/campaigns/${campaignId}/messages`, { params: { limit: 200 } })).data,
+    refetchInterval: 8000,
+  });
+
+  const messages: CampaignRecipientMessage[] = messagesData?.data || [];
+  const total = messagesData?.meta?.total ?? messages.length;
+
+  const statusLabel = campaignData?.status
+    ? campaignData.status.charAt(0) + campaignData.status.slice(1).toLowerCase()
+    : '—';
+
+  const pct = (n: number, of: number) => (of > 0 ? Math.round((n / of) * 100) : 0);
+
+  // Portal to document.body — mounted inside <main class="relative z-10">,
+  // whose "relative + explicit z-index" creates a stacking context that caps
+  // this modal below the sidebar (z-30, outside <main> at the top level)
+  // regardless of this modal's own higher z-index number.
+  return createPortal(
+    <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+      <div className="bg-white rounded-apple-2xl shadow-apple-xl w-full max-w-3xl h-[85vh] flex flex-col overflow-hidden">
+        {/* Header */}
+        <div className="flex items-center justify-between px-6 py-4 border-b border-black/5 flex-shrink-0">
+          <div className="min-w-0">
+            <h2 className="font-semibold text-ios-dark truncate">{campaignData?.name || 'Campaign'}</h2>
+            <p className="text-xs text-ios-muted mt-0.5">
+              {campaignData?.template?.name ? `Template: ${campaignData.template.name}` : 'No template'}
+              {campaignData?.phoneNumber?.displayName ? ` · From: ${campaignData.phoneNumber.displayName}` : ''}
+            </p>
+          </div>
+          <button onClick={onClose} className="p-2 hover:bg-ios-gray rounded-apple-lg transition-colors flex-shrink-0">
+            <X className="w-5 h-5 text-ios-muted" />
+          </button>
+        </div>
+
+        {campaignLoading ? (
+          <div className="flex-1 flex items-center justify-center">
+            <Loader2 className="w-6 h-6 text-ios-muted animate-spin" />
+          </div>
+        ) : !campaignData ? (
+          <div className="flex-1 flex items-center justify-center text-sm text-ios-muted">Campaign not found</div>
+        ) : (
+          <>
+            {/* Stats */}
+            <div className="grid grid-cols-5 gap-3 px-6 py-4 border-b border-black/5 flex-shrink-0">
+              {[
+                { label: 'Status', value: statusLabel },
+                { label: 'Recipients', value: campaignData.totalRecipients ?? total },
+                { label: 'Sent', value: campaignData.totalSent ?? 0 },
+                { label: 'Delivered', value: `${pct(campaignData.totalDelivered ?? 0, campaignData.totalSent ?? 0)}%` },
+                { label: 'Read', value: `${pct(campaignData.totalRead ?? 0, campaignData.totalDelivered ?? 0)}%` },
+              ].map((s) => (
+                <div key={s.label} className="text-center">
+                  <p className="text-lg font-bold text-ios-dark">{s.value}</p>
+                  <p className="text-xs text-ios-muted">{s.label}</p>
+                </div>
+              ))}
+            </div>
+
+            {/* Meta info row */}
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-1 px-6 py-3 text-xs text-ios-muted border-b border-black/5 flex-shrink-0">
+              <span>Audience: {campaignData.audienceType || 'segment'}</span>
+              {campaignData.createdAt && <span>Created: {new Date(campaignData.createdAt).toLocaleString()}</span>}
+              {campaignData.startedAt && <span>Started: {new Date(campaignData.startedAt).toLocaleString()}</span>}
+              {campaignData.completedAt && <span>Completed: {new Date(campaignData.completedAt).toLocaleString()}</span>}
+              {campaignData.totalFailed > 0 && (
+                <span className="text-apple-red font-medium">{campaignData.totalFailed} failed</span>
+              )}
+            </div>
+
+            {/* Recipients */}
+            <div className="flex-1 overflow-y-auto">
+              {messagesLoading ? (
+                <div className="flex items-center justify-center py-10">
+                  <Loader2 className="w-5 h-5 text-ios-muted animate-spin" />
+                </div>
+              ) : messages.length === 0 ? (
+                <p className="text-sm text-ios-muted text-center py-10">No recipients yet</p>
+              ) : (
+                <table className="w-full text-sm">
+                  <thead className="sticky top-0 bg-white border-b border-black/5">
+                    <tr className="text-left text-xs text-ios-muted uppercase tracking-wide">
+                      <th className="px-6 py-2 font-medium">Contact</th>
+                      <th className="px-3 py-2 font-medium">Status</th>
+                      <th className="px-3 py-2 font-medium">Timestamp</th>
+                      <th className="px-6 py-2 font-medium">Detail</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {messages.map((m) => {
+                      const s = MESSAGE_STATUS_STYLE[m.status] || MESSAGE_STATUS_STYLE.PENDING;
+                      const ts = m.readAt || m.deliveredAt || m.failedAt || m.sentAt || m.createdAt;
+                      return (
+                        <tr key={m.id} className="border-b border-black/5 last:border-0">
+                          <td className="px-6 py-2.5">
+                            <p className="text-ios-dark font-medium truncate max-w-[160px]">
+                              {m.contact?.name || m.contact?.phone || 'Unknown'}
+                            </p>
+                            <p className="text-xs text-ios-muted font-mono">{m.contact?.phone}</p>
+                          </td>
+                          <td className="px-3 py-2.5">
+                            <span className={`px-2 py-0.5 rounded-apple-full text-xs font-medium ${s.bg} ${s.text}`}>
+                              {s.label}
+                            </span>
+                          </td>
+                          <td className="px-3 py-2.5 text-xs text-ios-muted whitespace-nowrap">
+                            {ts ? new Date(ts).toLocaleString() : '—'}
+                          </td>
+                          <td className="px-6 py-2.5 text-xs text-ios-muted max-w-[240px] truncate">
+                            {m.status === 'FAILED' ? (
+                              <span className="text-apple-red">{cleanCampaignError(m.errorMessage) || 'Failed'}</span>
+                            ) : m.metaMessageId ? (
+                              <span className="font-mono truncate block">{m.metaMessageId}</span>
+                            ) : (
+                              '—'
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          </>
+        )}
+      </div>
+    </div>,
+    document.body
   );
 }

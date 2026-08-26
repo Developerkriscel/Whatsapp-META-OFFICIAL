@@ -7,8 +7,8 @@ generator client {
 }
 
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
   extensions = [pgcrypto]
 }
 
@@ -39,6 +39,7 @@ enum TenantStatus {
   SUSPENDED
   CHURNED
   PENDING_SETUP
+  PENDING_DELETION
 }
 
 // Plan Tier
@@ -47,6 +48,21 @@ enum PlanTier {
   GROWTH
   BUSINESS
   ENTERPRISE
+}
+
+// Agent Status
+enum AgentStatus {
+  ONLINE
+  OFFLINE
+  AWAY
+  BUSY
+}
+
+// Contact Consent Status
+enum ConsentStatus {
+  OPTED_IN // Contact has explicitly opted in
+  OPTED_OUT // Contact has opted out (STOP keyword, manual, etc.)
+  UNKNOWN // Consent status unknown (default for imported contacts)
 }
 
 // Message Direction
@@ -108,7 +124,9 @@ enum TemplateStatus {
 enum CampaignStatus {
   DRAFT
   SCHEDULED
+  QUEUED
   SENDING
+  PAUSED
   COMPLETED
   FAILED
   CANCELLED
@@ -140,6 +158,7 @@ enum AuditAction {
   LOGOUT
   SEND_MESSAGE
   SEND_CAMPAIGN
+  CREATE_CAMPAIGN
   UPGRADE_PLAN
   DOWNGRADE_PLAN
   SUSPEND
@@ -147,6 +166,12 @@ enum AuditAction {
   CREDIT_ADDED
   CREDIT_DEDUCTED
   PLAN_CHANGED
+  IMPERSONATE_TENANT
+  UPDATE_RATE_MARKUP
+  CREATE_ANNOUNCEMENT
+  REQUEST_DELETE
+  CANCEL_DELETE
+  PURGE
 }
 
 // ============================================
@@ -173,27 +198,27 @@ model Superadmin {
 // ============================================
 
 model Plan {
-  id          String   @id @default(cuid())
-  name        String   @unique
-  tier        PlanTier @unique
+  id           String   @id @default(cuid())
+  name         String   @unique
+  tier         PlanTier @unique
   monthlyPrice Decimal  @db.Decimal(10, 2)
   annualPrice  Decimal  @db.Decimal(10, 2)
-  description String?
+  description  String?
 
   // Limits
-  maxContacts           Int @default(500)
-  maxMessagesPerMonth   Int @default(5000)
-  maxPhoneNumbers       Int @default(1)
-  maxTeamMembers        Int @default(3)
-  maxChatbotFlows       Int @default(1)
-  maxCampaigns          Int @default(10)
-  maxSegments           Int @default(5)
+  maxContacts            Int @default(500)
+  maxMessagesPerMonth    Int @default(5000)
+  maxPhoneNumbers        Int @default(1)
+  maxTeamMembers         Int @default(3)
+  maxChatbotFlows        Int @default(1)
+  maxCampaigns           Int @default(10)
+  maxSegments            Int @default(5)
   maxContactsPerCampaign Int @default(500)
-  maxTemplates          Int @default(10)
-  maxAPIKeys            Int @default(1)
-  maxCampaignsPerDay    Int @default(5)
-  maxMessagesPerMinute  Int @default(10)
-  maxMessagesPerHour    Int @default(30)
+  maxTemplates           Int @default(10)
+  maxAPIKeys             Int @default(1)
+  maxCampaignsPerDay     Int @default(5)
+  maxMessagesPerMinute   Int @default(10)
+  maxMessagesPerHour     Int @default(30)
 
   // Features
   hasAnalytics         Boolean @default(true)
@@ -211,15 +236,15 @@ model Plan {
   hasBulkExport        Boolean @default(true)
 
   // Overages
-  overageContacts  Decimal @default(0.01) @db.Decimal(10, 4)
-  overageMessages  Decimal @default(0.005) @db.Decimal(10, 6)
-  webhookRetries   Int     @default(3)
-  dataRetentionDays Int    @default(30)
+  overageContacts   Decimal @default(0.01) @db.Decimal(10, 4)
+  overageMessages   Decimal @default(0.005) @db.Decimal(10, 6)
+  webhookRetries    Int     @default(3)
+  dataRetentionDays Int     @default(30)
 
   // Meta
-  isPublic         Boolean @default(true)
-  isActive         Boolean @default(true)
-  sortOrder        Int     @default(0)
+  isPublic  Boolean @default(true)
+  isActive  Boolean @default(true)
+  sortOrder Int     @default(0)
 
   // Stripe
   stripePriceIdMonthly String?
@@ -238,34 +263,34 @@ model Plan {
 // ============================================
 
 model Tenant {
-  id        String   @id @default(cuid())
+  id String @id @default(cuid())
 
   // Branding
-  name           String
-  logoUrl        String?
-  website        String?
-  timezone       String  @default("UTC")
-  defaultLanguage String @default("en")
+  name            String
+  logoUrl         String?
+  website         String?
+  timezone        String  @default("UTC")
+  defaultLanguage String  @default("en")
 
   // Business Info
-  industry     String?
-  useCase      String?
+  industry      String?
+  useCase       String?
   businessHours Json?
 
   // Default Settings (for WhatsApp messaging)
-  defaultCountry   String @default("IN")    // Default country for contacts
-  defaultCurrency  String @default("INR")   // Default billing currency
+  defaultCountry  String @default("IN") // Default country for contacts
+  defaultCurrency String @default("INR") // Default billing currency
 
   // Subscription
-  status    TenantStatus @default(PENDING_SETUP)
-  planId    String?
-  plan      Plan?        @relation(fields: [planId], references: [id])
+  status           TenantStatus @default(PENDING_SETUP)
+  planId           String?
+  plan             Plan?        @relation(fields: [planId], references: [id])
   stripeCustomerId String?
   stripeSubId      String?
 
   // Trial
   trialEndsAt DateTime?
-  isOnTrial   Boolean  @default(false)
+  isOnTrial   Boolean   @default(false)
 
   // Meta Business Account
   metaBusinessId String?
@@ -278,49 +303,62 @@ model Tenant {
   qualityScore String?
 
   // Billing settings
-  billingEmail String?
+  billingEmail   String?
   billingAddress String?
-  billingName String?
-  taxId String?
+  billingName    String?
+  taxId          String?
 
   // Auto-recharge settings
-  autoRechargeEnabled Boolean @default(false)
-  autoRechargeThreshold Int @default(1000) // Credits threshold
-  autoRechargeAmount Int @default(5000) // Credits to add
+  autoRechargeEnabled   Boolean @default(false)
+  autoRechargeThreshold Int     @default(1000) // Credits threshold
+  autoRechargeAmount    Int     @default(5000) // Credits to add
 
   // Usage alerts
-  usageAlertContactsPercent Int @default(80)
-  usageAlertMessagesPercent Int @default(80)
-  usageAlertEnabled Boolean @default(true)
+  usageAlertContactsPercent Int     @default(80)
+  usageAlertMessagesPercent Int     @default(80)
+  usageAlertEnabled         Boolean @default(true)
 
   suspendedAt DateTime?
+
+  // Soft-delete grace period — set by superadmin "delete tenant", cleared by "cancel deletion"
+  deletionRequestedAt   DateTime?
+  deletionRequestedById String?
+  scheduledPurgeAt      DateTime?
+  statusBeforeDeletion  TenantStatus?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   // ALL tenant-scoped relations
-  users           User[]
-  contacts        Contact[]
-  conversations   Conversation[]
-  messages        Message[]
-  templates       Template[]
-  campaigns       Campaign[]
-  phoneNumbers    PhoneNumber[]
-  sessions        UserSession[]
-  botFlows        BotFlow[]
-  auditLogs       AuditLog[]
-  tags            Tag[]
-  supportTickets  Ticket[]
-  apiKeys         ApiKey[]
-  invoices        Invoice[]
-  segments        Segment[]
-  whatsappFlows   WhatsAppFlow[]
-  addons          TenantAddon[]
-  credits         TenantCredit?
-  messageCredits  MessageCredit[]
+  users          User[]
+  contacts       Contact[]
+  conversations  Conversation[]
+  conversationNotes ConversationNote[]
+  messages       Message[]
+  templates      Template[]
+  campaigns      Campaign[]
+  phoneNumbers   PhoneNumber[]
+  sessions       UserSession[]
+  botFlows       BotFlow[]
+  knowledgeBases KnowledgeBase[]
+  auditLogs      AuditLog[]
+  tags           Tag[]
+  supportTickets Ticket[]
+  apiKeys        ApiKey[]
+  invoices       Invoice[]
+  segments       Segment[]
+  whatsappFlows  WhatsAppFlow[]
+  addons         TenantAddon[]
+  credits        TenantCredit?
+  messageCredits MessageCredit[]
   quickReplies   QuickReply[]
-  settings        TenantSetting?
+  settings       TenantSetting?
   whatsappCreds  WhatsAppCredentials?
+  notifications  Notification[]
+  webhookLogs    WebhookLog[]
+
+  // Teams
+  teams Team[]
 
   @@index([status])
   @@index([planId])
@@ -329,13 +367,48 @@ model Tenant {
 
 // Tenant Add-ons
 model TenantAddon {
-  id        String   @id @default(cuid())
-  tenantId  String
-  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  addonId   String
-  addonName String
+  id            String  @id @default(cuid())
+  tenantId      String
+  tenant        Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  addonId       String
+  addonName     String
   stripePriceId String?
-  status    String   @default("active")
+  status        String  @default("active")
+
+  @@unique([tenantId, addonId])
+}
+
+// ============================================
+// TEAMS (Agent Groups)
+// ============================================
+
+model Team {
+  id       String @id @default(cuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  name        String
+  description String?
+  color       String  @default("#6366f1")
+
+  // Team settings
+  isActive       Boolean        @default(true)
+  autoAssign     Boolean        @default(false) // Auto-assign new conversations
+  assignmentMode AssignmentMode @default(ROUND_ROBIN)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  User      User[]
+  conversations Conversation[]
+
+  @@index([tenantId])
+  @@map("teams")
+}
+
+enum AssignmentMode {
+  ROUND_ROBIN
+  LEAST_LOADED
+  PRIORITY
 }
 
 // ============================================
@@ -343,35 +416,52 @@ model TenantAddon {
 // ============================================
 
 model WhatsAppCredentials {
-  id        String   @id @default(cuid())
-  tenantId  String   @unique
-  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  id       String @id @default(cuid())
+  tenantId String @unique
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
   // Meta App Credentials (shared across phones for this tenant)
   appId       String?
-  appSecret   String?  // Encrypted
-  accessToken String?  // Encrypted - Permanent or System User token
+  appSecret   String? // Encrypted
+  accessToken String? // Encrypted - Permanent or System User token
 
   // WhatsApp Business Account
-  wabaId      String?  // WhatsApp Business Account ID
-  businessId  String?  // Meta Business ID
+  wabaId     String? // WhatsApp Business Account ID
+  wabaName   String? // WhatsApp Business Account display name
+  businessId String? // Meta Business ID
 
   // Configuration
-  webhookUrl       String?
-  webhookToken     String?  // Encrypted
-  webhookEnabled   Boolean  @default(false)
+  webhookUrl     String?
+  webhookToken   String? // Encrypted
+  webhookEnabled Boolean @default(false)
 
   // Status
-  isConfigured     Boolean  @default(false)
-  lastTestedAt    DateTime?
-  lastError       String?
+  isConfigured Boolean   @default(false)
+  lastTestedAt DateTime?
+  lastError    String?
 
   // Rate Limits (from Meta)
-  rateLimitDaily   Int @default(1000)
-  rateLimitHourly  Int @default(250)
+  rateLimitDaily  Int @default(1000)
+  rateLimitHourly Int @default(250)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+}
+
+// ============================================
+// META DATA DELETION REQUESTS (Facebook Login / App Review requirement)
+// ============================================
+
+model DataDeletionRequest {
+  id               String   @id @default(cuid())
+  metaUserId       String // Facebook/Meta user ID from the signed_request
+  confirmationCode String   @unique
+  status           String   @default("PENDING") // PENDING | COMPLETED
+  tenantId         String? // best-effort match if we can correlate to a tenant
+  completedAt      DateTime?
+  createdAt        DateTime @default(now())
+
+  @@index([metaUserId])
 }
 
 // ============================================
@@ -379,9 +469,9 @@ model WhatsAppCredentials {
 // ============================================
 
 model User {
-  id        String   @id @default(cuid())
-  tenantId  String
-  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  id       String @id @default(cuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
   email     String
   name      String
@@ -389,23 +479,41 @@ model User {
   role      UserRole @default(AGENT)
   avatarUrl String?
   phone     String?
+  avatarGender String? // 'boy' | 'girl' — cosmetic navbar avatar preference, set by a superadmin
 
-  isActive   Boolean   @default(true)
-  isVerified Boolean   @default(false)
-  twoFactorEnabled Boolean @default(false)
+  isActive         Boolean   @default(true)
+  isVerified       Boolean   @default(false)
+  twoFactorEnabled Boolean   @default(false)
   twoFactorSecret  String?
-  lastLoginAt DateTime?
+  lastLoginAt      DateTime?
 
   maxChats Int @default(5)
 
-  conversations Conversation[] @relation("AssignedAgent")
-  messages      Message[]
-  auditLogs     AuditLog[]
-  assignedTickets Ticket[] @relation("AssignedAgent")
-  sessions      UserSession[]
-  apiKeys        ApiKey[]
-  passwordResets PasswordReset[]
-  campaigns     Campaign[]
+  // Agent status & availability
+  isOnline   Boolean     @default(false)
+  status     AgentStatus @default(OFFLINE)
+  lastSeenAt DateTime?
+  awayUntil  DateTime?
+
+  // Agent stats
+  totalAssigned   Int @default(0)
+  totalResolved   Int @default(0)
+  avgResponseTime Int @default(0) // in seconds
+
+  // Team assignment
+  teamId String?
+  team   Team?   @relation(fields: [teamId], references: [id])
+
+  conversations   Conversation[]  @relation("AssignedAgent")
+  messages        Message[]
+  auditLogs       AuditLog[]
+  assignedTickets Ticket[]        @relation("AssignedAgent")
+  sessions        UserSession[]
+  apiKeys         ApiKey[]
+  passwordResets  PasswordReset[]
+  campaigns       Campaign[]
+  notifications   Notification[]
+  conversationNotes ConversationNote[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -420,23 +528,29 @@ model User {
 // ============================================
 
 model Contact {
-  id        String   @id @default(cuid())
-  tenantId  String
-  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  id       String @id @default(cuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
-  phone     String
-  name      String?
-  email     String?
-  company   String?
-  city      String?
-  country   String   @default("IN")  // Detected country from phone (India default)
-  language  String   @default("en")
+  phone    String
+  name     String?
+  email    String?
+  company  String?
+  city     String?
+  country  String  @default("IN") // Detected country from phone (India default)
+  language String  @default("en")
 
-  // Subscription
-  optInAt  DateTime?
-  optOutAt DateTime?
-  isActive Boolean   @default(true)
-  blocked  Boolean   @default(false)
+  // Subscription & Consent
+  optInAt       DateTime?
+  optOutAt      DateTime?
+  consentStatus ConsentStatus @default(UNKNOWN)
+  isActive      Boolean       @default(true)
+  blocked       Boolean       @default(false)
+
+  // Consent source tracking
+  consentSource    String? // 'import', 'webhook', 'manual', 'opt_in_form', 'campaign'
+  consentIp        String? // IP address recorded at the moment of opt-in/opt-out
+  consentReference String? // proof pointer: form submission id, inbound wamid that said STOP, campaign click id, etc.
 
   // Meta quality
   metaQuality String?
@@ -449,10 +563,11 @@ model Contact {
 
   customFields Json @default("{}")
 
-  conversations    Conversation[]
-  messages         Message[]
-  segments         ContactSegment[]
-  tags             ContactTag[]
+  conversations Conversation[]
+  messages      Message[]
+  segments      ContactSegment[]
+  tags          ContactTag[]
+  botExecutions BotExecution[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -468,33 +583,38 @@ model Contact {
 // ============================================
 
 model Conversation {
-  id        String   @id @default(cuid())
-  tenantId  String
-  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  id       String @id @default(cuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
-  contactId    String
-  contact      Contact   @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  contactId     String
+  contact       Contact     @relation(fields: [contactId], references: [id], onDelete: Cascade)
   phoneNumberId String
-  phoneNumber  PhoneNumber @relation(fields: [phoneNumberId], references: [id])
+  phoneNumber   PhoneNumber @relation(fields: [phoneNumberId], references: [id])
 
   status       ConversationStatus @default(OPEN)
   assignedToId String?
-  assignedTo   User?   @relation("AssignedAgent", fields: [assignedToId], references: [id])
-  isBotActive  Boolean @default(true)
+  assignedTo   User?              @relation("AssignedAgent", fields: [assignedToId], references: [id])
+  assignedTeamId String?
+  assignedTeam   Team?            @relation(fields: [assignedTeamId], references: [id])
+  isBotActive  Boolean            @default(true)
+  unreadCount  Int                @default(0)
 
-  flowId    String?
-  flowStep  String?
-  flowData  Json     @default("{}")
+  flowId   String?
+  flowStep String?
+  flowData Json    @default("{}")
 
   openedAt       DateTime  @default(now())
-  lastMessageAt  DateTime @default(now())
+  lastMessageAt  DateTime  @default(now())
   closedAt       DateTime?
   lastInboundAt  DateTime?
   lastOutboundAt DateTime?
 
   tags Tag[]
 
-  messages Message[]
+  messages      Message[]
+  botExecutions BotExecution[]
+  notes         ConversationNote[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -503,7 +623,29 @@ model Conversation {
   @@index([tenantId])
   @@index([status])
   @@index([assignedToId])
+  @@index([assignedTeamId])
   @@map("conversations")
+}
+
+model ConversationNote {
+  id       String @id @default(cuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  authorId String?
+  author   User?   @relation(fields: [authorId], references: [id], onDelete: SetNull)
+
+  content String
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([conversationId])
+  @@index([tenantId])
+  @@map("conversation_notes")
 }
 
 // ============================================
@@ -511,33 +653,33 @@ model Conversation {
 // ============================================
 
 model Message {
-  id        String   @id @default(cuid())
-  tenantId  String
-  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  id       String @id @default(cuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
   conversationId String
-  conversation    Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
   contactId      String
-  contact        Contact  @relation(fields: [contactId], references: [id])
+  contact        Contact      @relation(fields: [contactId], references: [id])
   senderId       String?
-  sender         User?     @relation(fields: [senderId], references: [id])
-  phoneNumberId   String
-  phoneNumber     PhoneNumber @relation(fields: [phoneNumberId], references: [id])
+  sender         User?        @relation(fields: [senderId], references: [id])
+  phoneNumberId  String
+  phoneNumber    PhoneNumber  @relation(fields: [phoneNumberId], references: [id])
 
-  metaMessageId String? @unique
+  metaMessageId String?          @unique
   direction     MessageDirection
-  type          MessageType @default(TEXT)
+  type          MessageType      @default(TEXT)
 
   body String?
 
   // Media
-  mediaUrl     String?
+  mediaUrl      String?
   mediaMimeType String?
-  mediaId      String?
+  mediaId       String?
 
   // Template
-  templateId String?
-  template   Template? @relation(fields: [templateId], references: [id])
+  templateId      String?
+  template        Template? @relation(fields: [templateId], references: [id])
   interactiveData Json?
 
   // Campaign tracking
@@ -545,24 +687,27 @@ model Message {
   campaign   Campaign? @relation(fields: [campaignId], references: [id])
 
   // Status tracking
-  status     MessageStatus @default(PENDING)
-  queuedAt   DateTime?
-  sentAt     DateTime?
-  deliveredAt DateTime?
-  readAt     DateTime?
-  failedAt   DateTime?
-  errorCode  String?
+  status       MessageStatus @default(PENDING)
+  queuedAt     DateTime?
+  sentAt       DateTime?
+  deliveredAt  DateTime?
+  readAt       DateTime?
+  failedAt     DateTime?
+  errorCode    String?
   errorMessage String?
 
   // Cost tracking
-  metaCostUsd    Decimal? @db.Decimal(10, 6)
+  metaCostUsd     Decimal? @db.Decimal(10, 6)
   platformCostUsd Decimal? @db.Decimal(10, 6)
 
   isWithinBusinessHours Boolean?
-  isInternalNote       Boolean  @default(false)
+  isInternalNote        Boolean  @default(false)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+
+  // Back relation for credit tracking
+  credit MessageCredit?
 
   @@index([tenantId])
   @@index([conversationId])
@@ -571,9 +716,6 @@ model Message {
   @@index([status])
   @@index([campaignId])
   @@map("messages")
-
-  // Back relation for credit tracking
-  credit MessageCredit?
 }
 
 // ============================================
@@ -581,21 +723,22 @@ model Message {
 // ============================================
 
 model PhoneNumber {
-  id        String   @id @default(cuid())
-  tenantId  String
-  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  id       String @id @default(cuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
-  phoneNumber String @unique
-  displayName String?
-  metaPhoneId String? @unique
+  phoneNumber  String  @unique
+  displayName  String?
+  metaPhoneId  String? @unique
   metaHolderId String?
+  wabaId       String? // WhatsApp Business Account this phone belongs to
 
   // Per-phone WhatsApp credentials (multi-tenant)
-  phoneNumberId  String?  // Meta Phone Number ID
-  accessToken    String?  // Phone-specific access token from Meta
+  phoneNumberId String? // Meta Phone Number ID
+  accessToken   String? // Phone-specific access token from Meta
 
-  status        String @default("pending_verification")
-  qualityScore  String?
+  status       String  @default("pending_verification")
+  qualityScore String?
 
   // Category permissions
   canSendSales     Boolean @default(true)
@@ -609,14 +752,17 @@ model PhoneNumber {
   verificationCode String?
   verifiedAt       DateTime?
 
-  dailySentLimit Int @default(1000)
-  todaySentCount Int @default(0)
+  dailySentLimit Int      @default(1000)
+  todaySentCount Int      @default(0)
   lastResetAt    DateTime @default(now())
 
   conversations Conversation[]
   messages      Message[]
   campaigns     Campaign[]
   quickReplies  QuickReply[]
+  qualityLogs   PhoneNumberQualityLog[]
+  webhookLogs   WebhookLog[]
+  templates     Template[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -631,32 +777,40 @@ model PhoneNumber {
 // ============================================
 
 model Template {
-  id        String   @id @default(cuid())
-  tenantId  String
-  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  id       String @id @default(cuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
   metaTemplateId String? @unique
 
+  // Which connected number's WABA this template was submitted under — a
+  // tenant with numbers on more than one WABA needs this to be explicit,
+  // since templates only exist within a single WABA's namespace.
+  phoneNumberId String?
+  phoneNumber   PhoneNumber? @relation(fields: [phoneNumberId], references: [id], onDelete: SetNull)
+
   name     String
   category TemplateCategory
-  language String  @default("en_US")
-  status   TemplateStatus @default(DRAFT)
+  language String           @default("en_US")
+  status   TemplateStatus   @default(DRAFT)
 
   header  Json?
   body    Json
   footer  Json?
   buttons Json?
 
+  qualityScore String?
+
   rejectionReason String?
 
-  totalSent  Int @default(0)
+  totalSent  Int       @default(0)
   lastSentAt DateTime?
 
   submittedAt DateTime?
   approvedAt  DateTime?
   rejectedAt  DateTime?
 
-  messages Message[]
+  messages  Message[]
   campaigns Campaign[]
 
   createdAt DateTime @default(now())
@@ -673,27 +827,27 @@ model Template {
 // ============================================
 
 model Campaign {
-  id        String   @id @default(cuid())
-  tenantId  String
-  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  id       String @id @default(cuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
   name   String
   status CampaignStatus @default(DRAFT)
 
-  templateId  String?
-  template    Template?   @relation(fields: [templateId], references: [id])
+  templateId    String?
+  template      Template?    @relation(fields: [templateId], references: [id])
   phoneNumberId String?
-  phoneNumber  PhoneNumber? @relation(fields: [phoneNumberId], references: [id])
+  phoneNumber   PhoneNumber? @relation(fields: [phoneNumberId], references: [id])
 
-  audienceType  String   @default("segment")
-  segmentIds    String[]
-  contactIds    String[]
-  variableMappings Json @default("[]")
+  audienceType     String   @default("segment")
+  segmentIds       String[]
+  contactIds       String[]
+  variableMappings Json     @default("[]")
 
   scheduledAt DateTime?
   startedAt   DateTime?
   completedAt DateTime?
-  lastSentAt DateTime?
+  lastSentAt  DateTime?
 
   totalRecipients Int @default(0)
   totalSent       Int @default(0)
@@ -703,17 +857,17 @@ model Campaign {
   totalOptOut     Int @default(0)
 
   // A/B Testing
-  isAbTest     Boolean @default(false)
+  isAbTest      Boolean @default(false)
   abTestVariant String?
-  abWinner     String?
-  abTestSplit  Int     @default(50)
+  abWinner      String?
+  abTestSplit   Int     @default(50)
 
   // Drip Campaigns
-  isDrip     Boolean @default(false)
-  dripSteps  Json?
+  isDrip    Boolean @default(false)
+  dripSteps Json?
 
   createdById String
-  createdBy   User   @relation(fields: [createdById], references: [id])
+  createdBy   User      @relation(fields: [createdById], references: [id])
   messages    Message[]
 
   createdAt DateTime @default(now())
@@ -732,34 +886,146 @@ model Campaign {
 // ============================================
 
 model BotFlow {
-  id        String   @id @default(cuid())
-  tenantId  String
-  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  id       String @id @default(cuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
   name        String
   description String?
 
-  flowData Json
+  flowData Json // Stores the full flow configuration
 
   isActive  Boolean @default(false)
   isDefault Boolean @default(false)
 
   phoneNumberIds String[]
 
-  fallbackMessage String?
+  fallbackMessage   String?
   businessHoursMode Boolean @default(true)
   offHoursMessage   String?
 
-  totalTriggered Int @default(0)
-  totalResolved  Int @default(0)
+  totalTriggered Int      @default(0)
+  totalResolved  Int      @default(0)
   avgSteps       Decimal? @db.Decimal(5, 2)
+
+  // Human handoff settings
+  enableHumanHandoff Boolean  @default(true)
+  handoffKeywords    String[] @default(["human", "agent", "person", "real"])
+  assignToTeamId     String?
+  assignToUserId     String?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  // Reverse relations
+  executions BotExecution[]
+
   @@index([tenantId])
   @@index([isActive])
   @@map("bot_flows")
+}
+
+// Bot Flow Execution Log
+model BotExecution {
+  id       String  @id @default(cuid())
+  flowId   String
+  flow     BotFlow @relation(fields: [flowId], references: [id], onDelete: Cascade)
+  tenantId String
+
+  contactId String
+  contact   Contact @relation(fields: [contactId], references: [id])
+
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id])
+
+  currentStep    String // Current step ID in the flow
+  stepData       Json? // Data collected during execution
+  stepsExecuted  Int    @default(0)
+
+  status  BotExecutionStatus @default(ACTIVE)
+  endedAt DateTime?
+
+  startedAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([flowId])
+  @@index([contactId])
+  @@index([tenantId])
+  @@map("bot_executions")
+}
+
+enum BotExecutionStatus {
+  ACTIVE
+  COMPLETED
+  HANDED_OFF
+  FAILED
+}
+
+// Predefined flow templates
+model BotFlowTemplate {
+  id          String @id @default(cuid())
+  name        String
+  description String
+  category    String // 'greeting', 'support', 'sales', 'feedback', etc.
+  flowData    Json // Template flow data
+
+  isPublic  Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  @@map("bot_flow_templates")
+}
+
+// ============================================
+// KNOWLEDGE BASE (RAG for AI Reply flow steps)
+// ============================================
+
+model KnowledgeBase {
+  id          String   @id @default(cuid())
+  tenantId    String
+  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  name        String
+  description String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  documents KnowledgeDocument[]
+  chunks    KnowledgeChunk[]
+
+  @@index([tenantId])
+  @@map("knowledge_bases")
+}
+
+model KnowledgeDocument {
+  id              String        @id @default(cuid())
+  knowledgeBaseId String
+  knowledgeBase   KnowledgeBase @relation(fields: [knowledgeBaseId], references: [id], onDelete: Cascade)
+  tenantId        String
+  title           String
+  content         String        @db.Text
+  status          String        @default("PENDING") // PENDING | EMBEDDED | FAILED
+  errorMessage    String?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  chunks KnowledgeChunk[]
+
+  @@index([knowledgeBaseId])
+  @@map("knowledge_documents")
+}
+
+model KnowledgeChunk {
+  id              String            @id @default(cuid())
+  knowledgeBaseId String
+  knowledgeBase   KnowledgeBase     @relation(fields: [knowledgeBaseId], references: [id], onDelete: Cascade)
+  documentId      String
+  document        KnowledgeDocument @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  tenantId        String
+  content         String            @db.Text
+  embedding       Float[]
+  createdAt       DateTime          @default(now())
+
+  @@index([knowledgeBaseId])
+  @@map("knowledge_chunks")
 }
 
 // ============================================
@@ -767,9 +1033,9 @@ model BotFlow {
 // ============================================
 
 model Tag {
-  id        String   @id @default(cuid())
-  tenantId  String
-  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  id       String @id @default(cuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
   name  String @unique
   color String @default("#6366f1")
@@ -786,7 +1052,7 @@ model Tag {
 }
 
 model ContactTag {
-  id        String @id @default(cuid())
+  id        String  @id @default(cuid())
   contactId String
   contact   Contact @relation(fields: [contactId], references: [id], onDelete: Cascade)
   tagId     String
@@ -803,14 +1069,14 @@ model ContactTag {
 // ============================================
 
 model Segment {
-  id        String   @id @default(cuid())
-  tenantId  String
-  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  id       String @id @default(cuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
   name        String
   description String?
-  query       Json    // Segment filter criteria
-  queryHash   String  // Hash of query for deduplication
+  query       Json // Segment filter criteria
+  queryHash   String // Hash of query for deduplication
 
   totalContacts Int @default(0)
 
@@ -825,11 +1091,11 @@ model Segment {
 }
 
 model ContactSegment {
-  id         String   @id @default(cuid())
-  contactId  String
-  contact    Contact  @relation(fields: [contactId], references: [id], onDelete: Cascade)
-  segmentId  String
-  segment    Segment  @relation(fields: [segmentId], references: [id], onDelete: Cascade)
+  id        String  @id @default(cuid())
+  contactId String
+  contact   Contact @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  segmentId String
+  segment   Segment @relation(fields: [segmentId], references: [id], onDelete: Cascade)
 
   createdAt DateTime @default(now())
 
@@ -842,9 +1108,9 @@ model ContactSegment {
 // ============================================
 
 model Ticket {
-  id        String   @id @default(cuid())
-  tenantId  String
-  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  id       String @id @default(cuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
   subject     String
   description String
@@ -854,7 +1120,7 @@ model Ticket {
   category String?
 
   assignedToId String?
-  assignedTo   User? @relation("AssignedAgent", fields: [assignedToId], references: [id])
+  assignedTo   User?   @relation("AssignedAgent", fields: [assignedToId], references: [id])
 
   messages TicketMessage[]
 
@@ -869,9 +1135,9 @@ model Ticket {
 }
 
 model TicketMessage {
-  id        String  @id @default(cuid())
-  ticketId   String
-  ticket    Ticket  @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  id       String @id @default(cuid())
+  ticketId String
+  ticket   Ticket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
 
   senderId   String?
   senderType String  @default("user") // user, agent, system
@@ -887,21 +1153,21 @@ model TicketMessage {
 // ============================================
 
 model ApiKey {
-  id        String   @id @default(cuid())
-  tenantId  String
-  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  userId    String?
-  user      User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  id       String  @id @default(cuid())
+  tenantId String
+  tenant   Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  userId   String?
+  user     User?   @relation(fields: [userId], references: [id], onDelete: SetNull)
 
   name        String
-  keyHash     String  @unique
-  keyPrefix   String  // First 8 chars for identification
-  permissions Json    @default("[]")
+  keyHash     String @unique
+  keyPrefix   String // First 8 chars for identification
+  permissions Json   @default("[]")
 
   lastUsedAt DateTime?
   expiresAt  DateTime?
 
-  isActive  Boolean  @default(true)
+  isActive Boolean @default(true)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -915,9 +1181,9 @@ model ApiKey {
 // ============================================
 
 model Invoice {
-  id        String   @id @default(cuid())
-  tenantId  String
-  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  id       String @id @default(cuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
   stripeInvoiceId String?
   number          String  @unique
@@ -927,16 +1193,16 @@ model Invoice {
   currency String  @default("USD")
 
   // Financial breakdown
-  subtotal   Decimal @db.Decimal(10, 2)
-  taxAmount  Decimal @db.Decimal(10, 2) @default(0)
-  discount  Decimal @db.Decimal(10, 2) @default(0)
+  subtotal  Decimal @db.Decimal(10, 2)
+  taxAmount Decimal @default(0) @db.Decimal(10, 2)
+  discount  Decimal @default(0) @db.Decimal(10, 2)
   netAmount Decimal @db.Decimal(10, 2)
 
   periodStart DateTime
   periodEnd   DateTime
 
-  paidAt   DateTime?
-  dueDate  DateTime?
+  paidAt  DateTime?
+  dueDate DateTime?
 
   // Line items as JSON array
   lineItems Json @default("[]")
@@ -960,20 +1226,20 @@ model Invoice {
 // ============================================
 
 model WhatsAppFlow {
-  id        String   @id @default(cuid())
-  tenantId  String
-  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  id       String @id @default(cuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
   name        String
   description String?
-  flowJson    Json    // WhatsApp Flow JSON definition
+  flowJson    Json // WhatsApp Flow JSON definition
   metaFlowId  String? @unique
 
-  status    String @default("draft") // draft, published, archived
-  isActive  Boolean @default(false)
+  status   String  @default("draft") // draft, published, archived
+  isActive Boolean @default(false)
 
-  totalTriggered Int @default(0)
-  totalCompleted Int @default(0)
+  totalTriggered    Int      @default(0)
+  totalCompleted    Int      @default(0)
   avgCompletionRate Decimal? @db.Decimal(5, 2)
 
   createdAt DateTime @default(now())
@@ -988,19 +1254,19 @@ model WhatsAppFlow {
 // ============================================
 
 model AuditLog {
-  id        String   @id @default(cuid())
-  tenantId  String?
-  tenant    Tenant?  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  id       String  @id @default(cuid())
+  tenantId String?
+  tenant   Tenant? @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
   actorId   String
   actorType String  @default("user") // user, superadmin, system
   actorRole String?
 
-  action    AuditAction
-  resource  String
+  action     AuditAction
+  resource   String
   resourceId String?
 
-  metadata  Json?
+  metadata Json?
 
   ipAddress String?
   userAgent String?
@@ -1009,11 +1275,11 @@ model AuditLog {
 
   // For superadmins
   superadminId String?
-  superadmin  Superadmin? @relation(fields: [superadminId], references: [id])
+  superadmin   Superadmin? @relation(fields: [superadminId], references: [id])
 
   // For users
   userId String?
-  user   User? @relation(fields: [userId], references: [id])
+  user   User?   @relation(fields: [userId], references: [id])
 
   @@index([tenantId])
   @@index([actorId])
@@ -1027,14 +1293,14 @@ model AuditLog {
 // ============================================
 
 model UserSession {
-  id        String   @id @default(cuid())
-  userId    String
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  tenantId  String
-  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  id       String @id @default(cuid())
+  userId   String
+  user     User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
-  refreshTokenHash String @unique
-  ipAddress       String?
+  refreshTokenHash String  @unique
+  ipAddress        String?
   userAgent        String?
 
   expiresAt DateTime
@@ -1050,16 +1316,16 @@ model UserSession {
 // ============================================
 
 model PasswordReset {
-  id        String   @id @default(cuid())
-  userId    String
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   token     String   @unique
   tokenHash String   @unique
   expiresAt DateTime
 
   usedAt    DateTime?
-  createdAt DateTime @default(now())
+  createdAt DateTime  @default(now())
 
   @@index([userId])
   @@index([token])
@@ -1071,15 +1337,15 @@ model PasswordReset {
 // ============================================
 
 model RefreshToken {
-  id        String   @id @default(cuid())
-  token     String   @unique
-  tokenHash String   @unique
+  id        String @id @default(cuid())
+  token     String @unique
+  tokenHash String @unique
 
-  userId    String
-  tenantId  String
+  userId   String
+  tenantId String
 
   expiresAt DateTime
-  createdAt DateTime @default(now())
+  createdAt DateTime  @default(now())
   revokedAt DateTime?
 
   @@index([userId])
@@ -1095,45 +1361,45 @@ model RefreshToken {
 // Source: https://developers.facebook.com/documentation/business-messaging/whatsapp/pricing
 
 model CreditRate {
-  id          String   @id @default(cuid())
-  countryCode String   @unique  // ISO 3166-1 alpha-2 (US, IN, BR, etc.)
-  countryName String            // "United States", "India", etc.
-  currency    String   @default("USD")
+  id          String @id @default(cuid())
+  countryCode String @unique // ISO 3166-1 alpha-2 (US, IN, BR, etc.)
+  countryName String // "United States", "India", etc.
+  currency    String @default("USD")
 
   // Cost per message in USD cents (multiply by 0.01 for actual cost)
   // Marketing messages (highest tier)
-  marketingCost Int      @default(60)  // cents per message
+  marketingCost Int @default(60) // cents per message
   // Utility messages (service/transactional)
-  utilityCost   Int      @default(10)  // cents per message
+  utilityCost   Int @default(10) // cents per message
   // Authentication messages (OTP, 2FA)
-  authCost      Int      @default(10)  // cents per message
+  authCost      Int @default(10) // cents per message
   // Session/reply messages (within 24h window)
-  sessionCost   Int      @default(0)   // free within service window
+  sessionCost   Int @default(0) // free within service window
 
   // For calculating USD from credits
-  creditsPerDollar Int @default(100)  // 1 credit = $0.01 USD
+  creditsPerDollar Int @default(100) // 1 credit = $0.01 USD
 
-  isActive    Boolean  @default(true)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@map("credit_rates")
 }
 
 // Tenant's credit balance
 model TenantCredit {
-  id        String   @id @default(cuid())
-  tenantId  String   @unique
-  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  id       String @id @default(cuid())
+  tenantId String @unique
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
-  balance   Int      @default(0)  // Current available credits
+  balance Int @default(0) // Current available credits
 
   // Tracking
-  totalPurchased Int  @default(0)  // Total ever purchased
-  totalUsed      Int  @default(0)  // Total ever consumed
+  totalPurchased Int @default(0) // Total ever purchased
+  totalUsed      Int @default(0) // Total ever consumed
 
   // Low balance alert threshold
-  alertThreshold Int  @default(1000)  // Alert when balance drops below
+  alertThreshold Int @default(1000) // Alert when balance drops below
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -1145,19 +1411,19 @@ model TenantCredit {
 
 // Every credit transaction (purchase, usage, refund, bonus)
 model TenantCreditTransaction {
-  id          String   @id @default(cuid())
-  creditId    String
-  credit      TenantCredit @relation(fields: [creditId], references: [id], onDelete: Cascade)
+  id       String       @id @default(cuid())
+  creditId String
+  credit   TenantCredit @relation(fields: [creditId], references: [id], onDelete: Cascade)
 
-  type        CreditTransactionType
-  amount      Int               // positive = credit, negative = debit
+  type   CreditTransactionType
+  amount Int // positive = credit, negative = debit
 
   // Reference info
-  referenceId   String?        // messageId, campaignId, purchaseId, etc.
-  referenceType String?        // 'MESSAGE', 'CAMPAIGN', 'PURCHASE', 'BONUS', 'REFUND'
+  referenceId   String? // messageId, campaignId, purchaseId, etc.
+  referenceType String? // 'MESSAGE', 'CAMPAIGN', 'PURCHASE', 'BONUS', 'REFUND'
 
-  description String?
-  balanceAfter Int             // Balance after this transaction
+  description  String?
+  balanceAfter Int // Balance after this transaction
 
   createdAt DateTime @default(now())
 
@@ -1167,34 +1433,34 @@ model TenantCreditTransaction {
 }
 
 enum CreditTransactionType {
-  PURCHASE    // Credit pack purchased
-  USAGE       // Credits consumed (message sent)
-  REFUND      // Refund for failed/delivered message
-  BONUS       // Free bonus credits / trial
-  ADJUSTMENT  // Manual adjustment by admin
+  PURCHASE // Credit pack purchased
+  USAGE // Credits consumed (message sent)
+  REFUND // Refund for failed/delivered message
+  BONUS // Free bonus credits / trial
+  ADJUSTMENT // Manual adjustment by admin
 }
 
 // Track each message's credit cost for auditing and refunding
 model MessageCredit {
-  id          String   @id @default(cuid())
-  tenantId   String
-  tenant      Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  id       String @id @default(cuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
-  messageId   String   @unique
-  message     Message  @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  messageId String  @unique
+  message   Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
 
-  countryCode String   // Recipient's country
-  category    String   // 'MARKETING' | 'UTILITY' | 'AUTHENTICATION' | 'SESSION'
+  countryCode String // Recipient's country
+  category    String // 'MARKETING' | 'UTILITY' | 'AUTHENTICATION' | 'SESSION'
 
   // Cost in credits (calculated at send time)
-  cost        Int      // credits deducted
+  cost Int // credits deducted
 
   // For refund tracking
-  refunded    Boolean  @default(false)
-  refundedAt  DateTime?
+  refunded     Boolean   @default(false)
+  refundedAt   DateTime?
   refundAmount Int?
 
-  createdAt   DateTime @default(now())
+  createdAt DateTime @default(now())
 
   @@index([tenantId])
   @@index([messageId])
@@ -1203,18 +1469,18 @@ model MessageCredit {
 
 // Pre-paid credit packs available for purchase
 model CreditPack {
-  id          String   @id @default(cuid())
+  id          String  @id @default(cuid())
   name        String
-  credits     Int               // Number of credits
-  priceUsd   Decimal  @db.Decimal(10, 2)  // Price in USD
-  isActive   Boolean  @default(true)
-  isPopular  Boolean  @default(false)  // Show as recommended
+  credits     Int // Number of credits
+  priceUsd    Decimal @db.Decimal(10, 2) // Price in USD
+  isActive    Boolean @default(true)
+  isPopular   Boolean @default(false) // Show as recommended
   description String?
 
-  stripePriceId String?  // Stripe Price ID for checkout
+  stripePriceId String? // Stripe Price ID for checkout
 
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@map("credit_packs")
 }
@@ -1224,19 +1490,19 @@ model CreditPack {
 // ============================================
 
 model QuickReply {
-  id            String   @id @default(cuid())
-  tenantId      String
-  tenant        Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  id       String @id @default(cuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
   phoneNumberId String
   phoneNumber   PhoneNumber @relation(fields: [phoneNumberId], references: [id], onDelete: Cascade)
 
-  keyword       String
-  message       String   @db.Text
-  isActive      Boolean  @default(true)
+  keyword  String
+  message  String  @db.Text
+  isActive Boolean @default(true)
 
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@unique([tenantId, phoneNumberId, keyword])
   @@index([tenantId])
@@ -1249,28 +1515,200 @@ model QuickReply {
 // ============================================
 
 model TenantSetting {
-  id        String   @id @default(cuid())
-  tenantId  String   @unique
-  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  id       String @id @default(cuid())
+  tenantId String @unique
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
   // Notification preferences
   emailNotifications   Boolean @default(true)
   deliveryReports      Boolean @default(true)
   weeklyDigest         Boolean @default(false)
   billingAlerts        Boolean @default(true)
-  browserNotifications  Boolean @default(true)
-  smsNotifications      Boolean @default(false)
+  browserNotifications Boolean @default(true)
+  smsNotifications     Boolean @default(false)
 
   // Security
-  sessionTimeout       Int     @default(30)  // minutes
+  sessionTimeout        Int     @default(30) // minutes
   requirePasswordChange Boolean @default(false)
 
   // Branding
-  primaryColor         String?
-  secondaryColor       String?
+  primaryColor   String?
+  secondaryColor String?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   @@map("tenant_settings")
+}
+
+// ============================================
+// NOTIFICATIONS
+// ============================================
+
+model Notification {
+  id       String @id @default(cuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  // Who receives this notification
+  userId String?
+  user   User?   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Notification content
+  type    NotificationType
+  title   String
+  message String
+  data    Json? // Additional structured data
+
+  // Delivery status
+  isRead    Boolean   @default(false)
+  readAt    DateTime?
+  isDeleted Boolean   @default(false)
+
+  // Optional reference to related entity
+  referenceType String? // 'campaign', 'conversation', 'contact', 'template', 'billing', etc.
+  referenceId   String?
+
+  // Priority
+  priority NotificationPriority @default(NORMAL)
+
+  // Channels
+  emailSent Boolean @default(false)
+  pushSent  Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([tenantId])
+  @@index([userId])
+  @@index([isRead])
+  @@index([createdAt])
+  @@map("notifications")
+}
+
+// ============================================
+// WEBHOOK LOGS
+// ============================================
+
+model WebhookLog {
+  id       String @id @default(cuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  // Phone number (optional - for WhatsApp webhooks)
+  phoneNumberId String?
+  phoneNumber   PhoneNumber? @relation(fields: [phoneNumberId], references: [id], onDelete: SetNull)
+
+  // Webhook event info
+  event     String // 'messages', 'message_deliveries', 'message_reads', etc.
+  messageId String? // WhatsApp message ID
+  from      String? // Sender phone number
+
+  // Payload info
+  rawPayload Json
+
+  // Processing status
+  status       WebhookLogStatus @default(PENDING)
+  errorMessage String?
+
+  // Timing
+  processingTimeMs Int @default(0)
+  retryCount       Int @default(0)
+
+  // Metadata
+  ipAddress String?
+  userAgent String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([tenantId])
+  @@index([phoneNumberId])
+  @@index([event])
+  @@index([status])
+  @@index([createdAt])
+  @@map("webhook_logs")
+}
+
+enum WebhookLogStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+  RETRY
+}
+
+// ============================================
+// PHONE NUMBER QUALITY LOG
+// ============================================
+
+model PhoneNumberQualityLog {
+  id            String      @id @default(cuid())
+  phoneNumberId String
+  phoneNumber   PhoneNumber @relation(fields: [phoneNumberId], references: [id], onDelete: Cascade)
+
+  qualityScore String
+  rating       String?
+
+  // Metrics at time of logging
+  messagesLast7Days Int   @default(0)
+  deliveryRate      Float @default(0)
+  responseRate      Float @default(0)
+
+  createdAt DateTime @default(now())
+
+  @@index([phoneNumberId])
+  @@index([createdAt])
+  @@map("phone_number_quality_logs")
+}
+
+enum NotificationType {
+  // Campaign notifications
+  CAMPAIGN_SENT
+  CAMPAIGN_COMPLETED
+  CAMPAIGN_FAILED
+  CAMPAIGN_PAUSED
+
+  // WhatsApp notifications
+  WHATSAPP_QUALITY_WARNING
+  WHATSAPP_DISCONNECTED
+  WHATSAPP_MESSAGE_FAILED
+  WHATSAPP_WEBHOOK_ERROR
+
+  // Billing notifications
+  PAYMENT_SUCCESS
+  PAYMENT_FAILED
+  LOW_BALANCE
+  SUBSCRIPTION_EXPIRING
+  SUBSCRIPTION_UPGRADED
+  SUBSCRIPTION_DOWNGRADED
+
+  // Team notifications
+  TEAM_INVITATION
+  TEAM_MEMBER_ADDED
+  TEAM_ROLE_CHANGED
+
+  // Conversation notifications
+  CONVERSATION_TRANSFERRED
+
+  // Contact notifications
+  CONTACT_IMPORT_COMPLETED
+  CONTACT_IMPORT_FAILED
+  CONTACT_OPT_OUT
+
+  // Template notifications
+  TEMPLATE_APPROVED
+  TEMPLATE_REJECTED
+
+  // System notifications
+  SYSTEM_ALERT
+  SECURITY_ALERT
+  GENERAL
+}
+
+enum NotificationPriority {
+  LOW
+  NORMAL
+  HIGH
+  URGENT
 }

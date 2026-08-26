@@ -48,23 +48,24 @@ export default function BillingAnalyticsPage() {
     },
   });
 
-  const tenants = tenantsData?.data?.data || [];
+  const tenants = tenantsData?.data || [];
   const stats = billingData?.data;
 
   const planCounts = tenants.reduce((acc: Record<string, number>, t: any) => {
-    const tier = t.planName || (typeof t.plan === 'string' ? t.plan : t.plan?.name) || 'STARTER';
+    const rawTier = t.planName || (typeof t.plan === 'string' ? t.plan : t.plan?.name) || 'STARTER';
+    const tier = rawTier.toUpperCase();
     acc[tier] = (acc[tier] || 0) + 1;
     return acc;
   }, {});
 
-  const revenueData: RevenueData[] = [
-    { month: 'Jan', mrr: 28000, newRevenue: 4500, churned: 800 },
-    { month: 'Feb', mrr: 31200, newRevenue: 5200, churned: 1200 },
-    { month: 'Mar', mrr: 33800, newRevenue: 4800, churned: 1200 },
-    { month: 'Apr', mrr: 36400, newRevenue: 4900, churned: 1300 },
-  ];
+  const revenueData: RevenueData[] = (stats?.monthlyRevenue || []).map((m: any) => ({
+    month: m.month,
+    mrr: m.mrr,
+    newRevenue: 0,
+    churned: 0,
+  }));
 
-  const maxMRR = revenueData.length > 0 ? Math.max(...revenueData.map(d => d.mrr)) : 1;
+  const maxMRR = revenueData.length > 0 ? (Math.max(...revenueData.map(d => d.mrr)) || 1) : 1;
 
   const cards = [
     {
@@ -139,19 +140,21 @@ export default function BillingAnalyticsPage() {
                 <div>
                   <p className="text-sm text-ios-secondary">{card.label}</p>
                   <p className="text-2xl font-bold text-ios-dark mt-1">{card.value}</p>
-                  <p
-                    className={`text-sm mt-1 ${
-                      card.inverse
-                        ? ((card.change as unknown) as string)?.startsWith('-')
+                  {card.change && (
+                    <p
+                      className={`text-sm mt-1 ${
+                        card.inverse
+                          ? ((card.change as unknown) as string)?.startsWith('-')
+                            ? 'text-apple-green'
+                            : 'text-apple-red'
+                          : ((card.change as unknown) as string)?.startsWith('+')
                           ? 'text-apple-green'
                           : 'text-apple-red'
-                        : ((card.change as unknown) as string)?.startsWith('+')
-                        ? 'text-apple-green'
-                        : 'text-apple-red'
-                    }`}
-                  >
-                    {card.change || '0%'} vs last month
-                  </p>
+                      }`}
+                    >
+                      {card.change} vs last month
+                    </p>
+                  )}
                 </div>
                 <div className={`p-3 rounded-apple-lg ${colorClasses[card.color]}`}>
                   <card.icon className="w-5 h-5" />
@@ -245,7 +248,10 @@ export default function BillingAnalyticsPage() {
         <div className="card-apple p-6">
           <h2 className="text-lg font-semibold text-ios-dark mb-4">Top Customers</h2>
           <div className="space-y-3">
-            {tenants.slice(0, 5).map((tenant: any) => (
+            {[...tenants]
+              .sort((a: any, b: any) => Number(b.plan?.monthlyPrice || 0) - Number(a.plan?.monthlyPrice || 0))
+              .slice(0, 5)
+              .map((tenant: any) => (
               <div
                 key={tenant.id}
                 className="flex items-center justify-between p-3 hover:bg-ios-gray rounded-apple-lg transition"
@@ -260,7 +266,7 @@ export default function BillingAnalyticsPage() {
                   </div>
                 </div>
                 <div className="text-right">
-                  <p className="font-medium text-ios-dark">{tenant.plan || 'STARTER'}</p>
+                  <p className="font-medium text-ios-dark">{tenant.planName || 'Starter'}</p>
                   <p className="text-sm text-ios-muted">
                     {tenant.currentMessages?.toLocaleString() || 0} msgs
                   </p>
@@ -274,14 +280,14 @@ export default function BillingAnalyticsPage() {
       {/* Recent Events */}
       <div className="card-apple p-6">
         <h2 className="text-lg font-semibold text-ios-dark mb-4">Recent Billing Events</h2>
+        {(!stats?.recentEvents || stats.recentEvents.length === 0) ? (
+          <div className="text-center py-8 text-ios-muted">
+            <CreditCard className="w-8 h-8 mx-auto mb-2 opacity-50" />
+            <p className="text-sm">No billing events yet</p>
+          </div>
+        ) : (
         <div className="space-y-3">
-          {[
-            { type: 'subscription.created', tenant: 'TechStart Inc', amount: '+ $149.00', color: 'green' },
-            { type: 'invoice.paid', tenant: 'Global Retail Ltd', amount: '+ $399.00', color: 'green' },
-            { type: 'subscription.updated', tenant: 'Acme Corp', amount: 'plan change', color: 'blue' },
-            { type: 'invoice.payment_failed', tenant: 'Old Customer', amount: '- $49.00', color: 'red' },
-            { type: 'subscription.deleted', tenant: 'Churned Inc', amount: 'canceled', color: 'gray' },
-          ].map((event, i) => (
+          {stats.recentEvents.map((event: any, i: number) => (
             <div key={i} className="flex items-center justify-between p-3 border border-black/5 rounded-apple-lg">
               <div className="flex items-center gap-3">
                 <div
@@ -306,6 +312,7 @@ export default function BillingAnalyticsPage() {
             </div>
           ))}
         </div>
+        )}
       </div>
     </div>
   );

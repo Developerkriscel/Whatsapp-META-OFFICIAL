@@ -16,11 +16,47 @@ const registerSchema = z.object({
   password: z.string().min(8),
   name: z.string().min(2),
   tenantName: z.string().optional(),
+  company: z.string().optional(),
+  phone: z.string().optional(),
+  plan: z.enum(['STARTER', 'GROWTH', 'BUSINESS']).optional(),
 });
 
-const refreshSchema = z.object({
-  refreshToken: z.string().min(1),
-});
+const REFRESH_COOKIE_NAME = 'refreshToken';
+const REFRESH_COOKIE_PATH = '/api/v1/auth';
+const REFRESH_COOKIE_MAX_AGE_SEC = 7 * 24 * 60 * 60; // 7 days, matches token expiry below
+
+function refreshCookieOptions() {
+  return {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: 'lax' as const,
+    path: REFRESH_COOKIE_PATH,
+    maxAge: REFRESH_COOKIE_MAX_AGE_SEC,
+  };
+}
+
+/**
+ * Persist a freshly-generated refresh token for a tenant user and set it as
+ * an httpOnly cookie. Refresh tokens are never returned in the JSON body.
+ */
+async function issueRefreshCookie(
+  app: FastifyInstance,
+  reply: any,
+  refreshToken: string,
+  userId: string,
+  tenantId: string | null | undefined
+) {
+  await app.prisma.refreshToken.create({
+    data: {
+      token: refreshToken,
+      tokenHash: refreshToken, // TODO: hash before storing
+      userId,
+      tenantId: tenantId ?? '',
+      expiresAt: new Date(Date.now() + REFRESH_COOKIE_MAX_AGE_SEC * 1000),
+    },
+  });
+  reply.setCookie(REFRESH_COOKIE_NAME, refreshToken, refreshCookieOptions());
+}
 
 /**
  * Register auth routes
@@ -68,6 +104,8 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
         isSuperadmin: false,
       });
 
+      await issueRefreshCookie(app, reply, tokens.refreshToken, user.id, user.tenantId);
+
       // Create audit log
       await createAuditLog(app.prisma, {
         actorId: user.id,
@@ -92,8 +130,11 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
             tenantId: user.tenantId,
             tenantName: user.tenant.name,
             avatarUrl: user.avatarUrl,
+            avatarGender: user.avatarGender,
           },
-          ...tokens,
+          accessToken: tokens.accessToken,
+          expiresIn: tokens.expiresIn,
+          tokenType: tokens.tokenType,
         },
       };
     }
@@ -127,6 +168,8 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
         isSuperadmin: true,
       });
 
+      await issueRefreshCookie(app, reply, tokens.refreshToken, superadmin.id, null);
+
       return {
         success: true,
         data: {
@@ -137,7 +180,9 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
             role: superadmin.role,
             isSuperadmin: true,
           },
-          ...tokens,
+          accessToken: tokens.accessToken,
+          expiresIn: tokens.expiresIn,
+          tokenType: tokens.tokenType,
         },
       };
     }
@@ -169,8 +214,11 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
       });
     }
 
-    // Get starter plan
-    const starterPlan = await app.prisma.plan.findUnique({
+    // Get the selected plan (falls back to Starter if not chosen or not found)
+    const selectedPlan = await app.prisma.plan.findUnique({
+      where: { tier: body.plan || 'STARTER' },
+    });
+    const starterPlan = selectedPlan || await app.prisma.plan.findUnique({
       where: { tier: 'STARTER' },
     });
 
@@ -188,7 +236,7 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
     const result = await app.prisma.$transaction(async (tx) => {
       const tenant = await tx.tenant.create({
         data: {
-          name: body.tenantName || `${body.name}'s Workspace`,
+          name: body.company || body.tenantName || `${body.name}'s Workspace`,
           status: 'TRIAL',
           planId: starterPlan.id,
           isOnTrial: true,
@@ -203,6 +251,7 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
           tenantId: tenant.id,
           email: body.email,
           name: body.name,
+          phone: body.phone,
           password: hashedPassword,
           role: 'OWNER',
           isActive: true,
@@ -222,6 +271,8 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
       isSuperadmin: false,
     });
 
+    await issueRefreshCookie(app, reply, tokens.refreshToken, result.user.id, result.tenant.id);
+
     return reply.status(201).send({
       success: true,
       data: {
@@ -239,32 +290,92 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
           status: result.tenant.status,
           trialEndsAt: result.tenant.trialEndsAt,
         },
-        ...tokens,
+        accessToken: tokens.accessToken,
+        expiresIn: tokens.expiresIn,
+        tokenType: tokens.tokenType,
       },
     });
   });
 
   // Refresh token
   app.post('/refresh', async (request, reply) => {
-    const body = refreshSchema.parse(request.body);
+    const incomingToken = (request.cookies as Record<string, string> | undefined)?.[REFRESH_COOKIE_NAME];
+
+    if (!incomingToken) {
+      return reply.status(401).send({
+        success: false,
+        error: { code: 'INVALID_TOKEN', message: 'No refresh token provided' },
+      });
+    }
 
     // Find valid refresh token
     const refreshToken = await app.prisma.refreshToken.findFirst({
       where: {
-        token: body.refreshToken,
+        token: incomingToken,
         revokedAt: null,
         expiresAt: { gt: new Date() },
       },
     });
 
     if (!refreshToken) {
+      reply.clearCookie(REFRESH_COOKIE_NAME, { path: REFRESH_COOKIE_PATH });
       return reply.status(401).send({
         success: false,
         error: { code: 'INVALID_TOKEN', message: 'Invalid or expired refresh token' },
       });
     }
 
-    // Get user
+    // Check if this refresh token belongs to a superadmin
+    const superadminUser = await app.prisma.superadmin.findUnique({
+      where: { id: refreshToken.userId },
+    });
+
+    if (superadminUser) {
+      if (!superadminUser.isActive) {
+        reply.clearCookie(REFRESH_COOKIE_NAME, { path: REFRESH_COOKIE_PATH });
+        return reply.status(401).send({
+          success: false,
+          error: { code: 'ACCOUNT_DISABLED', message: 'Superadmin account is inactive' },
+        });
+      }
+
+      const tokens = await generateTokens(app, {
+        id: superadminUser.id,
+        email: superadminUser.email,
+        role: superadminUser.role,
+        superadminId: superadminUser.id,
+        isSuperadmin: true,
+      });
+
+      await app.prisma.$transaction([
+        app.prisma.refreshToken.update({
+          where: { id: refreshToken.id },
+          data: { revokedAt: new Date() },
+        }),
+        app.prisma.refreshToken.create({
+          data: {
+            token: tokens.refreshToken,
+            tokenHash: tokens.refreshToken,
+            userId: superadminUser.id,
+            tenantId: '',
+            expiresAt: new Date(Date.now() + REFRESH_COOKIE_MAX_AGE_SEC * 1000),
+          },
+        }),
+      ]);
+
+      reply.setCookie(REFRESH_COOKIE_NAME, tokens.refreshToken, refreshCookieOptions());
+
+      return {
+        success: true,
+        data: {
+          accessToken: tokens.accessToken,
+          expiresIn: tokens.expiresIn,
+          tokenType: tokens.tokenType,
+        },
+      };
+    }
+
+    // Get regular user
     const user = await app.prisma.user.findUnique({
       where: { id: refreshToken.userId },
       include: { tenant: true },
@@ -286,7 +397,7 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
       isSuperadmin: false,
     });
 
-    // Revoke old refresh token and create new one
+    // Revoke old refresh token and create new one (rotation)
     await app.prisma.$transaction([
       app.prisma.refreshToken.update({
         where: { id: refreshToken.id },
@@ -298,14 +409,20 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
           tokenHash: tokens.refreshToken, // In production, hash this
           userId: user.id,
           tenantId: user.tenantId,
-          expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), // 7 days
+          expiresAt: new Date(Date.now() + REFRESH_COOKIE_MAX_AGE_SEC * 1000),
         },
       }),
     ]);
 
+    reply.setCookie(REFRESH_COOKIE_NAME, tokens.refreshToken, refreshCookieOptions());
+
     return {
       success: true,
-      data: tokens,
+      data: {
+        accessToken: tokens.accessToken,
+        expiresIn: tokens.expiresIn,
+        tokenType: tokens.tokenType,
+      },
     };
   });
 
@@ -328,6 +445,7 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
         tenantId: request.authUser.tenantId,
       });
     }
+    reply.clearCookie(REFRESH_COOKIE_NAME, { path: REFRESH_COOKIE_PATH });
     return { success: true, data: { message: 'Logged out successfully' } };
   });
 
@@ -357,7 +475,7 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
 
     // In production: send email with reset link containing the token
     // For now log it to server console
-    console.log(`[Password Reset] For ${email}: ${process.env.APP_URL || 'http://localhost:3000'}/reset-password?token=${token}`);
+    console.log(`[Password Reset] For ${email}: ${process.env.APP_URL || 'http://localhost:5173'}/reset-password?token=${token}`);
 
     return {
       success: true,

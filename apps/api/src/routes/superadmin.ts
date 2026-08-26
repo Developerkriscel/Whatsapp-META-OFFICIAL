@@ -298,6 +298,7 @@ export async function registerSuperadminRoutes(app: FastifyInstance): Promise<vo
         createdAt: true,
         lastLoginAt: true,
         avatarUrl: true,
+        avatarGender: true,
       },
     });
 
@@ -386,6 +387,7 @@ export async function registerSuperadminRoutes(app: FastifyInstance): Promise<vo
       role: z.enum(['ADMIN', 'MANAGER', 'AGENT', 'VIEWER']).optional(),
       isActive: z.boolean().optional(),
       name: z.string().optional(),
+      avatarGender: z.enum(['boy', 'girl']).nullable().optional(),
     }).parse(request.body);
 
     await app.prisma.user.updateMany({
@@ -663,12 +665,34 @@ export async function registerSuperadminRoutes(app: FastifyInstance): Promise<vo
   // ============================================
 
   app.get('/billing', async (request, reply) => {
-    const [activeTenants, trialTenants, churnedTenants, allTenants] = await Promise.all([
+    const now = new Date();
+    const sixMonthsAgo = new Date(now.getFullYear(), now.getMonth() - 5, 1);
+
+    const [activeTenants, trialTenants, churnedTenants, allTenants, recentInvoices, paidInvoices] = await Promise.all([
       app.prisma.tenant.findMany({ where: { status: 'ACTIVE' }, include: { plan: true } }),
       app.prisma.tenant.findMany({ where: { status: 'TRIAL' } }),
       app.prisma.tenant.count({ where: { status: 'CHURNED' } }),
       app.prisma.tenant.count(),
+      app.prisma.invoice.findMany({
+        take: 10,
+        orderBy: { createdAt: 'desc' },
+        include: { tenant: { select: { name: true } } },
+      }),
+      app.prisma.invoice.findMany({
+        where: { status: 'paid', paidAt: { gte: sixMonthsAgo } },
+        select: { amount: true, paidAt: true },
+      }),
     ]);
+
+    const monthlyRevenue: { month: string; mrr: number }[] = [];
+    for (let i = 5; i >= 0; i--) {
+      const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+      const label = d.toLocaleString('en-US', { month: 'short' });
+      const total = paidInvoices
+        .filter((inv) => inv.paidAt && inv.paidAt.getFullYear() === d.getFullYear() && inv.paidAt.getMonth() === d.getMonth())
+        .reduce((sum, inv) => sum + Number(inv.amount), 0);
+      monthlyRevenue.push({ month: label, mrr: total });
+    }
 
     const mrr = activeTenants.reduce((sum, t) => {
       const raw = t.plan?.monthlyPrice;
@@ -694,6 +718,18 @@ export async function registerSuperadminRoutes(app: FastifyInstance): Promise<vo
     const avgMRRPerTenant = activeTenants.length > 0 ? mrr / activeTenants.length : 0;
     const ltv = churnRate > 0 ? (avgMRRPerTenant / (churnRate / 100)) * 12 : avgMRRPerTenant * 24;
 
+    const recentEvents = recentInvoices.map((inv) => ({
+      type:
+        inv.status === 'paid' ? 'invoice.paid' :
+        inv.status === 'failed' ? 'invoice.payment_failed' :
+        inv.status === 'void' ? 'invoice.voided' :
+        'invoice.created',
+      tenant: inv.tenant?.name || 'Unknown',
+      amount: inv.status === 'failed' ? `- $${Number(inv.amount).toFixed(2)}` : `+ $${Number(inv.amount).toFixed(2)}`,
+      color: inv.status === 'paid' ? 'green' : inv.status === 'failed' ? 'red' : 'blue',
+      date: inv.paidAt || inv.createdAt,
+    }));
+
     const billing = {
       totalMRR: mrr,
       totalARR: mrr * 12,
@@ -702,7 +738,8 @@ export async function registerSuperadminRoutes(app: FastifyInstance): Promise<vo
       churnRate: Math.round(churnRate * 10) / 10,
       ltv: Math.round(ltv),
       planBreakdown,
-      recentEvents: [],
+      recentEvents,
+      monthlyRevenue,
     };
 
     return { success: true, data: billing };
@@ -762,21 +799,128 @@ export async function registerSuperadminRoutes(app: FastifyInstance): Promise<vo
   });
 
   // ============================================
-  // DELETE TENANT (permanent removal)
+  // DELETE TENANT (soft delete — 30-day grace period, then purge)
   // ============================================
+
+  const DELETION_GRACE_PERIOD_DAYS = 30;
 
   app.delete('/tenants/:tenantId', async (request, reply) => {
     const { tenantId } = z.object({ tenantId: z.string() }).parse(request.params);
 
+    const tenant = await app.prisma.tenant.findUnique({ where: { id: tenantId } });
+    if (!tenant) {
+      return reply.status(404).send({ success: false, error: { code: 'NOT_FOUND' } });
+    }
+
+    if (tenant.status === 'PENDING_DELETION') {
+      return reply.status(400).send({
+        success: false,
+        error: { code: 'ALREADY_PENDING_DELETION', message: 'Tenant deletion is already scheduled.' },
+      });
+    }
+
+    const scheduledPurgeAt = new Date(Date.now() + DELETION_GRACE_PERIOD_DAYS * 24 * 60 * 60 * 1000);
+
+    await app.prisma.tenant.update({
+      where: { id: tenantId },
+      data: {
+        statusBeforeDeletion: tenant.status,
+        status: 'PENDING_DELETION',
+        deletionRequestedAt: new Date(),
+        deletionRequestedById: request.authUser.id,
+        scheduledPurgeAt,
+      },
+    });
+
+    await createAuditLog(app.prisma, {
+      actorId: request.authUser.id,
+      actorType: 'superadmin',
+      actorRole: request.authUser.role,
+      action: 'REQUEST_DELETE',
+      resource: 'tenants',
+      resourceId: tenantId,
+      metadata: { scheduledPurgeAt: scheduledPurgeAt.toISOString() },
+      ipAddress: request.ip,
+      userAgent: request.headers['user-agent'],
+    });
+
+    return {
+      success: true,
+      data: {
+        message: `Tenant scheduled for permanent deletion on ${scheduledPurgeAt.toISOString().slice(0, 10)}. Can be cancelled until then.`,
+        scheduledPurgeAt,
+      },
+    };
+  });
+
+  // Cancel a pending deletion within the grace period
+  app.post('/tenants/:tenantId/cancel-deletion', async (request, reply) => {
+    const { tenantId } = z.object({ tenantId: z.string() }).parse(request.params);
+
+    const tenant = await app.prisma.tenant.findUnique({ where: { id: tenantId } });
+    if (!tenant || tenant.status !== 'PENDING_DELETION') {
+      return reply.status(400).send({
+        success: false,
+        error: { code: 'NOT_PENDING_DELETION', message: 'This tenant has no scheduled deletion to cancel.' },
+      });
+    }
+
+    await app.prisma.tenant.update({
+      where: { id: tenantId },
+      data: {
+        status: tenant.statusBeforeDeletion || 'ACTIVE',
+        statusBeforeDeletion: null,
+        deletionRequestedAt: null,
+        deletionRequestedById: null,
+        scheduledPurgeAt: null,
+      },
+    });
+
+    await createAuditLog(app.prisma, {
+      actorId: request.authUser.id,
+      actorType: 'superadmin',
+      actorRole: request.authUser.role,
+      action: 'CANCEL_DELETE',
+      resource: 'tenants',
+      resourceId: tenantId,
+      ipAddress: request.ip,
+      userAgent: request.headers['user-agent'],
+    });
+
+    return { success: true, data: { message: 'Deletion cancelled. Tenant restored.' } };
+  });
+
+  // Permanently purge a tenant whose grace period has elapsed (irreversible)
+  app.post('/tenants/:tenantId/purge', async (request, reply) => {
+    const { tenantId } = z.object({ tenantId: z.string() }).parse(request.params);
+    const { force } = z.object({ force: z.boolean().optional() }).parse(request.body || {});
+
+    const tenant = await app.prisma.tenant.findUnique({ where: { id: tenantId } });
+    if (!tenant || tenant.status !== 'PENDING_DELETION') {
+      return reply.status(400).send({
+        success: false,
+        error: { code: 'NOT_PENDING_DELETION', message: 'Only tenants pending deletion can be purged.' },
+      });
+    }
+
+    if (!force && tenant.scheduledPurgeAt && tenant.scheduledPurgeAt > new Date()) {
+      return reply.status(400).send({
+        success: false,
+        error: {
+          code: 'GRACE_PERIOD_ACTIVE',
+          message: `Grace period active until ${tenant.scheduledPurgeAt.toISOString().slice(0, 10)}. Pass force:true to purge immediately.`,
+        },
+      });
+    }
+
     // Cascade delete: users, contacts, messages, phone numbers, templates, campaigns, etc.
     await app.prisma.$transaction([
       app.prisma.message.deleteMany({ where: { tenantId } }),
-      app.prisma.campaignRecipient.deleteMany({ where: { campaign: { tenantId } } }),
       app.prisma.campaign.deleteMany({ where: { tenantId } }),
       app.prisma.template.deleteMany({ where: { tenantId } }),
       app.prisma.phoneNumber.deleteMany({ where: { tenantId } }),
       app.prisma.contact.deleteMany({ where: { tenantId } }),
-      app.prisma.creditTransaction.deleteMany({ where: { tenantId } }),
+      app.prisma.tenantCreditTransaction.deleteMany({ where: { credit: { tenantId } } }),
       app.prisma.ticket.deleteMany({ where: { tenantId } }),
       app.prisma.user.deleteMany({ where: { tenantId } }),
       app.prisma.tenant.delete({ where: { id: tenantId } }),
@@ -786,7 +930,7 @@ export async function registerSuperadminRoutes(app: FastifyInstance): Promise<vo
       actorId: request.authUser.id,
       actorType: 'superadmin',
       actorRole: request.authUser.role,
-      action: 'DELETE',
+      action: 'PURGE',
       resource: 'tenants',
       resourceId: tenantId,
       ipAddress: request.ip,

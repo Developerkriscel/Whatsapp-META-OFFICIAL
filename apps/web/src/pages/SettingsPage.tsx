@@ -34,7 +34,7 @@ const INDUSTRIES = ['Technology', 'Healthcare', 'Retail', 'Finance', 'Education'
 const COMPANY_SIZES = ['1-10 employees', '11-50 employees', '50-200 employees', '201-1000 employees', '1000+ employees'];
 
 export default function SettingsPage() {
-  const { user } = useAuth();
+  const { user, updateUser } = useAuth();
   const queryClient = useQueryClient();
   const [activeTab, setActiveTab] = useState('profile');
   const [saved, setSaved] = useState(false);
@@ -84,6 +84,7 @@ export default function SettingsPage() {
   const [showKeyModal, setShowKeyModal] = useState(false);
   const [newKeyName, setNewKeyName] = useState('');
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
+  const [revealedKey, setRevealedKey] = useState<{ name: string; key: string } | null>(null);
 
   // Fetch user profile
   const { data: profileData } = useQuery({
@@ -136,10 +137,17 @@ export default function SettingsPage() {
       const response = await api.patch('/auth/me', data);
       return response.data;
     },
-    onSuccess: () => {
+    onSuccess: (response) => {
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
       queryClient.invalidateQueries({ queryKey: ['profile'] });
+      // The header/sidebar name+email come from AuthContext (backed by
+      // localStorage), a separate source from this page's own ['profile']
+      // query — without this, the save "succeeds" but every other part of
+      // the UI keeps showing the old name until the next full login.
+      if (response?.data) {
+        updateUser({ name: response.data.name, email: response.data.email });
+      }
     },
     onError: (err: any) => {
       setError(err.response?.data?.error?.message || 'Failed to update profile');
@@ -236,9 +244,10 @@ export default function SettingsPage() {
       const response = await api.post('/settings/api-key', { name });
       return response.data;
     },
-    onSuccess: () => {
+    onSuccess: (data) => {
       setShowKeyModal(false);
       setNewKeyName('');
+      setRevealedKey({ name: data.data.name, key: data.data.key });
       refetchApiKeys();
     },
   });
@@ -679,13 +688,6 @@ export default function SettingsPage() {
                   </div>
                   <span className="text-xs px-2 py-1 bg-apple-green/20 text-apple-green rounded-full">Active</span>
                 </div>
-                <div className="flex items-center justify-between p-3 border border-black/5 rounded-lg">
-                  <div>
-                    <p className="font-medium text-ios-dark text-sm">Chrome on Windows</p>
-                    <p className="text-xs text-ios-muted">192.168.1.100 • 2 hours ago</p>
-                  </div>
-                  <button className="text-xs text-red-500 hover:text-red-600">Revoke</button>
-                </div>
               </div>
             </div>
           </div>
@@ -697,10 +699,10 @@ export default function SettingsPage() {
             <h2 className="text-lg font-semibold text-ios-dark mb-6">Integrations</h2>
             <div className="space-y-4">
               {[
-                { name: 'Shopify', desc: 'Sync products and customers', status: 'connected' },
-                { name: 'Zapier', desc: 'Automate workflows', status: 'disconnected' },
-                { name: 'HubSpot', desc: 'CRM integration', status: 'disconnected' },
-                { name: 'Google Sheets', desc: 'Export data to spreadsheets', status: 'connected' },
+                { name: 'Shopify', desc: 'Sync products and customers' },
+                { name: 'Zapier', desc: 'Automate workflows' },
+                { name: 'HubSpot', desc: 'CRM integration' },
+                { name: 'Google Sheets', desc: 'Export data to spreadsheets' },
               ].map((integration) => (
                 <div key={integration.name} className="flex items-center justify-between p-4 border border-black/5 rounded-apple-lg">
                   <div>
@@ -708,14 +710,7 @@ export default function SettingsPage() {
                     <p className="text-sm text-ios-muted">{integration.desc}</p>
                   </div>
                   <div className="flex items-center gap-2">
-                    {integration.status === 'connected' ? (
-                      <>
-                        <span className="text-xs px-2.5 py-1 rounded-apple-full font-medium bg-apple-green/20 text-apple-green">Connected</span>
-                        <button className="text-xs text-red-500 hover:text-red-600">Disconnect</button>
-                      </>
-                    ) : (
-                      <button className="btn-apple btn-wa-green text-sm">Connect</button>
-                    )}
+                    <span className="text-xs px-2.5 py-1 rounded-apple-full font-medium bg-ios-gray text-ios-muted">Coming Soon</span>
                   </div>
                 </div>
               ))}
@@ -880,6 +875,42 @@ export default function SettingsPage() {
                 </button>
               </div>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* API Key Reveal Modal (shown once, right after creation) */}
+      {revealedKey && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-xl p-6 max-w-md w-full mx-4">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-semibold text-ios-dark flex items-center gap-2">
+                <Key className="w-5 h-5" />
+                {revealedKey.name}
+              </h3>
+              <button onClick={() => setRevealedKey(null)} className="text-ios-muted hover:text-ios-dark">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="p-3 bg-amber-50 border border-amber-200 rounded-apple-lg text-sm text-amber-700 mb-4">
+              Copy this key now — for security, you won't be able to see it again.
+            </div>
+            <div className="flex items-center gap-2 p-3 bg-ios-gray rounded-apple-lg mb-4">
+              <code className="flex-1 text-sm font-mono text-ios-dark break-all">{revealedKey.key}</code>
+              <button
+                onClick={() => copyToClipboard(revealedKey.key)}
+                className="btn-apple btn-apple-outline text-sm py-1.5 flex items-center gap-1 flex-shrink-0"
+              >
+                {copiedKey === revealedKey.key ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
+                {copiedKey === revealedKey.key ? 'Copied!' : 'Copy'}
+              </button>
+            </div>
+            <button
+              onClick={() => setRevealedKey(null)}
+              className="btn-apple btn-wa-green w-full"
+            >
+              Done
+            </button>
           </div>
         </div>
       )}

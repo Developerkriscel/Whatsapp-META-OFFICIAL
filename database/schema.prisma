@@ -295,6 +295,11 @@ model Tenant {
   segments        Segment[]
   whatsappFlows   WhatsAppFlow[]
   addons          TenantAddon[]
+  teams           Team[]
+  botExecutions   BotExecution[]
+  notifications   Notification[]
+  credits         Credit?
+  creditTransactions CreditTransaction[]
 
   @@index([status])
   @@index([planId])
@@ -341,17 +346,35 @@ model User {
 
   maxChats Int @default(5)
 
-  conversations Conversation[] @relation("AssignedAgent")
-  messages      Message[]
-  auditLogs     AuditLog[]
+  // Team membership
+  teamId   String?
+  team     Team?   @relation(fields: [teamId], references: [id])
+
+  // Agent presence & availability
+  isOnline       Boolean  @default(false)
+  status         String   @default("OFFLINE") // ONLINE, OFFLINE, AWAY, BUSY
+  lastSeenAt     DateTime?
+  awayUntil      DateTime?
+
+  // Agent performance counters
+  totalAssigned    Int @default(0)
+  totalResolved    Int @default(0)
+  avgResponseTime  Int @default(0) // seconds
+
+  conversations   Conversation[] @relation("AssignedAgent")
+  notes           ConversationNote[] @relation("NoteAuthor")
+  messages        Message[]
+  auditLogs       AuditLog[]
   assignedTickets Ticket[] @relation("AssignedAgent")
-  sessions      UserSession[]
+  sessions        UserSession[]
+  notifications   Notification[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   @@unique([tenantId, email])
   @@index([tenantId])
+  @@index([teamId])
   @@map("users")
 }
 
@@ -393,6 +416,7 @@ model Contact {
   messageReceives  Message[]    @relation("ReceivedBy")
   segments         ContactSegment[]
   tags             ContactTag[]
+  botExecutions    BotExecution[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -434,7 +458,12 @@ model Conversation {
 
   tags Tag[]
 
-  messages Message[]
+  assignedTeamId String?
+  assignedTeam   Team?   @relation("AssignedTeam", fields: [assignedTeamId], references: [id])
+
+  messages      Message[]
+  botExecutions BotExecution[]
+  notes         ConversationNote[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -443,7 +472,24 @@ model Conversation {
   @@index([tenantId])
   @@index([status])
   @@index([assignedToId])
+  @@index([assignedTeamId])
   @@map("conversations")
+}
+
+model ConversationNote {
+  id             String       @id @default(cuid())
+  tenantId       String
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  authorId       String?
+  author         User?        @relation("NoteAuthor", fields: [authorId], references: [id])
+  content        String
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  @@index([conversationId])
+  @@index([tenantId])
+  @@map("conversation_notes")
 }
 
 // ============================================
@@ -667,13 +713,21 @@ model BotFlow {
 
   phoneNumberIds String[]
 
-  fallbackMessage String?
+  fallbackMessage   String?
   businessHoursMode Boolean @default(true)
   offHoursMessage   String?
+
+  // Human handoff config
+  enableHumanHandoff Boolean  @default(true)
+  handoffKeywords    String[] @default(["human", "agent", "person", "help"])
+  assignToTeamId     String?
+  assignToUserId     String?
 
   totalTriggered Int @default(0)
   totalResolved  Int @default(0)
   avgSteps       Decimal? @db.Decimal(5, 2)
+
+  executions BotExecution[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -970,3 +1024,131 @@ model RefreshToken {
   @@index([userId])
   @@map("refresh_tokens")
 }
+
+// ============================================
+// TEAMS
+// ============================================
+
+model Team {
+  id        String   @id @default(cuid())
+  tenantId  String
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  name           String
+  description    String?
+  color          String  @default("#6366f1")
+  autoAssign     Boolean @default(false)
+  assignmentMode String  @default("ROUND_ROBIN") // ROUND_ROBIN, LEAST_LOADED, PRIORITY
+  isActive       Boolean @default(true)
+
+  members       User[]
+  conversations Conversation[] @relation("AssignedTeam")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([tenantId, name])
+  @@index([tenantId])
+  @@map("teams")
+}
+
+// ============================================
+// BOT EXECUTIONS
+// ============================================
+
+model BotExecution {
+  id        String   @id @default(cuid())
+  tenantId  String
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  flowId         String
+  flow           BotFlow @relation(fields: [flowId], references: [id], onDelete: Cascade)
+  contactId      String
+  contact        Contact @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  currentStep  String  @default("start")
+  status       String  @default("ACTIVE") // ACTIVE, COMPLETED, HANDED_OFF, FAILED, TIMEOUT
+  stepsExecuted Int    @default(0)
+  variables    Json    @default("{}")
+
+  startedAt  DateTime  @default(now())
+  endedAt    DateTime?
+
+  @@index([tenantId])
+  @@index([flowId])
+  @@index([conversationId])
+  @@map("bot_executions")
+}
+
+// ============================================
+// NOTIFICATIONS
+// ============================================
+
+model Notification {
+  id        String   @id @default(cuid())
+  tenantId  String
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  type      String   // CONVERSATION_ASSIGNED, CONVERSATION_TRANSFERRED, MENTION, etc.
+  title     String
+  message   String
+  priority  String   @default("NORMAL") // LOW, NORMAL, HIGH, URGENT
+  isRead    Boolean  @default(false)
+  readAt    DateTime?
+
+  metadata  Json?
+
+  createdAt DateTime @default(now())
+
+  @@index([tenantId])
+  @@index([userId])
+  @@index([isRead])
+  @@map("notifications")
+}
+
+// ============================================
+// CREDITS
+// ============================================
+
+model Credit {
+  id        String   @id @default(cuid())
+  tenantId  String   @unique
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  balance    Int @default(0)
+  totalBought Int @default(0)
+  totalUsed   Int @default(0)
+
+  transactions CreditTransaction[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("credits")
+}
+
+model CreditTransaction {
+  id        String   @id @default(cuid())
+  tenantId  String
+  creditId  String
+  credit    Credit   @relation(fields: [creditId], references: [id], onDelete: Cascade)
+
+  type      String   // PURCHASE, USAGE, REFUND, BONUS, ADJUSTMENT
+  amount    Int      // positive = credit, negative = debit
+  balance   Int      // balance after transaction
+  description String?
+  reference  String? // stripe payment id, message id, campaign id etc.
+  metadata   Json?
+
+  createdAt DateTime @default(now())
+
+  @@index([tenantId])
+  @@index([creditId])
+  @@map("credit_transactions")
+}
+

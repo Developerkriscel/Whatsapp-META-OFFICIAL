@@ -1,10 +1,82 @@
 // TENANT ROUTES -- Dashboard, Contacts, Conversations, Messages, Campaigns, etc.
 
 import { FastifyInstance } from 'fastify';
+import { Prisma } from '@prisma/client';
 import { z } from 'zod';
-import { requirePermission } from '../middleware/auth.js';
-import { WhatsAppAPIClient, getDefaultConfig } from '@whatsapp-saas/config/guards';
-import { syncTemplatesFromMeta, submitTemplateToMeta, fetchMetaTemplates } from '../services/metaTemplate.js';
+import { syncTemplatesFromMeta, submitTemplateToMeta, fetchMetaTemplates, resolveEffectiveWabaId } from '../services/metaTemplate.js';
+import { decryptSecret } from '../services/credentialEncryption.js';
+import { checkTemplateContent, getAISuggestion } from '../services/aiAssist.js';
+
+type SegmentCondition = { field: string; operator: string; value?: string };
+
+/**
+ * Turns a segment's saved conditions + match type into a live Prisma Contact where-clause.
+ * Segments are evaluated live (not materialized) so campaigns always see current data
+ * without requiring an explicit sync step first.
+ */
+function buildSegmentContactWhere(
+  queryObj: { type?: string; conditions?: SegmentCondition[] } | null | undefined
+): Prisma.ContactWhereInput {
+  const conditions = queryObj?.conditions || [];
+  const matchType = queryObj?.type === 'any' ? 'any' : 'all';
+
+  const clauses: Prisma.ContactWhereInput[] = [];
+  for (const cond of conditions) {
+    const clause = buildSegmentCondition(cond);
+    if (clause) clauses.push(clause);
+  }
+
+  if (clauses.length === 0) return {};
+  return matchType === 'any' ? { OR: clauses } : { AND: clauses };
+}
+
+function buildSegmentCondition(cond: SegmentCondition): Prisma.ContactWhereInput | null {
+  const { field, operator, value } = cond;
+
+  if (field === 'tag') {
+    if (!value) return null;
+    return { tags: { some: { tag: { name: value } } } };
+  }
+
+  const stringFields = ['city', 'country', 'language', 'company'] as const;
+  if ((stringFields as readonly string[]).includes(field)) {
+    const f = field as typeof stringFields[number];
+    switch (operator) {
+      case 'equals': return value ? { [f]: { equals: value, mode: 'insensitive' } } : null;
+      case 'not_equals': return value ? { [f]: { not: { equals: value, mode: 'insensitive' } } } : null;
+      case 'contains': return value ? { [f]: { contains: value, mode: 'insensitive' } } : null;
+      case 'not_contains': return value ? { NOT: { [f]: { contains: value, mode: 'insensitive' } } } : null;
+      case 'starts_with': return value ? { [f]: { startsWith: value, mode: 'insensitive' } } : null;
+      case 'ends_with': return value ? { [f]: { endsWith: value, mode: 'insensitive' } } : null;
+      case 'is_empty': return { OR: [{ [f]: null }, { [f]: '' }] };
+      case 'is_not_empty': return { AND: [{ [f]: { not: null } }, { [f]: { not: '' } }] };
+      default: return null;
+    }
+  }
+
+  if (field === 'totalMessagesSent') {
+    const num = Number(value);
+    if (Number.isNaN(num)) return null;
+    if (operator === 'greater_than') return { totalMessagesSent: { gt: num } };
+    if (operator === 'less_than') return { totalMessagesSent: { lt: num } };
+    if (operator === 'equals') return { totalMessagesSent: num };
+    return null;
+  }
+
+  if (field === 'lastMessageAt' || field === 'createdAt') {
+    if (operator === 'within_days') {
+      const days = Number(value);
+      if (Number.isNaN(days)) return null;
+      const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+      return { [field]: { gte: since } };
+    }
+    if (operator === 'is_empty') return { [field]: null };
+    if (operator === 'is_not_empty') return { [field]: { not: null } };
+    return null;
+  }
+
+  return null;
+}
 
 // Validation schemas
 const paginationSchema = z.object({
@@ -335,7 +407,7 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
     };
   });
 
-  app.post('/contacts', async (request, reply) => {
+  app.post('/contacts', { preHandler: [app.requirePermission('contacts', 'create')] }, async (request, reply) => {
     if (!request.authUser.tenantId) {
       return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
     }
@@ -403,6 +475,9 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
         phone: normalizedPhone,
         name: rest.name,
         email: email || undefined,
+        company: rest.company,
+        city: rest.city,
+        country: rest.country,
         tenantId: request.authUser.tenantId,
       },
     });
@@ -445,7 +520,7 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
     return { success: true, data: { ...contact, tags: contact.tags.map(t => t.tag) } };
   });
 
-  app.patch('/contacts/:contactId', async (request, reply) => {
+  app.patch('/contacts/:contactId', { preHandler: [app.requirePermission('contacts', 'update')] }, async (request, reply) => {
     const { contactId } = z.object({ contactId: z.string() }).parse(request.params);
     const body = z.object({
       name: z.string().optional(),
@@ -466,7 +541,7 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
   // CONTACTS IMPORT/EXPORT
   // ============================================
 
-  app.post('/contacts/import', async (request, reply) => {
+  app.post('/contacts/import', { preHandler: [app.requirePermission('contacts', 'create')] }, async (request, reply) => {
     if (!request.authUser.tenantId) {
       return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
     }
@@ -484,7 +559,7 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
 
     const { contacts, duplicateHandling } = schema.parse(request.body);
 
-    const results = { imported: 0, skipped: 0, updated: 0, errors: [] as string[] };
+    const results = { created: 0, skipped: 0, updated: 0, errors: [] as string[] };
 
     for (const contact of contacts) {
       try {
@@ -525,7 +600,7 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
             consentSource: 'import',
           },
         });
-        results.imported++;
+        results.created++;
       } catch (err) {
         results.errors.push(`Failed to import ${contact.phone}: ${(err as Error).message}`);
       }
@@ -534,7 +609,7 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
     return { success: true, data: results };
   });
 
-  app.get('/contacts/export', async (request, reply) => {
+  app.get('/contacts/export', { preHandler: [app.requirePermission('contacts', 'export')] }, async (request, reply) => {
     if (!request.authUser.tenantId) {
       return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
     }
@@ -611,7 +686,7 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
   /**
    * POST /contacts/:contactId/opt-in - Opt contact in for marketing
    */
-  app.post('/contacts/:contactId/opt-in', async (request, reply) => {
+  app.post('/contacts/:contactId/opt-in', { preHandler: [app.requirePermission('contacts', 'update')] }, async (request, reply) => {
     if (!request.authUser.tenantId) {
       return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
     }
@@ -633,6 +708,8 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
         optInAt: new Date(),
         blocked: false,
         consentSource: 'manual',
+        consentIp: request.ip,
+        consentReference: `agent:${request.authUser.id}`,
       },
     });
 
@@ -642,7 +719,7 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
   /**
    * POST /contacts/:contactId/opt-out - Opt contact out (STOP)
    */
-  app.post('/contacts/:contactId/opt-out', async (request, reply) => {
+  app.post('/contacts/:contactId/opt-out', { preHandler: [app.requirePermission('contacts', 'update')] }, async (request, reply) => {
     if (!request.authUser.tenantId) {
       return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
     }
@@ -664,6 +741,8 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
         optOutAt: new Date(),
         blocked: true,
         consentSource: contact.consentSource || 'manual',
+        consentIp: request.ip,
+        consentReference: `agent:${request.authUser.id}`,
       },
     });
 
@@ -684,7 +763,7 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
   /**
    * POST /contacts/bulk-opt-in - Bulk opt-in contacts
    */
-  app.post('/contacts/bulk-opt-in', async (request, reply) => {
+  app.post('/contacts/bulk-opt-in', { preHandler: [app.requirePermission('contacts', 'update')] }, async (request, reply) => {
     if (!request.authUser.tenantId) {
       return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
     }
@@ -715,7 +794,7 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
   /**
    * POST /contacts/bulk-opt-out - Bulk opt-out contacts
    */
-  app.post('/contacts/bulk-opt-out', async (request, reply) => {
+  app.post('/contacts/bulk-opt-out', { preHandler: [app.requirePermission('contacts', 'update')] }, async (request, reply) => {
     if (!request.authUser.tenantId) {
       return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
     }
@@ -777,7 +856,7 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
     };
   });
 
-  app.post('/contacts/bulk-delete', async (request, reply) => {
+  app.post('/contacts/bulk-delete', { preHandler: [app.requirePermission('contacts', 'delete')] }, async (request, reply) => {
     if (!request.authUser.tenantId) {
       return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
     }
@@ -796,7 +875,7 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
     return { success: true, data: { deleted: ids.length } };
   });
 
-  app.delete('/contacts/:contactId', async (request, reply) => {
+  app.delete('/contacts/:contactId', { preHandler: [app.requirePermission('contacts', 'delete')] }, async (request, reply) => {
     const { contactId } = z.object({ contactId: z.string() }).parse(request.params);
 
     await app.prisma.contact.update({
@@ -816,11 +895,35 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
       return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
     }
 
-    const query = paginationSchema.parse(request.query);
-    const { page, limit, sort, order } = query;
+    const query = paginationSchema.extend({
+      filter: z.enum(['all', 'open', 'closed', 'pending', 'mine', 'bot']).optional(),
+      search: z.string().optional(),
+    }).parse(request.query);
+    const { page, limit, sort, order, filter, search } = query;
     const skip = (page - 1) * limit;
 
-    const where = { tenantId: request.authUser.tenantId };
+    const where: any = { tenantId: request.authUser.tenantId };
+
+    if (filter === 'open') {
+      where.status = 'OPEN';
+    } else if (filter === 'closed') {
+      where.status = 'CLOSED';
+    } else if (filter === 'pending') {
+      where.status = { in: ['PENDING_AGENT'] };
+    } else if (filter === 'mine') {
+      where.assignedToId = request.authUser.id;
+    } else if (filter === 'bot') {
+      where.isBotActive = true;
+    }
+
+    if (search) {
+      where.contact = {
+        OR: [
+          { name: { contains: search, mode: 'insensitive' } },
+          { phone: { contains: search, mode: 'insensitive' } },
+        ],
+      };
+    }
 
     const [conversations, total] = await Promise.all([
       app.prisma.conversation.findMany({
@@ -832,6 +935,8 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
           contact: true,
           phoneNumber: true,
           assignedTo: { select: { id: true, name: true } },
+          assignedTeam: { select: { id: true, name: true } },
+          _count: { select: { messages: true } },
           messages: {
             orderBy: { createdAt: 'desc' },
             take: 1,
@@ -861,6 +966,11 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
         contact: true,
         phoneNumber: true,
         assignedTo: { select: { id: true, name: true, avatarUrl: true } },
+        assignedTeam: { select: { id: true, name: true } },
+        notes: {
+          include: { author: { select: { id: true, name: true } } },
+          orderBy: { createdAt: 'asc' },
+        },
         messages: {
           orderBy: { createdAt: 'asc' },
           include: { sender: { select: { id: true, name: true, avatarUrl: true } } },
@@ -895,23 +1005,23 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
     return { success: true, data: conversation.messages };
   });
 
-  app.patch('/conversations/:conversationId', async (request, reply) => {
+  app.patch('/conversations/:conversationId', { preHandler: [app.requirePermission('conversations', 'update')] }, async (request, reply) => {
     const { conversationId } = z.object({ conversationId: z.string() }).parse(request.params);
     const body = z.object({
-      status: z.enum(['OPEN', 'CLOSED', 'PENDING_AGENT', 'ARCHIVED']).optional(),
+      status: z.string().optional(),
       assignedToId: z.string().optional(),
       isBotActive: z.boolean().optional(),
     }).parse(request.body);
 
     const conversation = await app.prisma.conversation.update({
       where: { id: conversationId, tenantId: request.authUser.tenantId },
-      data: body,
+      data: body as Prisma.ConversationUncheckedUpdateInput,
     });
 
     return { success: true, data: conversation };
   });
 
-  app.post('/conversations/:conversationId/close', async (request, reply) => {
+  app.post('/conversations/:conversationId/close', { preHandler: [app.requirePermission('conversations', 'update')] }, async (request, reply) => {
     const { conversationId } = z.object({ conversationId: z.string() }).parse(request.params);
 
     const conversation = await app.prisma.conversation.update({
@@ -922,17 +1032,56 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
     return { success: true, data: conversation };
   });
 
-  app.post('/conversations/:conversationId/assign', async (request, reply) => {
+  app.post('/conversations/:conversationId/assign', { preHandler: [app.requirePermission('conversations', 'update')] }, async (request, reply) => {
     const { conversationId } = z.object({ conversationId: z.string() }).parse(request.params);
-    const { userId } = z.object({ userId: z.string() }).parse(request.body);
+    const { userId, teamId } = z.object({
+      userId: z.string().optional(),
+      teamId: z.string().optional(),
+    }).parse(request.body);
+
+    const updateData: any = { status: 'OPEN' };
+    if (userId) updateData.assignedToId = userId;
+    if (teamId) updateData.assignedTeamId = teamId;
 
     const conversation = await app.prisma.conversation.update({
       where: { id: conversationId, tenantId: request.authUser.tenantId },
-      data: { assignedToId: userId, status: 'OPEN' },
-      include: { assignedTo: { select: { id: true, name: true } } },
+      data: updateData,
+      include: {
+        assignedTo: { select: { id: true, name: true } },
+        assignedTeam: { select: { id: true, name: true } },
+      },
     });
 
     return { success: true, data: conversation };
+  });
+
+  app.post('/conversations/:conversationId/notes', { preHandler: [app.requirePermission('conversations', 'update')] }, async (request, reply) => {
+    const { conversationId } = z.object({ conversationId: z.string() }).parse(request.params);
+    const { content } = z.object({ content: z.string().min(1).max(5000) }).parse(request.body);
+
+    const note = await app.prisma.conversationNote.create({
+      data: {
+        tenantId: request.authUser.tenantId!,
+        conversationId,
+        authorId: request.authUser.id,
+        content,
+      },
+      include: { author: { select: { id: true, name: true } } },
+    });
+
+    return reply.status(201).send({ success: true, data: note });
+  });
+
+  app.get('/conversations/:conversationId/notes', async (request, reply) => {
+    const { conversationId } = z.object({ conversationId: z.string() }).parse(request.params);
+
+    const notes = await app.prisma.conversationNote.findMany({
+      where: { conversationId, tenantId: request.authUser.tenantId },
+      include: { author: { select: { id: true, name: true } } },
+      orderBy: { createdAt: 'asc' },
+    });
+
+    return { success: true, data: notes };
   });
 
   // ============================================
@@ -999,7 +1148,7 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
   // MESSAGES
   // ============================================
 
-  app.post('/messages/send', async (request, reply) => {
+  app.post('/messages/send', { preHandler: [app.requirePermission('messages', 'send')] }, async (request, reply) => {
     const schema = z.object({
       conversationId: z.string().optional(),
       contactId: z.string().optional(),
@@ -1034,17 +1183,26 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
       contactId = contactObj.id;
     }
 
-    // Auto-resolve phoneNumberId if not explicitly provided
+    // Auto-resolve phoneNumberId if not explicitly provided — only safe when
+    // the tenant has exactly one connected number. Silently picking one out
+    // of several (arbitrary Prisma row order) risks sending from the wrong
+    // number/WABA with no indication anything went wrong.
     if (!phoneNumberId) {
-      const phoneRec = await app.prisma.phoneNumber.findFirst({
+      const phoneRecs = await app.prisma.phoneNumber.findMany({
         where: { tenantId: request.authUser.tenantId! },
+        take: 2,
       });
-      if (phoneRec) {
-        phoneNumberId = phoneRec.id;
-      } else {
+      if (phoneRecs.length === 1) {
+        phoneNumberId = phoneRecs[0].id;
+      } else if (phoneRecs.length === 0) {
         return reply.status(400).send({
           success: false,
           error: { code: 'NO_PHONE_NUMBER', message: 'No phone number configured for tenant' },
+        });
+      } else {
+        return reply.status(400).send({
+          success: false,
+          error: { code: 'PHONE_AMBIGUOUS', message: 'Multiple phone numbers are connected — specify which one to send from' },
         });
       }
     }
@@ -1056,6 +1214,37 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
       });
     }
 
+    // Verify the contact belongs to this tenant (contactId/conversationId are client-supplied)
+    const contact = await app.prisma.contact.findFirst({
+      where: { id: contactId, tenantId: request.authUser.tenantId! },
+      select: { id: true, country: true },
+    });
+
+    if (!contact) {
+      return reply.status(404).send({ success: false, error: { code: 'CONTACT_NOT_FOUND' } });
+    }
+
+    // Verify the phone number belongs to this tenant
+    const phoneOwned = await app.prisma.phoneNumber.findFirst({
+      where: { id: phoneNumberId, tenantId: request.authUser.tenantId! },
+      select: { id: true },
+    });
+
+    if (!phoneOwned) {
+      return reply.status(404).send({ success: false, error: { code: 'PHONE_NOT_FOUND' } });
+    }
+
+    // If a conversationId was supplied by the client, verify it belongs to this tenant too
+    if (parsed.conversationId) {
+      const conversationOwned = await app.prisma.conversation.findFirst({
+        where: { id: parsed.conversationId, tenantId: request.authUser.tenantId! },
+        select: { id: true },
+      });
+      if (!conversationOwned) {
+        return reply.status(404).send({ success: false, error: { code: 'CONVERSATION_NOT_FOUND' } });
+      }
+    }
+
     const body = {
       conversationId: parsed.conversationId,
       contactId,
@@ -1063,12 +1252,6 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
       body: messageText,
       type: parsed.type,
     };
-
-    // Get contact for country code
-    const contact = await app.prisma.contact.findUnique({
-      where: { id: body.contactId },
-      select: { country: true },
-    });
 
     const countryCode = contact?.country || 'US';
     const category = 'UTILITY'; // Default for text messages (free within session window)
@@ -1184,7 +1367,7 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
     });
   });
 
-  app.post('/messages/:messageId/read', async (request, reply) => {
+  app.post('/messages/:messageId/read', { preHandler: [app.requirePermission('messages', 'update')] }, async (request, reply) => {
     const { messageId } = z.object({ messageId: z.string() }).parse(request.params);
 
     const message = await app.prisma.message.update({
@@ -1254,7 +1437,78 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
     return { success: true, data: campaign };
   });
 
-  app.post('/campaigns', async (request, reply) => {
+  /**
+   * GET /campaigns/:campaignId/messages - Per-recipient send results for a
+   * campaign (contact, delivery status, timestamps, real Meta error if any).
+   */
+  app.get('/campaigns/:campaignId/messages', async (request, reply) => {
+    if (!request.authUser.tenantId) {
+      return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
+    }
+
+    const { campaignId } = z.object({ campaignId: z.string() }).parse(request.params);
+    const { page, limit } = z.object({
+      page: z.coerce.number().int().min(1).default(1),
+      limit: z.coerce.number().int().min(1).max(200).default(50),
+    }).parse(request.query);
+
+    const campaign = await app.prisma.campaign.findFirst({
+      where: { id: campaignId, tenantId: request.authUser.tenantId },
+      select: { id: true },
+    });
+    if (!campaign) {
+      return reply.status(404).send({ success: false, error: { code: 'NOT_FOUND', message: 'Campaign not found' } });
+    }
+
+    const [messages, total] = await Promise.all([
+      app.prisma.message.findMany({
+        where: { campaignId },
+        orderBy: { createdAt: 'desc' },
+        skip: (page - 1) * limit,
+        take: limit,
+        include: { contact: { select: { id: true, name: true, phone: true } } },
+      }),
+      app.prisma.message.count({ where: { campaignId } }),
+    ]);
+
+    return {
+      success: true,
+      data: messages.map((m) => ({
+        id: m.id,
+        contact: m.contact,
+        status: m.status,
+        body: m.body,
+        metaMessageId: m.metaMessageId,
+        errorCode: m.errorCode,
+        errorMessage: m.errorMessage,
+        sentAt: m.sentAt,
+        deliveredAt: m.deliveredAt,
+        readAt: m.readAt,
+        failedAt: m.failedAt,
+        createdAt: m.createdAt,
+      })),
+      meta: { page, limit, total, totalPages: Math.ceil(total / limit) },
+    };
+  });
+
+  /**
+   * POST /campaigns/message-suggest - Optional Mistral-powered campaign copy
+   * suggestion. AI-only (no rule engine) since free-text campaign messages
+   * aren't submitted through Meta's template review. data: null if AI isn't
+   * configured or the call fails.
+   */
+  app.post('/campaigns/message-suggest', { preHandler: [app.requirePermission('campaigns', 'create')] }, async (request, reply) => {
+    const body = z.object({
+      goal: z.string().optional(),
+      audienceDescription: z.string().optional(),
+      existingText: z.string().optional(),
+    }).parse(request.body);
+
+    const result = await getAISuggestion({ module: 'campaign', context: body });
+    return { success: true, data: result };
+  });
+
+  app.post('/campaigns', { preHandler: [app.requirePermission('campaigns', 'create')] }, async (request, reply) => {
     const schema = z.object({
       name: z.string().min(1),
       templateId: z.string().nullable().optional(),
@@ -1262,7 +1516,7 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
       audienceType: z.enum(['all', 'segment', 'contacts']).default('segment'),
       segmentIds: z.array(z.string()).optional(),
       contactIds: z.array(z.string()).optional(),
-      scheduledAt: z.string().datetime().optional(),
+      scheduledAt: z.string().datetime().nullable().optional(),
     });
 
     const body = schema.parse(request.body);
@@ -1286,11 +1540,15 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
     if (body.audienceType === 'contacts' && body.contactIds) {
       totalRecipients = body.contactIds.length;
     } else if (body.audienceType === 'segment' && body.segmentIds) {
-      const segmentContacts = await app.prisma.contactSegment.groupBy({
-        by: ['contactId'],
-        where: { segmentId: { in: body.segmentIds } },
+      const segments = await app.prisma.segment.findMany({
+        where: { id: { in: body.segmentIds }, tenantId: request.authUser.tenantId },
       });
-      totalRecipients = segmentContacts.length;
+      const segmentWhere: Prisma.ContactWhereInput = {
+        OR: segments.map(s => buildSegmentContactWhere(s.query as any)),
+      };
+      totalRecipients = await app.prisma.contact.count({
+        where: { tenantId: request.authUser.tenantId, ...segmentWhere },
+      });
     } else if (body.audienceType === 'all') {
       // Count all active contacts for 'all' audience type
       totalRecipients = await app.prisma.contact.count({
@@ -1317,7 +1575,7 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
     return reply.status(201).send({ success: true, data: campaign });
   });
 
-  app.post('/campaigns/:campaignId/send', async (request, reply) => {
+  app.post('/campaigns/:campaignId/send', { preHandler: [app.requirePermission('campaigns', 'send')] }, async (request, reply) => {
     const { campaignId } = z.object({ campaignId: z.string() }).parse(request.params);
     const tenantId = request.authUser.tenantId!;
 
@@ -1362,6 +1620,48 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
       return reply.status(400).send({
         success: false,
         error: { code: 'NO_PHONE', message: 'Campaign has no connected WhatsApp phone number' },
+      });
+    }
+
+    // Meta rejects every send attempt against a template that isn't APPROVED
+    // yet (PENDING/REJECTED/DRAFT) — without this check the campaign used to
+    // launch anyway, mark itself SENDING, then fail every single recipient
+    // one-by-one with an opaque Meta error (#132001 "template name does not
+    // exist in the translation"), burning the whole batch for one root cause.
+    // Meta auto-provisions a handful of sample templates (hello_world, and
+    // the jaspers_market_* demo set) on every WABA's sandbox test number.
+    // They show up as APPROVED and look perfectly usable, but Meta hard-locks
+    // them to the test number — sending from a real connected business phone
+    // number always fails with #131058 "can only be sent from the Public
+    // Test Numbers", for every recipient, no matter what else is correct.
+    const META_SAMPLE_TEMPLATES = new Set([
+      'hello_world',
+      'jaspers_market_image_cta_v1',
+      'jaspers_market_media_carousel_v1',
+      'jaspers_market_order_confirmation_v1',
+      'jaspers_market_plain_text_v1',
+    ]);
+    if (META_SAMPLE_TEMPLATES.has(campaign.template.name)) {
+      return reply.status(400).send({
+        success: false,
+        error: {
+          code: 'SAMPLE_TEMPLATE_NOT_USABLE',
+          message: `"${campaign.template.name}" is one of Meta's built-in sample templates — it only works from Meta's sandbox test number and will always fail from your real business number. Create and submit your own template for this campaign instead.`,
+        },
+      });
+    }
+
+    if (campaign.template.status !== 'APPROVED') {
+      return reply.status(400).send({
+        success: false,
+        error: {
+          code: 'TEMPLATE_NOT_APPROVED',
+          message:
+            campaign.template.status === 'REJECTED'
+              ? `Template "${campaign.template.name}" was rejected by Meta${campaign.template.rejectionReason ? ` (${campaign.template.rejectionReason})` : ''}. Fix and resubmit it before sending this campaign.`
+              : `Template "${campaign.template.name}" is still ${campaign.template.status.toLowerCase()} with Meta — it must be APPROVED before a campaign can send it.`,
+          templateStatus: campaign.template.status,
+        },
       });
     }
 
@@ -1426,7 +1726,7 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
     return { success: true, data: { message: 'Campaign sending started', recipients: campaign.totalRecipients } };
   });
 
-  app.post('/campaigns/:campaignId/cancel', async (request, reply) => {
+  app.post('/campaigns/:campaignId/cancel', { preHandler: [app.requirePermission('campaigns', 'update')] }, async (request, reply) => {
     const { campaignId } = z.object({ campaignId: z.string() }).parse(request.params);
 
     const campaign = await app.prisma.campaign.update({
@@ -1478,7 +1778,7 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
     return { success: true, data: { campaign, stats } };
   });
 
-  app.patch('/campaigns/:campaignId', async (request, reply) => {
+  app.patch('/campaigns/:campaignId', { preHandler: [app.requirePermission('campaigns', 'update')] }, async (request, reply) => {
     if (!request.authUser.tenantId) {
       return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
     }
@@ -1517,7 +1817,7 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
     return { success: true, data: updated };
   });
 
-  app.delete('/campaigns/:campaignId', async (request, reply) => {
+  app.delete('/campaigns/:campaignId', { preHandler: [app.requirePermission('campaigns', 'delete')] }, async (request, reply) => {
     if (!request.authUser.tenantId) {
       return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
     }
@@ -1593,7 +1893,53 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
     return { success: true, data: categories };
   });
 
-  app.post('/templates', async (request, reply) => {
+  /**
+   * POST /templates/analyze - Live rule-based compliance check while creating a
+   * template. Synchronous, no network call, safe to call on every debounced
+   * keystroke. This is the same check enforced server-side at submit time.
+   */
+  app.post('/templates/analyze', { preHandler: [app.requirePermission('templates', 'create')] }, async (request, reply) => {
+    const body = z.object({
+      category: z.enum(['MARKETING', 'UTILITY', 'AUTHENTICATION']),
+      bodyText: z.string(),
+      headerText: z.string().optional(),
+      footerText: z.string().optional(),
+      buttons: z.array(z.object({ type: z.string(), text: z.string() })).optional(),
+    }).parse(request.body);
+
+    const result = checkTemplateContent(body);
+    return { success: true, data: result };
+  });
+
+  /**
+   * POST /templates/ai-rewrite - Optional Mistral-powered rewrite targeting the
+   * compliance issues found by /templates/analyze. Returns data: null when no
+   * MISTRAL_API_KEY is configured, or when the AI call fails for any reason.
+   */
+  app.post('/templates/ai-rewrite', { preHandler: [app.requirePermission('templates', 'create')] }, async (request, reply) => {
+    const body = z.object({
+      category: z.enum(['MARKETING', 'UTILITY', 'AUTHENTICATION']),
+      bodyText: z.string(),
+      issues: z
+        .array(z.object({
+          severity: z.enum(['error', 'warning']),
+          code: z.string(),
+          message: z.string(),
+          field: z.enum(['body', 'header', 'footer', 'buttons', 'category']),
+        }))
+        .optional(),
+    }).parse(request.body);
+
+    const result = await getAISuggestion({
+      module: 'template',
+      context: { category: body.category, bodyText: body.bodyText },
+      ruleIssues: body.issues,
+    });
+
+    return { success: true, data: result };
+  });
+
+  app.post('/templates', { preHandler: [app.requirePermission('templates', 'create')] }, async (request, reply) => {
     const schema = z.object({
       name: z.string().min(1),
       category: z.enum(['MARKETING', 'UTILITY', 'AUTHENTICATION']),
@@ -1602,9 +1948,24 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
       header: z.object({ type: z.string(), text: z.string().optional() }).optional(),
       footer: z.string().optional(),
       buttons: z.array(z.object({ type: z.string(), text: z.string() })).optional(),
+      // Which connected number's WABA to submit this under — required to
+      // disambiguate when a tenant has numbers on more than one WABA;
+      // optional (and auto-resolved at submit time) for the common
+      // single-number case.
+      phoneNumberId: z.string().optional(),
     });
 
     const body = schema.parse(request.body);
+
+    if (body.phoneNumberId) {
+      const owned = await app.prisma.phoneNumber.findFirst({
+        where: { id: body.phoneNumberId, tenantId: request.authUser.tenantId! },
+        select: { id: true },
+      });
+      if (!owned) {
+        return reply.status(400).send({ success: false, error: { code: 'PHONE_NOT_FOUND', message: 'Selected phone number not found' } });
+      }
+    }
 
     const template = await app.prisma.template.create({
       data: {
@@ -1616,6 +1977,7 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
         header: body.header as any,
         footer: body.footer as any,
         buttons: body.buttons as any,
+        phoneNumberId: body.phoneNumberId,
         status: 'DRAFT',
       },
     });
@@ -1623,7 +1985,7 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
     return reply.status(201).send({ success: true, data: template });
   });
 
-  app.patch('/templates/:templateId', async (request, reply) => {
+  app.patch('/templates/:templateId', { preHandler: [app.requirePermission('templates', 'update')] }, async (request, reply) => {
     const { templateId } = z.object({ templateId: z.string() }).parse(request.params);
     const body = z.object({
       name: z.string().optional(),
@@ -1644,7 +2006,7 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
     return { success: true, data: template };
   });
 
-  app.post('/templates/:templateId/submit', async (request, reply) => {
+  app.post('/templates/:templateId/submit', { preHandler: [app.requirePermission('templates', 'update')] }, async (request, reply) => {
     const { templateId } = z.object({ templateId: z.string() }).parse(request.params);
 
     const template = await app.prisma.template.findFirst({
@@ -1662,6 +2024,26 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
       });
     }
 
+    // Block submission locally if the content would likely be rejected by Meta —
+    // this is the real enforcement point, saving a wasted Meta API round-trip.
+    const complianceCheck = checkTemplateContent({
+      category: template.category,
+      bodyText: (template.body as any)?.text || '',
+      headerText: (template.header as any)?.text,
+      footerText: typeof template.footer === 'string' ? template.footer : (template.footer as any)?.text,
+      buttons: (template.buttons as any) || undefined,
+    });
+    if (!complianceCheck.ok) {
+      return reply.status(400).send({
+        success: false,
+        error: {
+          code: 'TEMPLATE_VALIDATION_FAILED',
+          message: 'Template has issues that would likely be rejected by Meta',
+          issues: complianceCheck.issues,
+        },
+      });
+    }
+
     // Update template to PENDING
     const updated = await app.prisma.template.update({
       where: { id: templateId },
@@ -1672,20 +2054,51 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
     const credentials = await app.prisma.whatsAppCredentials.findUnique({
       where: { tenantId: request.authUser.tenantId! },
     });
+    const effectiveWabaId = await resolveEffectiveWabaId(app.prisma, request.authUser.tenantId!, credentials?.wabaId, template.phoneNumberId);
 
-    if (credentials?.accessToken && credentials.wabaId) {
+    if (credentials?.accessToken && effectiveWabaId) {
       try {
-        const metaResult = await submitTemplateToMeta(credentials.accessToken, credentials.wabaId, {
+        // Meta rejects any component containing {{n}} variables with
+        // INVALID_FORMAT unless it also carries an "example" showing sample
+        // values — this was silently missing here, so every template with a
+        // variable was guaranteed to be rejected regardless of its content.
+        const EXAMPLE_VALUES = ['John', '12345', 'Monday', 'Downtown Store', '$50'];
+        const exampleFor = (n: number) => EXAMPLE_VALUES[(n - 1) % EXAMPLE_VALUES.length];
+        const variableNumbers = (text: string) =>
+          Array.from(new Set([...text.matchAll(/\{\{(\d+)\}\}/g)].map((m) => parseInt(m[1], 10)))).sort((a, b) => a - b);
+
+        const components: any[] = [];
+        if (template.header) {
+          const headerText = (template.header as any).text || '';
+          const headerVars = variableNumbers(headerText);
+          components.push({
+            type: 'HEADER',
+            ...(template.header as any),
+            ...(headerVars.length ? { example: { header_text: headerVars.map(exampleFor) } } : {}),
+          });
+        }
+        const bodyText = (template.body as any).text || '';
+        const bodyVars = variableNumbers(bodyText);
+        components.push({
+          type: 'BODY',
+          ...(template.body as any),
+          ...(bodyVars.length ? { example: { body_text: [bodyVars.map(exampleFor)] } } : {}),
+        });
+        if (template.footer) components.push({ type: 'FOOTER', ...(template.footer as any) });
+        if (template.buttons) components.push({ type: 'BUTTONS', buttons: template.buttons as any });
+
+        const metaResult = await submitTemplateToMeta(decryptSecret(credentials.accessToken), effectiveWabaId, {
           name: template.name,
           category: template.category,
           language: template.language,
-          components: template.components as any || [],
+          components,
         });
 
-        // Update with Meta template ID
+        // Update with Meta template ID and normalized name (Meta stores it lowercased with underscores)
+        const normalizedName = template.name.toLowerCase().replace(/[^a-z0-9_]/g, '_');
         await app.prisma.template.update({
           where: { id: templateId },
-          data: { metaTemplateId: metaResult.id },
+          data: { metaTemplateId: metaResult.id, name: normalizedName },
         });
       } catch (error: any) {
         // If Meta submission fails, revert to DRAFT
@@ -1709,13 +2122,15 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
   /**
    * POST /templates/sync - Sync templates from Meta WhatsApp API
    */
-  app.post('/templates/sync', async (request, reply) => {
+  app.post('/templates/sync', { preHandler: [app.requirePermission('templates', 'update')] }, async (request, reply) => {
     if (!request.authUser.tenantId) {
       return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
     }
 
+    const { phoneNumberId } = z.object({ phoneNumberId: z.string().optional() }).parse(request.body || {});
+
     try {
-      const result = await syncTemplatesFromMeta(app.prisma, request.authUser.tenantId);
+      const result = await syncTemplatesFromMeta(app.prisma, request.authUser.tenantId, phoneNumberId);
 
       return {
         success: true,
@@ -1745,11 +2160,14 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
       return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
     }
 
+    const { phoneNumberId } = z.object({ phoneNumberId: z.string().optional() }).parse(request.query || {});
+
     const credentials = await app.prisma.whatsAppCredentials.findUnique({
       where: { tenantId: request.authUser.tenantId },
     });
+    const effectiveWabaId = await resolveEffectiveWabaId(app.prisma, request.authUser.tenantId, credentials?.wabaId, phoneNumberId);
 
-    if (!credentials?.accessToken || !credentials.wabaId) {
+    if (!credentials?.accessToken || !effectiveWabaId) {
       return reply.status(400).send({
         success: false,
         error: {
@@ -1760,7 +2178,7 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
     }
 
     try {
-      const templates = await fetchMetaTemplates(credentials.accessToken, credentials.wabaId);
+      const templates = await fetchMetaTemplates(decryptSecret(credentials.accessToken), effectiveWabaId);
 
       return {
         success: true,
@@ -1791,7 +2209,7 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
     return { success: true, data: template };
   });
 
-  app.delete('/templates/:templateId', async (request, reply) => {
+  app.delete('/templates/:templateId', { preHandler: [app.requirePermission('templates', 'delete')] }, async (request, reply) => {
     const { templateId } = z.object({ templateId: z.string() }).parse(request.params);
 
     await app.prisma.template.deleteMany({
@@ -1829,7 +2247,7 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
     return { success: true, data: users };
   });
 
-  app.post('/team/invite', async (request, reply) => {
+  app.post('/team/invite', { preHandler: [app.requirePermission('team', 'create')] }, async (request, reply) => {
     const schema = z.object({
       email: z.string().email(),
       name: z.string().min(2),
@@ -1959,7 +2377,7 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
       data: mockActivities.map(a => ({
         id: a.id,
         action: a.action,
-        description: a.description || a.action,
+        description: 'description' in a ? a.description : a.action,
         user: a.user,
         createdAt: a.createdAt,
       })),
@@ -1967,7 +2385,7 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
     };
   });
 
-  app.patch('/team/:userId', async (request, reply) => {
+  app.patch('/team/:userId', { preHandler: [app.requirePermission('team', 'update')] }, async (request, reply) => {
     const { userId } = z.object({ userId: z.string() }).parse(request.params);
     const body = z.object({
       name: z.string().optional(),
@@ -1985,7 +2403,7 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
     return { success: true, data: user };
   });
 
-  app.delete('/team/:userId', async (request, reply) => {
+  app.delete('/team/:userId', { preHandler: [app.requirePermission('team', 'delete')] }, async (request, reply) => {
     const { userId } = z.object({ userId: z.string() }).parse(request.params);
 
     const user = await app.prisma.user.findFirst({
@@ -2008,7 +2426,7 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
     return { success: true, data: { message: 'Member removed' } };
   });
 
-  app.post('/team/:userId/resend-invite', async (request, reply) => {
+  app.post('/team/:userId/resend-invite', { preHandler: [app.requirePermission('team', 'update')] }, async (request, reply) => {
     const { userId } = z.object({ userId: z.string() }).parse(request.params);
 
     const user = await app.prisma.user.findFirst({
@@ -2084,7 +2502,7 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
     return { success: true, data: phoneNumber };
   });
 
-  app.post('/phone-numbers/:phoneNumberId/verify', async (request, reply) => {
+  app.post('/phone-numbers/:phoneNumberId/verify', { preHandler: [app.requirePermission('phone_numbers', 'update')] }, async (request, reply) => {
     if (!request.authUser.tenantId) {
       return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
     }
@@ -2122,7 +2540,7 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
   });
 
   // Campaign pause/resume endpoints
-  app.post('/campaigns/:campaignId/pause', async (request, reply) => {
+  app.post('/campaigns/:campaignId/pause', { preHandler: [app.requirePermission('campaigns', 'update')] }, async (request, reply) => {
     if (!request.authUser.tenantId) {
       return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
     }
@@ -2154,7 +2572,7 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
     return { success: true, data: updated };
   });
 
-  app.post('/campaigns/:campaignId/resume', async (request, reply) => {
+  app.post('/campaigns/:campaignId/resume', { preHandler: [app.requirePermission('campaigns', 'update')] }, async (request, reply) => {
     if (!request.authUser.tenantId) {
       return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
     }
@@ -2169,7 +2587,7 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
       return reply.status(404).send({ success: false, error: { code: 'NOT_FOUND' } });
     }
 
-    if (campaign.status !== 'PAUSED' && campaign.status !== 'PAUSED') {
+    if (campaign.status !== 'PAUSED') {
       return reply.status(400).send({
         success: false,
         error: { code: 'INVALID_STATUS', message: 'Only paused campaigns can be resumed' },
@@ -2235,7 +2653,7 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
     return { success: true, data: tenant };
   });
 
-  app.patch('/settings', async (request, reply) => {
+  app.patch('/settings', { preHandler: [app.requirePermission('settings', 'update')] }, async (request, reply) => {
     if (!request.authUser.tenantId) {
       return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
     }
@@ -2259,7 +2677,7 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
     return { success: true, data: tenant };
   });
 
-  app.post('/settings/api-key', async (request, reply) => {
+  app.post('/settings/api-key', { preHandler: [app.requirePermission('api_keys', 'create')] }, async (request, reply) => {
     if (!request.authUser.tenantId) {
       return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
     }
@@ -2316,7 +2734,7 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
     return { success: true, data: keys };
   });
 
-  app.delete('/settings/api-keys/:keyId', async (request, reply) => {
+  app.delete('/settings/api-keys/:keyId', { preHandler: [app.requirePermission('api_keys', 'delete')] }, async (request, reply) => {
     if (!request.authUser.tenantId) {
       return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
     }
@@ -2370,7 +2788,7 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
   // CHATBOT FLOWS
   // ============================================
 
-  app.post('/chatbot/flows', async (request, reply) => {
+  app.post('/chatbot/flows', { preHandler: [app.requirePermission('chatbot', 'create')] }, async (request, reply) => {
     if (!request.authUser.tenantId) {
       return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
     }
@@ -2393,7 +2811,7 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
     return reply.status(201).send({ success: true, data: flow });
   });
 
-  app.patch('/chatbot/flows/:flowId', async (request, reply) => {
+  app.patch('/chatbot/flows/:flowId', { preHandler: [app.requirePermission('chatbot', 'update')] }, async (request, reply) => {
     if (!request.authUser.tenantId) {
       return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
     }
@@ -2418,7 +2836,7 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
     return { success: true, data: { message: 'Flow updated' } };
   });
 
-  app.delete('/chatbot/flows/:flowId', async (request, reply) => {
+  app.delete('/chatbot/flows/:flowId', { preHandler: [app.requirePermission('chatbot', 'delete')] }, async (request, reply) => {
     if (!request.authUser.tenantId) {
       return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
     }
@@ -2645,7 +3063,7 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
     return { success: true, data: { total, byDay } };
   });
 
-  app.get('/analytics/export', async (request, reply) => {
+  app.get('/analytics/export', { preHandler: [app.requirePermission('analytics', 'export')] }, async (request, reply) => {
     if (!request.authUser.tenantId) {
       return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
     }
@@ -2713,6 +3131,51 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
   // SEGMENTS
   // ============================================
 
+  /**
+   * POST /segments/suggest - Mistral proposes segment conditions from a plain-language
+   * goal, constrained to the fields/operators buildSegmentCondition actually supports.
+   * The proposed conditions are run through the same query builder as a real segment
+   * to return a genuine estimatedCount, not a guess. data: null when AI isn't configured.
+   */
+  app.post('/segments/suggest', { preHandler: [app.requirePermission('segments', 'create')] }, async (request, reply) => {
+    if (!request.authUser.tenantId) {
+      return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
+    }
+
+    const { goal } = z.object({ goal: z.string().min(1) }).parse(request.body);
+
+    const fields = ['tag', 'city', 'country', 'language', 'company', 'totalMessagesSent', 'lastMessageAt', 'createdAt'];
+    const operators = ['equals', 'not_equals', 'contains', 'not_contains', 'starts_with', 'ends_with', 'is_empty', 'is_not_empty', 'greater_than', 'less_than', 'within_days'];
+
+    const suggestion = await getAISuggestion({ module: 'segment', context: { goal, fields, operators } });
+    if (!suggestion) {
+      return { success: true, data: null };
+    }
+
+    let parsed: { matchType?: 'all' | 'any'; conditions?: SegmentCondition[] };
+    try {
+      const jsonText = suggestion.suggestion.replace(/^```json\s*|\s*```$/g, '').trim();
+      parsed = JSON.parse(jsonText);
+    } catch {
+      return { success: true, data: null };
+    }
+
+    const conditions = (parsed.conditions || []).filter(
+      (c) => fields.includes(c.field) && operators.includes(c.operator)
+    );
+    const matchType = parsed.matchType === 'any' ? 'any' : 'all';
+
+    const where = buildSegmentContactWhere({ type: matchType, conditions });
+    const estimatedCount = await app.prisma.contact.count({
+      where: { ...where, tenantId: request.authUser.tenantId },
+    });
+
+    return {
+      success: true,
+      data: { conditions, matchType, estimatedCount, rationale: suggestion.rationale },
+    };
+  });
+
   app.get('/segments', async (request, reply) => {
     if (!request.authUser.tenantId) {
       return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
@@ -2726,7 +3189,7 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
     return { success: true, data: segments };
   });
 
-  app.post('/segments', async (request, reply) => {
+  app.post('/segments', { preHandler: [app.requirePermission('segments', 'create')] }, async (request, reply) => {
     if (!request.authUser.tenantId) {
       return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
     }
@@ -2755,7 +3218,7 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
     return reply.status(201).send({ success: true, data: segment });
   });
 
-  app.delete('/segments/:segmentId', async (request, reply) => {
+  app.delete('/segments/:segmentId', { preHandler: [app.requirePermission('segments', 'delete')] }, async (request, reply) => {
     if (!request.authUser.tenantId) {
       return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
     }
@@ -2769,7 +3232,7 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
     return { success: true, data: { message: 'Segment deleted' } };
   });
 
-  app.patch('/segments/:segmentId', async (request, reply) => {
+  app.patch('/segments/:segmentId', { preHandler: [app.requirePermission('segments', 'update')] }, async (request, reply) => {
     if (!request.authUser.tenantId) {
       return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
     }
@@ -2841,36 +3304,12 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
       return reply.status(404).send({ success: false, error: { code: 'NOT_FOUND' } });
     }
 
-    // Build query conditions
-    const queryObj = (segment.query as any) || {};
-    const conditions = queryObj.conditions || [];
-    const matchType = queryObj.type || 'all';
-
-    const contactFilters: any[] = [];
-    for (const cond of conditions) {
-      const filter: any = {};
-      if (cond.field === 'tag') {
-        filter.tags = { has: cond.value };
-      } else if (cond.field === 'city') {
-        filter.city = cond.operator === 'equals' ? cond.value : undefined;
-      } else if (cond.field === 'country') {
-        filter.country = cond.operator === 'equals' ? cond.value : undefined;
-      } else if (cond.field === 'language') {
-        filter.language = cond.operator === 'equals' ? cond.value : undefined;
-      } else if (cond.field === 'company') {
-        filter.company = cond.operator === 'equals' ? cond.value : undefined;
-      }
-      if (Object.keys(filter).length > 0) {
-        contactFilters.push(filter);
-      }
-    }
+    const segmentWhere = buildSegmentContactWhere(segment.query as any);
+    const where: Prisma.ContactWhereInput = { tenantId: request.authUser.tenantId, ...segmentWhere };
 
     // Get matching contacts
     const contacts = await app.prisma.contact.findMany({
-      where: {
-        tenantId: request.authUser.tenantId,
-        ...(contactFilters.length > 0 && contactFilters[0]),
-      },
+      where,
       take: query.limit,
       select: {
         id: true,
@@ -2880,17 +3319,12 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
     });
 
     // Get total count
-    const total = await app.prisma.contact.count({
-      where: {
-        tenantId: request.authUser.tenantId,
-        ...(contactFilters.length > 0 && contactFilters[0]),
-      },
-    });
+    const total = await app.prisma.contact.count({ where });
 
     return { success: true, data: { total, matching: contacts } };
   });
 
-  app.post('/segments/:segmentId/sync', async (request, reply) => {
+  app.post('/segments/:segmentId/sync', { preHandler: [app.requirePermission('segments', 'update')] }, async (request, reply) => {
     if (!request.authUser.tenantId) {
       return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
     }
@@ -2905,37 +3339,21 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
       return reply.status(404).send({ success: false, error: { code: 'NOT_FOUND' } });
     }
 
-    // Build conditions for counting
-    const conditions = (segment.query as any)?.conditions || [];
-    const contactFilters: any[] = [];
+    const segmentWhere = buildSegmentContactWhere(segment.query as any);
+    const where: Prisma.ContactWhereInput = { tenantId: request.authUser.tenantId, ...segmentWhere };
 
-    for (const cond of conditions) {
-      if (cond.field === 'tag' && cond.value) {
-        contactFilters.push({ tags: { has: cond.value } });
-      } else if (cond.field === 'country' && cond.value) {
-        contactFilters.push({ country: cond.value });
-      } else if (cond.field === 'city' && cond.value) {
-        contactFilters.push({ city: cond.value });
-      } else if (cond.field === 'language' && cond.value) {
-        contactFilters.push({ language: cond.value });
-      } else if (cond.field === 'company' && cond.value) {
-        contactFilters.push({ company: cond.value });
-      }
-    }
+    const matchingContacts = await app.prisma.contact.findMany({ where, select: { id: true } });
+    const totalContacts = matchingContacts.length;
 
-    // Count matching contacts
-    const totalContacts = await app.prisma.contact.count({
-      where: {
-        tenantId: request.authUser.tenantId,
-        ...(contactFilters.length > 0 ? { AND: contactFilters } : {}),
-      },
-    });
-
-    // Update segment with new count
-    const updated = await app.prisma.segment.update({
-      where: { id: segmentId },
-      data: { totalContacts },
-    });
+    // Materialize membership so campaign sends (which read ContactSegment) see current results
+    const [, , updated] = await app.prisma.$transaction([
+      app.prisma.contactSegment.deleteMany({ where: { segmentId } }),
+      app.prisma.contactSegment.createMany({
+        data: matchingContacts.map(c => ({ segmentId, contactId: c.id })),
+        skipDuplicates: true,
+      }),
+      app.prisma.segment.update({ where: { id: segmentId }, data: { totalContacts } }),
+    ]);
 
     return { success: true, data: { totalContacts: updated.totalContacts } };
   });
@@ -3296,7 +3714,27 @@ export async function createNotification(
 // Campaign Message Sender
 // ============================================
 
-async function sendCampaignMessages(
+export async function sendCampaignMessages(
+  app: FastifyInstance,
+  campaignId: string,
+  tenantId: string
+): Promise<void> {
+  try {
+    await sendCampaignMessagesInner(app, campaignId, tenantId);
+  } catch (err: any) {
+    // Last-resort safety net: an unexpected error anywhere in the send path
+    // must never leave a campaign stuck in SENDING forever (as happened when
+    // a Prisma validation error crashed the batch loop before any status
+    // update could run) — always resolve to a terminal status.
+    console.error(`Campaign ${campaignId} send failed unexpectedly:`, err.message);
+    await app.prisma.campaign.update({
+      where: { id: campaignId },
+      data: { status: 'FAILED', completedAt: new Date() },
+    }).catch(() => {});
+  }
+}
+
+async function sendCampaignMessagesInner(
   app: FastifyInstance,
   campaignId: string,
   tenantId: string
@@ -3322,16 +3760,19 @@ async function sendCampaignMessages(
     });
     contactIds = contacts.map(c => c.id);
   } else if (campaign.audienceType === 'segment' && campaign.segmentIds.length > 0) {
-    // Fetch contacts in segments (excluding opted-out)
-    const segmentContacts = await app.prisma.contactSegment.findMany({
-      where: { segmentId: { in: campaign.segmentIds } },
-      include: { contact: { select: { id: true, consentStatus: true } } },
+    // Evaluate segments live against current contact data (excluding opted-out)
+    const segments = await app.prisma.segment.findMany({
+      where: { id: { in: campaign.segmentIds }, tenantId },
     });
-    contactIds = [...new Set(
-      segmentContacts
-        .filter(sc => sc.contact.consentStatus !== 'OPTED_OUT')
-        .map((c) => c.contactId)
-    )];
+    const segmentContacts = await app.prisma.contact.findMany({
+      where: {
+        tenantId,
+        consentStatus: { not: 'OPTED_OUT' },
+        OR: segments.map(s => buildSegmentContactWhere(s.query as any)),
+      },
+      select: { id: true },
+    });
+    contactIds = segmentContacts.map(c => c.id);
   } else if (campaign.audienceType === 'all') {
     // Fetch all active contacts for 'all' audience type (excluding opted-out)
     const allContacts = await app.prisma.contact.findMany({
@@ -3341,10 +3782,20 @@ async function sendCampaignMessages(
     contactIds = allContacts.map(c => c.id);
   }
 
+  // Resume-safety: exclude contacts who already have a message logged for this
+  // campaign (e.g. this is a restart-triggered resume of a SENDING campaign),
+  // so a process restart mid-send never double-sends or double-charges credits.
+  const alreadyMessaged = await app.prisma.message.findMany({
+    where: { campaignId, contactId: { in: contactIds } },
+    select: { contactId: true },
+  });
+  const alreadyMessagedIds = new Set(alreadyMessaged.map((m) => m.contactId));
+  contactIds = contactIds.filter((id) => !alreadyMessagedIds.has(id));
+
   if (contactIds.length === 0) {
     await app.prisma.campaign.update({
       where: { id: campaignId },
-      data: { status: 'COMPLETED', totalSent: 0 },
+      data: { status: 'COMPLETED', completedAt: new Date() },
     });
     return;
   }
@@ -3353,11 +3804,15 @@ async function sendCampaignMessages(
   const BATCH_SIZE = 10;
   const RATE_LIMIT_DELAY = 1100; // 1.1s between batches to respect WhatsApp rate limits
 
-  let sent = 0;
-  let failed = 0;
+  // Seed running totals from any progress already persisted by a prior run
+  const priorTotals = await app.prisma.campaign.findUnique({
+    where: { id: campaignId },
+    select: { totalSent: true, totalFailed: true },
+  });
+  let sent = priorTotals?.totalSent || 0;
+  let failed = priorTotals?.totalFailed || 0;
 
-  const whatsappConfig = getDefaultConfig();
-  const client = new WhatsAppAPIClient(whatsappConfig);
+  const { dispatchOutboundMessage } = await import('../services/whatsappService.js');
 
   for (let i = 0; i < contactIds.length; i += BATCH_SIZE) {
     const batch = contactIds.slice(i, i + BATCH_SIZE);
@@ -3366,35 +3821,100 @@ async function sendCampaignMessages(
     });
 
     const phonePromises = contacts.map(async (contact) => {
+      // Every Message row requires a conversationId — find or create the
+      // (tenant, contact, phone) conversation before touching Message at all,
+      // for both the success and failure logging paths below. Missing this
+      // used to throw a Prisma validation error that silently killed the
+      // whole Promise.all and left the campaign stuck in SENDING forever.
+      let conversationId: string;
       try {
-        if (!campaign.template || !campaign.phoneNumber?.metaPhoneId) return;
-
-        const messageBody = (campaign.template.body as any)?.text || '';
-        const response = await client.sendTemplateMessage(
-          contact.phone,
-          campaign.template.name,
-          campaign.template.language,
-          [
-            { type: 'body', text: messageBody },
-          ],
-          campaign.phoneNumber.metaPhoneId
-        );
-
-        // Create message record
-        const metaMsgId = (response as any)?.messages?.[0]?.id as string | undefined;
-        const message = await (app.prisma.message.create as any)({
-          data: {
+        const conversation = await app.prisma.conversation.upsert({
+          where: {
+            contactId_phoneNumberId_tenantId: {
+              contactId: contact.id,
+              phoneNumberId: campaign.phoneNumberId!,
+              tenantId,
+            },
+          },
+          update: {},
+          create: {
             tenantId,
             contactId: contact.id,
             phoneNumberId: campaign.phoneNumberId!,
-            metaMessageId: metaMsgId,
+            status: 'OPEN',
+          },
+        });
+        conversationId = conversation.id;
+      } catch (err: any) {
+        console.error(`Failed to get/create conversation for ${contact.phone}:`, err.message);
+        failed++;
+        return;
+      }
+
+      const messageBody = (campaign.template!.body as any)?.text || '';
+
+      try {
+        if (!campaign.template || !campaign.phoneNumber?.metaPhoneId) return;
+
+        // Meta's template message API substitutes {{n}} variables via a
+        // parameters array on the BODY component — it does not accept a bare
+        // "text" key on the component (that shape was always rejected by
+        // Meta with "Unexpected key text on param template.components.0").
+        // There's no per-contact variable-mapping UI yet, so every {{n}} is
+        // filled with the contact's name as a reasonable default.
+        const variableCount = new Set(
+          [...messageBody.matchAll(/\{\{(\d+)\}\}/g)].map((m: any) => m[1])
+        ).size;
+        const components =
+          variableCount > 0
+            ? [
+                {
+                  type: 'body' as const,
+                  parameters: Array.from({ length: variableCount }, () => ({
+                    type: 'text' as const,
+                    text: contact.name || contact.phone,
+                  })),
+                },
+              ]
+            : [];
+
+        // Create the message record first (PENDING), then dispatch — mirrors
+        // the already-verified-working /messages/send path, which uses each
+        // tenant's own connected credentials rather than a shared platform
+        // token (the previous WhatsAppAPIClient/getDefaultConfig() approach
+        // ignored per-tenant credentials entirely).
+        const message = await (app.prisma.message.create as any)({
+          data: {
+            tenantId,
+            conversationId,
+            campaignId,
+            contactId: contact.id,
+            phoneNumberId: campaign.phoneNumberId!,
             direction: 'OUTGOING',
             type: 'TEMPLATE',
             body: messageBody,
-            status: 'SENT',
-            sentAt: new Date(),
+            status: 'PENDING',
           },
         });
+
+        const dispatchResult = await dispatchOutboundMessage({
+          app,
+          messageId: message.id,
+          tenantId,
+          contactPhone: contact.phone,
+          phoneNumberId: campaign.phoneNumberId!,
+          body: messageBody,
+          type: 'template',
+          template: {
+            name: campaign.template.name.toLowerCase().replace(/[^a-z0-9_]/g, '_'),
+            language: campaign.template.language,
+            components,
+          },
+        });
+
+        if (!dispatchResult.success) {
+          throw new Error(dispatchResult.error || 'Dispatch failed');
+        }
 
         // Deduct credits based on template category
         const { deductCredits, getRateCredits } = await import('../services/creditService.js') as any;
@@ -3409,24 +3929,18 @@ async function sendCampaignMessages(
       } catch (err: any) {
         console.error(`Failed to send to ${contact.phone}:`, err.message);
         failed++;
-
-        // Log failed message
-        await (app.prisma.message.create as any)({
-          data: {
-            tenantId,
-            contactId: contact.id,
-            phoneNumberId: campaign.phoneNumberId || '',
-            direction: 'OUTGOING',
-            type: 'TEMPLATE',
-            body: (campaign.template?.body as any)?.text || '',
-            status: 'FAILED',
-            errorMessage: err.message,
-          },
-        });
       }
     });
 
     await Promise.all(phonePromises);
+
+    // Persist progress after every batch so a crash/restart mid-campaign
+    // leaves an accurate totalSent/totalFailed count instead of 0, and so
+    // the resume-safety check above has real data to dedupe against.
+    await app.prisma.campaign.update({
+      where: { id: campaignId },
+      data: { totalSent: sent, totalFailed: failed, lastSentAt: new Date() },
+    });
 
     // Rate limit delay between batches
     if (i + BATCH_SIZE < contactIds.length) {

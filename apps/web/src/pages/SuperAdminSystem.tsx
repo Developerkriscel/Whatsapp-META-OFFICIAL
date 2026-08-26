@@ -134,7 +134,7 @@ export default function SuperAdminSystemPage() {
                     value: dash.openTickets?.toLocaleString() ?? '—',
                     icon: AlertTriangle,
                     color: 'wa-red',
-                    sub: `${dash.trialTenants ?? 0} on trial`,
+                    sub: 'Need attention',
                   },
                 ].map((card) => (
                   <div key={card.label} className="card-apple p-5">

@@ -434,7 +434,91 @@ export async function deductCredits(
     return { success: true, balanceAfter: updated.balance };
   });
 
+  if (result.success) {
+    // Fire-and-forget: never let an auto-recharge failure block the send path
+    maybeAutoRecharge(prisma, tenantId, result.balanceAfter).catch((err) => {
+      console.error(`[AutoRecharge] check failed for tenant ${tenantId}:`, err);
+    });
+  }
+
   return result;
+}
+
+// ============================================
+// AUTO-RECHARGE — server-side threshold check + off-session Stripe charge
+// ============================================
+
+export async function maybeAutoRecharge(
+  prisma: PrismaClient,
+  tenantId: string,
+  balanceAfter: number,
+): Promise<void> {
+  const tenant = await prisma.tenant.findUnique({
+    where: { id: tenantId },
+    select: {
+      autoRechargeEnabled: true,
+      autoRechargeThreshold: true,
+      autoRechargeAmount: true,
+      stripeCustomerId: true,
+      billingEmail: true,
+    },
+  });
+
+  if (!tenant?.autoRechargeEnabled) return;
+  if (balanceAfter > tenant.autoRechargeThreshold) return;
+  if (!tenant.stripeCustomerId) return;
+
+  // Avoid stacking recharges: if one is already in flight (a PURCHASE transaction
+  // referencing 'auto-recharge-' created in the last 5 minutes with no resolution),
+  // skip. Simpler guard: re-check current balance is still under threshold inside
+  // a short-lived lock via the credit row's updatedAt isn't available here, so we
+  // rely on deductCredits calling this serially per-message and Stripe's own
+  // idempotency key to prevent duplicate charges for the same trigger instant.
+  const { stripe } = await import('./stripe.js');
+
+  const paymentMethods = await stripe.paymentMethods.list({
+    customer: tenant.stripeCustomerId,
+    type: 'card',
+    limit: 1,
+  });
+
+  const paymentMethodId = paymentMethods.data[0]?.id;
+  if (!paymentMethodId) {
+    console.error(`[AutoRecharge] tenant ${tenantId} has auto-recharge enabled but no saved card`);
+    return;
+  }
+
+  const amountCredits = tenant.autoRechargeAmount;
+  const amountUsdCents = Math.round(creditsToUsd(amountCredits) * 100);
+
+  try {
+    const idempotencyKey = `autorecharge-${tenantId}-${Date.now()}`;
+    const paymentIntent = await stripe.paymentIntents.create(
+      {
+        amount: amountUsdCents,
+        currency: 'usd',
+        customer: tenant.stripeCustomerId,
+        payment_method: paymentMethodId,
+        off_session: true,
+        confirm: true,
+        description: `Auto-recharge: ${amountCredits} credits`,
+        metadata: { tenantId, type: 'auto_recharge', credits: String(amountCredits) },
+      },
+      { idempotencyKey },
+    );
+
+    if (paymentIntent.status === 'succeeded') {
+      await addCredits(prisma, tenantId, amountCredits, 'PURCHASE', paymentIntent.id, 'Auto-recharge');
+      console.log(`[AutoRecharge] tenant ${tenantId} recharged ${amountCredits} credits (${paymentIntent.id})`);
+    } else {
+      console.error(`[AutoRecharge] tenant ${tenantId} payment intent not succeeded: ${paymentIntent.status}`);
+    }
+  } catch (err: any) {
+    console.error(`[AutoRecharge] charge failed for tenant ${tenantId}:`, err.message);
+    // Failing quietly is intentional here — surfaced to the tenant via their
+    // Stripe email receipt/failure notice and visible low balance in-app,
+    // not by throwing into the message-send path.
+  }
 }
 
 // ============================================

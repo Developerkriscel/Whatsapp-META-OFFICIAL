@@ -152,7 +152,7 @@ export default function SuperAdminCreditsPage() {
     totalUsed: t.totalUsed || 0,
     lastTopup: t.updatedAt || new Date().toISOString(),
     status: (t.balance || 0) > 1000 ? 'active' : (t.balance || 0) > 0 ? 'low' : 'depleted',
-    billingEmail: t.billingEmail || 'N/A',
+    billingEmail: t.billingEmail || '—',
   }));
 
   const adjustments: Adjustment[] = (adjustmentsData?.data || []).map((log: any) => ({

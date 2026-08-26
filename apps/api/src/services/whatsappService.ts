@@ -58,7 +58,7 @@ export async function dispatchOutboundMessage(params: DispatchMessageParams): Pr
               to: formattedTo,
               type: 'template',
               template: {
-                name: template.name,
+                name: template.name.toLowerCase().replace(/[^a-z0-9_]/g, '_'),
                 language: { code: template.language },
                 components: template.components,
               },

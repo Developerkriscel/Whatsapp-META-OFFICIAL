@@ -19,12 +19,24 @@
   --apple-teal: #5AC8FA;
   --apple-yellow: #FFCC00;
 
-  /* WhatsApp Brand Colors */
+  /* WhatsApp Brand Colors — reserved for literal WhatsApp product surfaces
+     (chat bubble previews, QR/connect screens, "Connected" status badges),
+     not the admin chrome, which uses the Meta tokens below. */
   --wa-green: #25D366;
   --wa-teal: #128C7E;
   --wa-dark-teal: #075E54;
   --wa-light-green: #DCF8C6;
   --wa-pale-green: #E8F5E9;
+
+  /* Meta Business Suite tokens — the admin shell's primary palette:
+     shared cards/buttons/inputs and the navbar/sidebar. */
+  --meta-blue: #0866FF;
+  --meta-blue-hover: #0553C7;
+  --meta-blue-light: #E7F0FF;
+  --meta-surface: #F0F2F5;
+  --meta-border: #DADDE1;
+  --meta-text-primary: #050505;
+  --meta-text-secondary: #65676B;
 
   /* Apple Gray Scale */
   --apple-gray-1: #8E8E93;
@@ -119,17 +131,14 @@ body {
   border-radius: 20px;
 }
 
-/* Elevated Glass Card */
+/* Elevated Glass Card (modals) */
 .glass-card {
-  background: rgba(255, 255, 255, 0.75);
-  backdrop-filter: saturate(200%) blur(25px);
-  -webkit-backdrop-filter: saturate(200%) blur(25px);
-  border: 0.5px solid rgba(255, 255, 255, 0.6);
-  border-radius: 18px;
+  background: #FFFFFF;
+  border: 1px solid var(--meta-border);
+  border-radius: 12px;
   box-shadow:
-    0 8px 32px rgba(0, 0, 0, 0.06),
-    0 2px 8px rgba(0, 0, 0, 0.04),
-    inset 0 1px 0 rgba(255, 255, 255, 0.8);
+    0 8px 32px rgba(0, 0, 0, 0.08),
+    0 2px 8px rgba(0, 0, 0, 0.04);
 }
 
 /* Floating Glass Panel */
@@ -343,25 +352,16 @@ body {
    APPLE CARD
    ============================================= */
 .card-apple {
-  background: rgba(255, 255, 255, 0.88);
-  backdrop-filter: saturate(180%) blur(25px);
-  -webkit-backdrop-filter: saturate(180%) blur(25px);
-  border: 0.5px solid rgba(255, 255, 255, 0.7);
-  border-radius: 18px;
-  box-shadow:
-    0 2px 12px rgba(0, 0, 0, 0.04),
-    0 8px 24px rgba(0, 0, 0, 0.04),
-    inset 0 1px 0 rgba(255, 255, 255, 0.9);
-  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  background: #FFFFFF;
+  border: 1px solid var(--meta-border);
+  border-radius: 8px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .card-apple:hover {
-  transform: translateY(-2px);
-  box-shadow:
-    0 4px 16px rgba(0, 0, 0, 0.06),
-    0 12px 32px rgba(0, 0, 0, 0.06),
-    inset 0 1px 0 rgba(255, 255, 255, 0.9);
-  border-color: rgba(255, 255, 255, 0.85);
+  border-color: #C6C9CC;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
 }
 
 /* =============================================
@@ -391,14 +391,11 @@ body {
 
 /* Primary Blue Button */
 .btn-apple-blue {
-  background: linear-gradient(135deg, #007AFF 0%, #0A84FF 100%);
+  background: var(--meta-blue);
   color: white;
-  box-shadow: 0 2px 8px rgba(0, 122, 255, 0.3);
 }
 .btn-apple-blue:hover {
-  background: linear-gradient(135deg, #0066D6 0%, #0072D9 100%);
-  box-shadow: 0 4px 14px rgba(0, 122, 255, 0.4);
-  transform: translateY(-1px);
+  background: var(--meta-blue-hover);
 }
 
 /* Primary Green Button */
@@ -413,23 +410,34 @@ body {
   transform: translateY(-1px);
 }
 
+/* Primary admin-action button — the "Create/Save/Send" button used across
+   Templates/Campaigns/Segments/Flows and most other admin modals. */
+.btn-wa-green {
+  background: var(--meta-blue);
+  color: white;
+}
+.btn-wa-green:hover {
+  background: var(--meta-blue-hover);
+}
+
 /* Outline Button */
 .btn-apple-outline {
   background: transparent;
-  color: var(--apple-blue);
-  border: 1.5px solid var(--apple-blue);
+  color: var(--meta-blue);
+  border: 1.5px solid var(--meta-border);
 }
 .btn-apple-outline:hover {
-  background: rgba(0, 122, 255, 0.08);
+  background: var(--meta-blue-light);
+  border-color: var(--meta-blue);
 }
 
 /* Ghost Button */
 .btn-apple-ghost {
-  background: rgba(120, 120, 128, 0.12);
-  color: var(--apple-blue);
+  background: var(--meta-surface);
+  color: var(--meta-blue);
 }
 .btn-apple-ghost:hover {
-  background: rgba(120, 120, 128, 0.18);
+  background: var(--meta-border);
 }
 
 /* Full Width */
@@ -443,11 +451,11 @@ body {
 .input-apple {
   width: 100%;
   padding: 13px 16px;
-  background: rgba(120, 120, 128, 0.08);
-  border: 0.5px solid rgba(0, 0, 0, 0.06);
-  border-radius: 12px;
+  background: var(--meta-surface);
+  border: 1px solid var(--meta-border);
+  border-radius: 8px;
   font-size: 15px;
-  color: var(--apple-text-primary);
+  color: var(--meta-text-primary);
   transition: all 0.2s ease;
   letter-spacing: -0.01em;
   outline: none;
@@ -455,12 +463,25 @@ body {
 
 .input-apple:focus {
   background: white;
-  border-color: var(--apple-blue);
-  box-shadow: 0 0 0 4px rgba(0, 122, 255, 0.12);
+  border-color: var(--meta-blue);
+  box-shadow: 0 0 0 3px var(--meta-blue-light);
 }
 
 .input-apple::placeholder {
   color: var(--apple-text-tertiary);
+}
+
+/* .input-apple's own `padding: 13px 16px` shorthand has the same (single
+   -class) specificity as Tailwind's pl-8/pl-10 utilities, so whichever rule
+   is later in the compiled stylesheet wins the left padding — in this build
+   that's .input-apple, which silently drops the icon clearance and makes the
+   search icon sit on top of the placeholder text. Two-class selectors below
+   outrank the single-class rule regardless of source order. */
+.input-apple.pl-8 {
+  padding-left: 2rem;
+}
+.input-apple.pl-10 {
+  padding-left: 2.5rem;
 }
 
 /* =============================================

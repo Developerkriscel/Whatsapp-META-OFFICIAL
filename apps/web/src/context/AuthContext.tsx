@@ -9,6 +9,8 @@ interface User {
   tenantId?: string;
   tenantName?: string;
   isSuperadmin?: boolean;
+  avatarGender?: 'boy' | 'girl' | null;
+  impersonatedBy?: { id: string; name: string; email: string } | null;
 }
 
 interface AuthContextType {
@@ -18,6 +20,7 @@ interface AuthContextType {
   logout: () => void;
   updateUser: (updates: Partial<User>) => void;
   isAuthenticated: boolean;
+  exitImpersonation: () => void;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -50,11 +53,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const response = await api.post('/auth/login', { email, password });
 
     if (response.data.success) {
-      const { user: userData, accessToken, refreshToken } = response.data.data;
+      const { user: userData, accessToken } = response.data.data;
 
-      // Store tokens
+      // Refresh token is set server-side as an httpOnly cookie — only the
+      // short-lived access token and user profile live in localStorage.
       localStorage.setItem('accessToken', accessToken);
-      localStorage.setItem('refreshToken', refreshToken);
       localStorage.setItem('user', JSON.stringify(userData));
 
       setUser(userData);
@@ -65,8 +68,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const logout = useCallback(() => {
+    api.post('/auth/logout').catch(() => {});
     localStorage.removeItem('accessToken');
-    localStorage.removeItem('refreshToken');
     localStorage.removeItem('user');
     setUser(null);
   }, []);
@@ -85,6 +88,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+  const exitImpersonation = useCallback(() => {
+    const savedToken = sessionStorage.getItem('superadmin_accessToken');
+    const savedUser = sessionStorage.getItem('superadmin_user');
+    if (savedToken && savedUser) {
+      localStorage.setItem('accessToken', savedToken);
+      localStorage.setItem('user', savedUser);
+      sessionStorage.removeItem('superadmin_accessToken');
+      sessionStorage.removeItem('superadmin_user');
+      setUser(JSON.parse(savedUser));
+    } else {
+      logout();
+    }
+  }, [logout]);
+
   const value = {
     user,
     loading,
@@ -92,6 +109,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     logout,
     updateUser,
     isAuthenticated: !!user,
+    exitImpersonation,
   };
 
   return (

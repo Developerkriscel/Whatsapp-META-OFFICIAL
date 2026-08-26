@@ -38,6 +38,10 @@ declare module 'fastify' {
 // Public routes that don't require authentication
 const PUBLIC_ROUTES = [
   '/health',
+  '/api/ready',
+  '/api/live',
+  '/api/health/detailed',
+  '/api/metrics',
   '/api/v1/auth/login',
   '/api/v1/auth/register',
   '/api/v1/auth/forgot-password',
@@ -50,6 +54,11 @@ const PUBLIC_ROUTES = [
   '/webhook',
   '/api/v1/webhooks/whatsapp',
   '/api/v1/stripe/webhook',
+  '/api/v1/whatsapp/oauth/callback',
+  '/api/v1/meta/data-deletion',
+  '/api/v1/meta/data-deletion-status',
+  '/api/v1/meta/deauthorize',
+  '/api/v1/data-deletion-instructions',
 ];
 
 /**
@@ -298,7 +307,7 @@ export function requirePermission(resource: Resource, action: Action) {
         campaigns: 'analytics',
         templates: 'analytics',
         chatbot: 'chatbotBuilder',
-        flows: 'whatsAppFlows',
+        flows: 'chatbotBuilder',
         phone_numbers: 'analytics',
         analytics: 'analytics',
         team: 'analytics',

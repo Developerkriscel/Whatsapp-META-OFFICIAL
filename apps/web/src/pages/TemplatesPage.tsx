@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../api/client';
 import { Plus, Search, X, FileText, Send, Check, Clock, AlertCircle, Copy, Edit3, SendHorizontal, CheckCircle2, Loader2, Trash2 } from 'lucide-react';
+import TemplateQualityPanel from '../components/TemplateQualityPanel';
 
 interface Template {
   id: string;
@@ -53,14 +54,28 @@ export default function TemplatesPage() {
   const [search, setSearch] = useState('');
   const [category, setCategory] = useState<string>('all');
   const [selectedTemplate, setSelectedTemplate] = useState<Template | null>(null);
+  const [confirmDeleteTemplate, setConfirmDeleteTemplate] = useState<Template | null>(null);
   const [notification, setNotification] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
   const [form, setForm] = useState({
     name: '',
     category: 'MARKETING' as 'MARKETING' | 'UTILITY' | 'AUTHENTICATION',
     language: 'en_US',
     bodyText: '',
+    phoneNumberId: '',
   });
   const queryClient = useQueryClient();
+
+  // Connected numbers — a tenant with numbers on more than one WABA needs to
+  // pick which one a template gets submitted under, since templates only
+  // exist within a single WABA's namespace.
+  const { data: phoneNumbersData } = useQuery({
+    queryKey: ['whatsapp-phone-numbers'],
+    queryFn: async () => {
+      const response = await api.get('/whatsapp/phone-numbers');
+      return response.data.data?.phoneNumbers || response.data.data || [];
+    },
+  });
+  const phoneNumbers: { id: string; phoneNumber: string; displayName?: string }[] = Array.isArray(phoneNumbersData) ? phoneNumbersData : [];
 
   // Show notification helper
   const showNotification = (type: 'success' | 'error', message: string) => {
@@ -74,6 +89,12 @@ export default function TemplatesPage() {
       const response = await api.get('/templates');
       return response.data;
     },
+    // Meta's review decision arrives via webhook whenever it lands, not on
+    // any schedule we control — poll so a PENDING template flips to
+    // Approved/Rejected on its own instead of requiring a manual refresh.
+    // Matches the polling pattern already used for live status elsewhere
+    // (Conversations, WhatsApp Settings, Credits).
+    refetchInterval: 15000,
   });
 
   const createMutation = useMutation({
@@ -83,13 +104,14 @@ export default function TemplatesPage() {
         category: payload.category,
         language: payload.language,
         body: { text: payload.bodyText },
+        phoneNumberId: payload.phoneNumberId || undefined,
       });
       return response.data;
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['templates'] });
       setShowCreate(false);
-      setForm({ name: '', category: 'MARKETING', language: 'en_US', bodyText: '' });
+      setForm({ name: '', category: 'MARKETING', language: 'en_US', bodyText: '', phoneNumberId: '' });
       showNotification('success', 'Template created successfully!');
     },
     onError: (error: any) => {
@@ -293,12 +315,12 @@ export default function TemplatesPage() {
               onClick={() => setSelectedTemplate(template)}
               className="card-apple p-5 cursor-pointer hover:shadow-apple-hover transition-all"
             >
-              <div className="flex items-start justify-between mb-3">
-                <div className="flex items-center gap-2">
-                  <FileText className="w-4 h-4 text-wa-green" />
-                  <span className="font-medium text-ios-dark">{template.name}</span>
+              <div className="flex items-start justify-between gap-2 mb-3">
+                <div className="flex items-center gap-2 min-w-0">
+                  <FileText className="w-4 h-4 text-wa-green shrink-0" />
+                  <span className="font-medium text-ios-dark truncate" title={template.name}>{template.name}</span>
                 </div>
-                <span className={`px-2 py-0.5 text-xs rounded-apple-full ${STATUS_COLORS[template.status] || 'bg-ios-gray text-ios-secondary'}`}>
+                <span className={`px-2 py-0.5 text-xs rounded-apple-full shrink-0 ${STATUS_COLORS[template.status] || 'bg-ios-gray text-ios-secondary'}`}>
                   {STATUS_LABELS[template.status] || template.status}
                 </span>
               </div>
@@ -335,6 +357,26 @@ export default function TemplatesPage() {
                   className="input-apple w-full"
                 />
               </div>
+              {phoneNumbers.length > 1 && (
+                <div>
+                  <label className="block text-sm font-medium text-ios-secondary mb-1">Submit Under Number *</label>
+                  <select
+                    value={form.phoneNumberId}
+                    onChange={(e) => setForm({ ...form, phoneNumberId: e.target.value })}
+                    className="input-apple w-full"
+                  >
+                    <option value="">Select a connected number…</option>
+                    {phoneNumbers.map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.displayName || p.phoneNumber} — {p.phoneNumber}
+                      </option>
+                    ))}
+                  </select>
+                  <p className="text-xs text-ios-muted mt-1">
+                    Templates only exist within one WhatsApp Business Account — pick the number whose account this template should be submitted to.
+                  </p>
+                </div>
+              )}
               <div className="grid grid-cols-2 gap-4">
                 <div>
                   <label className="block text-sm font-medium text-ios-secondary mb-1">Category</label>
@@ -374,11 +416,16 @@ export default function TemplatesPage() {
                   className="input-apple w-full resize-none"
                 />
                 <p className="text-xs text-ios-muted mt-1">Use {'{{1}}'}, {'{{2}}'} for variables</p>
+                <TemplateQualityPanel
+                  category={form.category}
+                  bodyText={form.bodyText}
+                  onApplySuggestion={(text) => setForm({ ...form, bodyText: text })}
+                />
               </div>
               <div className="flex gap-2 pt-2">
                 <button
                   onClick={() => createMutation.mutate(form)}
-                  disabled={!form.name.trim() || !form.bodyText.trim() || createMutation.isPending}
+                  disabled={!form.name.trim() || !form.bodyText.trim() || (phoneNumbers.length > 1 && !form.phoneNumberId) || createMutation.isPending}
                   className="flex-1 btn-apple btn-wa-green disabled:opacity-50"
                 >
                   {createMutation.isPending ? 'Creating...' : 'Create Template'}
@@ -502,6 +549,7 @@ export default function TemplatesPage() {
                     category: selectedTemplate.category as any,
                     language: selectedTemplate.language,
                     bodyText: selectedTemplate.body?.text || '',
+                    phoneNumberId: '',
                   });
                   setSelectedTemplate(null);
                 }}
@@ -519,11 +567,46 @@ export default function TemplatesPage() {
                 Duplicate
               </button>
               <button
-                onClick={() => deleteMutation.mutate(selectedTemplate.id)}
+                onClick={() => setConfirmDeleteTemplate(selectedTemplate)}
                 disabled={deleteMutation.isPending}
                 className="px-4 py-2 border border-apple-red/30 text-apple-red rounded-apple-lg hover:bg-apple-red/10 disabled:opacity-50 transition flex items-center justify-center"
               >
                 <Trash2 className="w-4 h-4" />
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Delete Confirm Modal */}
+      {confirmDeleteTemplate && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-xl p-6 max-w-sm w-full mx-4">
+            <div className="flex items-center gap-3 mb-3">
+              <div className="w-10 h-10 rounded-full bg-apple-red/10 flex items-center justify-center flex-shrink-0">
+                <Trash2 className="w-5 h-5 text-apple-red" />
+              </div>
+              <h3 className="text-lg font-semibold text-ios-dark">Delete template?</h3>
+            </div>
+            <p className="text-sm text-ios-secondary mb-5">
+              "{confirmDeleteTemplate.name}" will be permanently removed. This action cannot be undone.
+            </p>
+            <div className="flex gap-2">
+              <button
+                onClick={() => {
+                  deleteMutation.mutate(confirmDeleteTemplate.id);
+                  setConfirmDeleteTemplate(null);
+                }}
+                disabled={deleteMutation.isPending}
+                className="flex-1 px-4 py-2 bg-apple-red text-white rounded-apple-lg hover:bg-apple-red/90 disabled:opacity-50 transition"
+              >
+                {deleteMutation.isPending ? 'Deleting...' : 'Delete'}
+              </button>
+              <button
+                onClick={() => setConfirmDeleteTemplate(null)}
+                className="flex-1 px-4 py-2 border border-black/10 text-ios-dark rounded-apple-lg hover:bg-ios-gray/50 transition"
+              >
+                Cancel
               </button>
             </div>
           </div>
@@ -592,6 +675,11 @@ export default function TemplatesPage() {
                   className="input-apple w-full resize-none"
                 />
                 <p className="text-xs text-ios-muted mt-1">Use {'{{1}}'}, {'{{2}}'} for variables</p>
+                <TemplateQualityPanel
+                  category={form.category}
+                  bodyText={form.bodyText}
+                  onApplySuggestion={(text) => setForm({ ...form, bodyText: text })}
+                />
               </div>
               <div className="flex gap-2 pt-2">
                 <button

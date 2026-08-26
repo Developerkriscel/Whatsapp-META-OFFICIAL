@@ -10,11 +10,11 @@
  */
 
 import { useState, useEffect } from 'react';
-import { useQuery, useMutation } from '@tanstack/react-query';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../api/client';
 import {
   Coins, ArrowDown, ArrowUp, CreditCard, TrendingDown, Zap,
-  Info, Globe, ChevronDown, Search, X, Check, AlertTriangle, Minus
+  Info, Globe, ChevronDown, Search, X, Check, AlertTriangle, Minus, RefreshCw
 } from 'lucide-react';
 
 interface Transaction {
@@ -249,6 +249,44 @@ export default function CreditsPage() {
       setShowPurchase(false);
       setSelectedPack(null);
       setCustomCredits('');
+    },
+  });
+
+  const queryClient = useQueryClient();
+
+  const { data: billingCreditsData } = useQuery({
+    queryKey: ['billing-credits'],
+    queryFn: async () => {
+      const response = await api.get('/billing/credits');
+      return response.data;
+    },
+  });
+
+  const autoRecharge = billingCreditsData?.data?.autoRecharge;
+  const [rechargeEnabled, setRechargeEnabled] = useState(false);
+  const [rechargeThreshold, setRechargeThreshold] = useState('1000');
+  const [rechargeAmount, setRechargeAmount] = useState('5000');
+  const [autoRechargeError, setAutoRechargeError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (autoRecharge) {
+      setRechargeEnabled(autoRecharge.enabled);
+      setRechargeThreshold(String(autoRecharge.threshold));
+      setRechargeAmount(String(autoRecharge.amount));
+    }
+  }, [autoRecharge]);
+
+  const autoRechargeMutation = useMutation({
+    mutationFn: async (data: { enabled: boolean; threshold: number; amount: number }) => {
+      const response = await api.patch('/billing/auto-recharge', data);
+      return response.data;
+    },
+    onSuccess: () => {
+      setAutoRechargeError(null);
+      queryClient.invalidateQueries({ queryKey: ['billing-credits'] });
+    },
+    onError: (err: any) => {
+      setAutoRechargeError(err?.response?.data?.error?.message || 'Failed to save auto-recharge settings');
     },
   });
 
@@ -615,6 +653,84 @@ export default function CreditsPage() {
           </div>
         </div>
       )}
+
+      {/* Auto Recharge */}
+      <div className="card-apple p-6">
+        <div className="flex items-center justify-between mb-4">
+          <div className="flex items-center gap-2">
+            <RefreshCw className="w-5 h-5 text-wa-green" />
+            <h2 className="text-lg font-semibold text-ios-dark">Auto Recharge</h2>
+          </div>
+          <button
+            onClick={() => setRechargeEnabled(!rechargeEnabled)}
+            className={`relative w-12 h-7 rounded-full transition-colors ${rechargeEnabled ? 'bg-wa-green' : 'bg-ios-gray'}`}
+            role="switch"
+            aria-checked={rechargeEnabled}
+          >
+            <span
+              className={`absolute top-0.5 left-0.5 w-6 h-6 bg-white rounded-full shadow transition-transform ${rechargeEnabled ? 'translate-x-5' : ''}`}
+            />
+          </button>
+        </div>
+
+        <p className="text-sm text-ios-muted mb-4">
+          Automatically top up your credit balance using your saved payment method whenever it drops below a threshold you set.
+        </p>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-4">
+          <div>
+            <label className="text-xs font-medium text-ios-secondary mb-1 block">Recharge when below</label>
+            <input
+              type="number"
+              min={100}
+              value={rechargeThreshold}
+              onChange={(e) => setRechargeThreshold(e.target.value)}
+              disabled={!rechargeEnabled}
+              className="w-full px-3 py-2 bg-ios-gray rounded-apple-lg text-ios-dark disabled:opacity-50"
+            />
+          </div>
+          <div>
+            <label className="text-xs font-medium text-ios-secondary mb-1 block">Recharge amount</label>
+            <input
+              type="number"
+              min={500}
+              value={rechargeAmount}
+              onChange={(e) => setRechargeAmount(e.target.value)}
+              disabled={!rechargeEnabled}
+              className="w-full px-3 py-2 bg-ios-gray rounded-apple-lg text-ios-dark disabled:opacity-50"
+            />
+          </div>
+        </div>
+
+        <div className="flex items-center justify-between p-3 bg-ios-gray rounded-apple-lg mb-4">
+          <div className="flex items-center gap-2 text-sm text-ios-secondary">
+            <CreditCard className="w-4 h-4" />
+            Charged to your saved Stripe payment method
+          </div>
+          <a href="/billing" className="text-sm text-wa-green font-medium hover:underline">Manage Billing</a>
+        </div>
+
+        {autoRechargeError && (
+          <div className="flex items-center gap-2 p-3 mb-4 bg-red-50 text-red-600 rounded-apple-lg text-sm">
+            <AlertTriangle className="w-4 h-4 flex-shrink-0" />
+            {autoRechargeError}
+          </div>
+        )}
+
+        <button
+          onClick={() =>
+            autoRechargeMutation.mutate({
+              enabled: rechargeEnabled,
+              threshold: parseInt(rechargeThreshold, 10) || 1000,
+              amount: parseInt(rechargeAmount, 10) || 5000,
+            })
+          }
+          disabled={autoRechargeMutation.isPending}
+          className="w-full py-2.5 bg-wa-gradient text-white rounded-apple-lg font-semibold disabled:opacity-50"
+        >
+          {autoRechargeMutation.isPending ? 'Saving...' : 'Save'}
+        </button>
+      </div>
 
       {/* Transaction History */}
       <div className="card-apple p-6">

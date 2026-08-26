@@ -37,28 +37,34 @@ export default function RegisterPage() {
     e.preventDefault();
     setError('');
 
-    if (step < 2) {
-      if (step === 0 && (!form.name || !form.email || !form.password)) {
+    if (step === 0) {
+      if (!form.name || !form.email || !form.password) {
         setError('Please fill in all required fields');
-        return;
-      }
-      if (step === 1 && (!form.company)) {
-        setError('Please enter your company name');
         return;
       }
       nextStep();
       return;
     }
 
-    setLoading(true);
-    try {
-      await api.post('/auth/register', form);
-      navigate('/login');
-    } catch (err: any) {
-      setError(err.response?.data?.message || 'Registration failed');
-    } finally {
-      setLoading(false);
+    if (step === 1) {
+      if (!form.company) {
+        setError('Please enter your company name');
+        return;
+      }
+      setLoading(true);
+      try {
+        await api.post('/auth/register', form);
+        nextStep();
+      } catch (err: any) {
+        setError(err.response?.data?.message || 'Registration failed');
+      } finally {
+        setLoading(false);
+      }
+      return;
     }
+
+    // step === 2: account already created, just head to sign in
+    navigate('/login');
   };
 
   const passwordStrength = (pwd: string) => {
@@ -86,7 +92,7 @@ export default function RegisterPage() {
             </svg>
           </div>
           <h1 className="text-2xl font-bold text-ios-dark">Create your account</h1>
-          <p className="text-ios-secondary mt-1">Get started with WA Meta Auto</p>
+          <p className="text-ios-secondary mt-1">Get started with Kriscel WA</p>
         </div>
 
         {/* Steps */}
@@ -224,10 +230,9 @@ export default function RegisterPage() {
                 <div className="w-16 h-16 bg-apple-green/20 text-apple-green rounded-full flex items-center justify-center mx-auto mb-4">
                   <CheckCircle className="w-8 h-8" />
                 </div>
-                <h3 className="text-lg font-bold text-ios-dark">Verify your email</h3>
+                <h3 className="text-lg font-bold text-ios-dark">Account created</h3>
                 <p className="text-ios-secondary mt-2 text-sm">
-                  We've sent a verification link to <strong className="text-ios-dark">{form.email}</strong>.
-                  Click the link to activate your account.
+                  Your workspace <strong className="text-ios-dark">{form.company}</strong> is ready. Sign in to get started.
                 </p>
               </div>
             )}
@@ -241,7 +246,7 @@ export default function RegisterPage() {
 
             {/* Nav buttons */}
             <div className="flex gap-3">
-              {step > 0 && (
+              {step > 0 && step < 2 && (
                 <button
                   type="button"
                   onClick={prevStep}
@@ -255,7 +260,7 @@ export default function RegisterPage() {
                 disabled={loading}
                 className="flex-1 py-3 bg-wa-green text-white font-semibold rounded-apple-lg hover:bg-wa-green/90 transition disabled:opacity-50"
               >
-                {loading ? 'Please wait...' : step === 2 ? 'Open email' : 'Continue'}
+                {loading ? 'Please wait...' : step === 2 ? 'Go to Sign In' : 'Continue'}
               </button>
             </div>
           </form>

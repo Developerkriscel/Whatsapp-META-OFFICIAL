@@ -126,6 +126,7 @@ export default function TeamPage() {
   const [view, setView] = useState<'list' | 'permissions'>('list');
   const [showInvite, setShowInvite] = useState(false);
   const [showEdit, setShowEdit] = useState<TeamMember | null>(null);
+  const [confirmRemove, setConfirmRemove] = useState(false);
   const [search, setSearch] = useState('');
   const [roleFilter, setRoleFilter] = useState<Role | 'all'>('all');
   const [notification, setNotification] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
@@ -418,7 +419,7 @@ export default function TeamPage() {
                         <div className="flex items-center justify-end gap-2">
                           {member.role !== 'OWNER' && (
                             <button
-                              onClick={() => setShowEdit(member)}
+                              onClick={() => { setShowEdit(member); setConfirmRemove(false); }}
                               className="p-2 hover:bg-ios-gray rounded-apple-lg text-ios-muted transition"
                               title="Edit"
                             >
@@ -593,7 +594,7 @@ export default function TeamPage() {
           <div className="glass-card rounded-apple-xl w-full max-w-md p-6">
             <div className="flex items-center justify-between mb-6">
               <h3 className="text-lg font-semibold text-ios-dark">Edit Member</h3>
-              <button onClick={() => setShowEdit(null)} className="p-1 hover:bg-ios-gray rounded-apple-lg">
+              <button onClick={() => { setShowEdit(null); setConfirmRemove(false); }} className="p-1 hover:bg-ios-gray rounded-apple-lg">
                 <X className="w-5 h-5 text-ios-muted" />
               </button>
             </div>
@@ -642,13 +643,45 @@ export default function TeamPage() {
                   {updateRoleMutation.isPending ? 'Saving...' : 'Save Changes'}
                 </button>
                 <button
-                  onClick={() => { if (confirm('Remove this member?')) removeMutation.mutate(showEdit.id); }}
+                  onClick={() => setConfirmRemove(true)}
                   disabled={removeMutation.isPending}
                   className="py-3 px-4 border border-apple-red/30 text-apple-red rounded-apple-lg hover:bg-apple-red/10 disabled:opacity-50"
                 >
                   <Trash2 className="w-4 h-4" />
                 </button>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Remove Member Confirm Modal */}
+      {confirmRemove && showEdit && (
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-xl flex items-center justify-center z-[60] p-4">
+          <div className="glass-card rounded-apple-xl w-full max-w-sm p-6">
+            <div className="flex items-center gap-3 mb-3">
+              <div className="w-10 h-10 rounded-full bg-apple-red/10 flex items-center justify-center flex-shrink-0">
+                <Trash2 className="w-5 h-5 text-apple-red" />
+              </div>
+              <h3 className="text-lg font-semibold text-ios-dark">Remove member?</h3>
+            </div>
+            <p className="text-sm text-ios-secondary mb-5">
+              "{showEdit.name}" will lose access to this workspace. This action cannot be undone.
+            </p>
+            <div className="flex gap-2">
+              <button
+                onClick={() => {
+                  removeMutation.mutate(showEdit.id);
+                  setConfirmRemove(false);
+                }}
+                disabled={removeMutation.isPending}
+                className="flex-1 btn-apple bg-apple-red text-white hover:bg-apple-red/90 disabled:opacity-50"
+              >
+                {removeMutation.isPending ? 'Removing...' : 'Remove'}
+              </button>
+              <button onClick={() => setConfirmRemove(false)} className="flex-1 btn-apple btn-apple-outline">
+                Cancel
+              </button>
             </div>
           </div>
         </div>

@@ -79,6 +79,14 @@ interface ProrationPreview {
   effectiveDate: string;
 }
 
+const STATUS_LABELS: Record<string, string> = {
+  ACTIVE: 'ACTIVE',
+  TRIAL: 'TRIAL',
+  SUSPENDED: 'SUSPENDED',
+  CHURNED: 'CANCELLED',
+  PENDING_SETUP: 'PENDING SETUP',
+};
+
 interface UsageAlert {
   contactsPercent: number;
   messagesPercent: number;
@@ -91,6 +99,7 @@ export default function BillingPage() {
   const [interval, setBillingInterval] = useState<'monthly' | 'annual'>('monthly');
   const [showUpgradeModal, setShowUpgradeModal] = useState<Plan | null>(null);
   const [showProration, setShowProration] = useState<ProrationPreview | null>(null);
+  const [showCancelConfirm, setShowCancelConfirm] = useState(false);
   const [notification, setNotification] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
 
   // Fetch billing data
@@ -168,9 +177,11 @@ export default function BillingPage() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['billing'] });
+      setShowCancelConfirm(false);
       setNotification({ type: 'success', message: 'Subscription cancelled. Access continues until end of billing period.' });
     },
     onError: (error: any) => {
+      setShowCancelConfirm(false);
       setNotification({ type: 'error', message: error.response?.data?.error?.message || 'Failed to cancel' });
     },
   });
@@ -266,7 +277,7 @@ export default function BillingPage() {
                 billing.status === 'TRIAL' ? 'bg-wa-green/20 text-wa-green' :
                 'bg-apple-red/20 text-apple-red'
               }`}>
-                {billing.status}
+                {STATUS_LABELS[billing.status] || billing.status}
               </span>
             </div>
 
@@ -277,7 +288,9 @@ export default function BillingPage() {
               <div>
                 <p className="text-2xl font-bold text-ios-dark">{billing.plan?.name}</p>
                 <p className="text-ios-muted">
-                  {interval === 'monthly'
+                  {Number(billing.plan?.monthlyPrice) < 0
+                    ? 'Custom pricing'
+                    : interval === 'monthly'
                     ? `$${billing.plan?.monthlyPrice}/month`
                     : `$${(billing.plan?.annualPrice / 12)?.toFixed(0)}/month`}
                 </p>
@@ -292,7 +305,7 @@ export default function BillingPage() {
                   Next billing date
                 </span>
                 <span className="font-medium text-ios-dark">
-                  {billing.nextBillingDate ? new Date(billing.nextBillingDate).toLocaleDateString() : 'N/A'}
+                  {billing.nextBillingDate ? new Date(billing.nextBillingDate).toLocaleDateString() : '—'}
                 </span>
               </div>
               <div className="flex items-center justify-between text-sm mt-2">
@@ -331,11 +344,7 @@ export default function BillingPage() {
               </button>
               {billing.status === 'ACTIVE' && (
                 <button
-                  onClick={() => {
-                    if (confirm('Cancel your subscription? You\'ll keep access until the end of your billing period.')) {
-                      cancelMutation.mutate();
-                    }
-                  }}
+                  onClick={() => setShowCancelConfirm(true)}
                   className="w-full text-sm text-apple-red hover:text-apple-red/80"
                 >
                   Cancel Subscription
@@ -749,6 +758,34 @@ export default function BillingPage() {
                 className="flex-1 py-3 btn-apple btn-apple-outline rounded-apple-lg"
               >
                 Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Cancel Subscription Confirm Modal */}
+      {showCancelConfirm && (
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-xl flex items-center justify-center z-50 p-4">
+          <div className="glass-card rounded-apple-xl w-full max-w-sm p-6">
+            <h3 className="text-lg font-semibold text-ios-dark mb-2">Cancel subscription?</h3>
+            <p className="text-sm text-ios-secondary mb-6">
+              You'll keep access to {billing?.plan?.name || 'your current plan'} until the end of your current billing period, then your workspace drops to the free tier limits.
+            </p>
+            <div className="flex gap-3">
+              <button
+                onClick={() => setShowCancelConfirm(false)}
+                className="flex-1 py-3 btn-apple btn-apple-outline rounded-apple-lg"
+                disabled={cancelMutation.isPending}
+              >
+                Keep Subscription
+              </button>
+              <button
+                onClick={() => cancelMutation.mutate()}
+                disabled={cancelMutation.isPending}
+                className="flex-1 py-3 bg-apple-red text-white font-semibold rounded-apple-lg hover:bg-apple-red/90 transition disabled:opacity-50"
+              >
+                {cancelMutation.isPending ? 'Cancelling...' : 'Cancel Subscription'}
               </button>
             </div>
           </div>
