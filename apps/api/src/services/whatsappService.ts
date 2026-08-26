@@ -45,10 +45,6 @@ export async function dispatchOutboundMessage(params: DispatchMessageParams): Pr
 
     const isMock = process.env.WHATSAPP_MOCK_MODE === 'true';
 
-    const conditionCheck = `token=${!!token} metaPhoneId=${!!metaPhoneId} isMock=${isMock} will_enter_if=${!!(token && metaPhoneId && !isMock)}`;
-    process.stderr.write(`[DISPATCH_CHECK] ${conditionCheck}\n`);
-    console.log(`[DISPATCH] token=${token ? 'EXISTS(' + token.substring(0, 10) + '...)' : 'MISSING'}, metaPhoneId=${metaPhoneId}, isMock=${isMock}, envMockMode=${process.env.WHATSAPP_MOCK_MODE}`);
-
     // 2. If real Meta credentials & phone ID are available, invoke Meta Graph API
     if (token && metaPhoneId && !isMock) {
       const url = `https://graph.facebook.com/v18.0/${metaPhoneId}/messages`;
@@ -73,8 +69,6 @@ export async function dispatchOutboundMessage(params: DispatchMessageParams): Pr
               text: { body },
             };
 
-      console.log(`[DISPATCH_PAYLOAD] url=${url} payload=${JSON.stringify(payload)}`);
-
       const response = await fetch(url, {
         method: 'POST',
         headers: {
@@ -85,7 +79,6 @@ export async function dispatchOutboundMessage(params: DispatchMessageParams): Pr
       });
 
       const responseData: any = await response.json();
-      console.log(`[DISPATCH_RESPONSE] status=${response.status} body=${JSON.stringify(responseData)}`);
 
       if (response.ok && responseData?.messages?.[0]?.id) {
         const metaMessageId = responseData.messages[0].id;
