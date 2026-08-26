@@ -3,7 +3,7 @@
  * Multi-step wizard for creating and managing campaigns
  */
 
-import { useState } from 'react';
+import { useState, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../api/client';
@@ -144,10 +144,13 @@ export default function CampaignsPage() {
     templateId: '',
     phoneNumberId: '',
     message: '',
+    mediaUrl: '',
     scheduleType: 'now' as 'now' | 'scheduled',
     scheduledAt: '',
     timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
   });
+  const [showMediaInput, setShowMediaInput] = useState(false);
+  const messageTextareaRef = useRef<HTMLTextAreaElement>(null);
 
   // Fetch campaigns
   const { data, isLoading } = useQuery({
@@ -347,10 +350,12 @@ export default function CampaignsPage() {
       templateId: '',
       phoneNumberId: '',
       message: '',
+      mediaUrl: '',
       scheduleType: 'now',
       scheduledAt: '',
       timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
     });
+    setShowMediaInput(false);
   };
 
   // Handle next step with validation
@@ -393,6 +398,7 @@ export default function CampaignsPage() {
       audienceType,
       segmentIds,
       contactIds,
+      ...(form.mediaUrl ? { mediaUrl: form.mediaUrl } : {}),
     };
   };
 
@@ -967,9 +973,10 @@ export default function CampaignsPage() {
               <label className="block text-sm font-medium text-ios-dark mb-2">Message Content</label>
               <div className="relative">
                 <textarea
+                  ref={messageTextareaRef}
                   value={form.message}
                   onChange={(e) => setForm({ ...form, message: e.target.value })}
-                  placeholder="Type your message here...&#10;&#10;Use {name} for personalization&#10;Use {product} for dynamic content"
+                  placeholder="Type your message here...&#10;&#10;Use {{1}} for the first variable (filled with contact name)"
                   className="input-apple w-full h-40 resize-none"
                 />
                 <div className="absolute bottom-3 right-3 text-xs text-ios-muted">
@@ -977,15 +984,60 @@ export default function CampaignsPage() {
                 </div>
               </div>
               <div className="flex gap-4 mt-3">
-                <button className="flex items-center gap-2 text-sm text-wa-green hover:text-wa-teal transition">
+                <button
+                  type="button"
+                  onClick={() => setShowMediaInput((v) => !v)}
+                  className="flex items-center gap-2 text-sm text-wa-green hover:text-wa-teal transition"
+                >
                   <Image className="w-4 h-4" />
-                  Add Media
+                  {showMediaInput ? 'Hide Media' : 'Add Media'}
                 </button>
-                <button className="flex items-center gap-2 text-sm text-wa-green hover:text-wa-teal transition">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const ta = messageTextareaRef.current;
+                    const existingVars = [...(form.message.matchAll(/\{\{(\d+)\}\}/g))].map(m => parseInt(m[1]));
+                    const nextNum = existingVars.length ? Math.max(...existingVars) + 1 : 1;
+                    const varText = `{{${nextNum}}}`;
+                    if (ta) {
+                      const start = ta.selectionStart ?? form.message.length;
+                      const end = ta.selectionEnd ?? form.message.length;
+                      const newMsg = form.message.slice(0, start) + varText + form.message.slice(end);
+                      setForm({ ...form, message: newMsg });
+                      requestAnimationFrame(() => {
+                        ta.selectionStart = ta.selectionEnd = start + varText.length;
+                        ta.focus();
+                      });
+                    } else {
+                      setForm({ ...form, message: form.message + varText });
+                    }
+                  }}
+                  className="flex items-center gap-2 text-sm text-wa-green hover:text-wa-teal transition"
+                >
                   <Zap className="w-4 h-4" />
-                  Add Variables
+                  Add Variable
                 </button>
               </div>
+              {showMediaInput && (
+                <div className="mt-2 flex gap-2 items-center">
+                  <input
+                    type="url"
+                    value={form.mediaUrl}
+                    onChange={(e) => setForm({ ...form, mediaUrl: e.target.value })}
+                    placeholder="https://example.com/image.jpg"
+                    className="input-apple flex-1 text-sm"
+                  />
+                  {form.mediaUrl && (
+                    <button
+                      type="button"
+                      onClick={() => setForm({ ...form, mediaUrl: '' })}
+                      className="text-ios-muted hover:text-apple-red transition"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  )}
+                </div>
+              )}
               <div className="mt-3">
                 <CampaignMessageSuggest
                   audienceDescription={form.segmentId === 'all' ? 'all contacts' : selectedSegment?.name || 'a segment'}
