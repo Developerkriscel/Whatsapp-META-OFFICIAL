@@ -11,9 +11,10 @@ import {
   ExternalLink, Copy, Check, MessageSquare, Shield, Key, Globe, Settings,
   ChevronDown, ChevronRight, Loader2, Eye, EyeOff, Zap, AlertTriangle,
   BarChart3, TrendingUp, TrendingDown, Users, ShieldCheck, Search,
-  Upload, FileText, Send, Bell, BellOff, Sparkles
+  Upload, FileText, Send, Bell, BellOff, Sparkles, Facebook, CreditCard, Lock, Unlock
 } from 'lucide-react';
 import WhatsAppSetupWizardModal from '../components/WhatsAppSetupWizardModal';
+import { loadFacebookSdk, launchEmbeddedSignup } from '../utils/embeddedSignup';
 
 interface PhoneNumber {
   id: string;
@@ -78,8 +79,10 @@ interface BusinessVerification {
 }
 
 interface RateLimits {
-  global: { messagesPerMinute: number; messagesPerHour: number; messagesPerDay: number };
-  phones: { id: string; phoneNumber: string; dailySentLimit: number; todaySentCount: number; resetAt: string }[];
+  phones: {
+    id: string; phoneNumber: string; dailySentLimit: number; todaySentCount: number; resetAt: string;
+    messagingLimitTier: string | null; messagingLimit: number | null;
+  }[];
 }
 
 const STATUS_CONFIG: Record<string, { label: string; color: string; bgColor: string; icon: any }> = {
@@ -87,6 +90,7 @@ const STATUS_CONFIG: Record<string, { label: string; color: string; bgColor: str
   verified: { label: 'Verified', color: 'text-apple-green', bgColor: 'bg-apple-green/20', icon: CheckCircle },
   suspended: { label: 'Suspended', color: 'text-apple-red', bgColor: 'bg-apple-red/20', icon: AlertCircle },
   limited: { label: 'Limited', color: 'text-apple-orange', bgColor: 'bg-apple-orange/20', icon: AlertTriangle },
+  disconnected: { label: 'Disconnected', color: 'text-ios-muted', bgColor: 'bg-ios-gray', icon: AlertCircle },
 };
 
 const QUALITY_SCORES = {
@@ -104,10 +108,13 @@ const TIMEZONES = [
 const DAYS = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'];
 
 export default function WhatsAppSettingsPage() {
-  const [activeTab, setActiveTab] = useState<'phones' | 'verification' | 'webhook' | 'credentials' | 'quality' | 'rate-limits'>('phones');
+  const [activeTab, setActiveTab] = useState<'phones' | 'verification' | 'webhook' | 'credentials' | 'quality' | 'rate-limits' | 'billing'>('phones');
   const [showWizardModal, setShowWizardModal] = useState(false);
   const [showAddModal, setShowAddModal] = useState(false);
   const [showPhoneDetail, setShowPhoneDetail] = useState<PhoneNumber | null>(null);
+  const [confirmDeletePhone, setConfirmDeletePhone] = useState<PhoneNumber | null>(null);
+  const [deletePhoneError, setDeletePhoneError] = useState<string | null>(null);
+  const [deleteBlockedByConversations, setDeleteBlockedByConversations] = useState(false);
   const [showBulkImport, setShowBulkImport] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [copiedWebhook, setCopiedWebhook] = useState(false);
@@ -131,7 +138,39 @@ export default function WhatsAppSettingsPage() {
     wabaId: '',
   });
   const [isEditingCredentials, setIsEditingCredentials] = useState(false);
+  const [oauthWabas, setOauthWabas] = useState<{ id: string; name: string }[] | null>(null);
+  const [oauthPhones, setOauthPhones] = useState<{ id: string; display_phone_number: string; verified_name: string }[] | null>(null);
+  const [oauthSelectedWaba, setOauthSelectedWaba] = useState<{ id: string; name: string } | null>(null);
+  const [oauthError, setOauthError] = useState<string | null>(null);
+  const [oauthConnectedMessage, setOauthConnectedMessage] = useState<string | null>(null);
+  const [registerPin, setRegisterPin] = useState('');
+  const [registerError, setRegisterError] = useState<string | null>(null);
+  const [registerSuccess, setRegisterSuccess] = useState<string | null>(null);
   const queryClient = useQueryClient();
+
+  // Parse Meta OAuth redirect params on mount (?oauth=success&wabas=... or ?error=...)
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const oauthStatus = params.get('oauth');
+    const errorParam = params.get('error');
+
+    if (oauthStatus === 'success') {
+      const wabasParam = params.get('wabas');
+      if (wabasParam) {
+        try {
+          const parsed = JSON.parse(decodeURIComponent(wabasParam));
+          setOauthWabas(Array.isArray(parsed) ? parsed : parsed?.data || []);
+          setActiveTab('phones');
+        } catch {
+          setOauthError('Failed to parse WhatsApp Business Accounts from Meta.');
+        }
+      }
+      window.history.replaceState({}, '', window.location.pathname);
+    } else if (errorParam) {
+      setOauthError(decodeURIComponent(errorParam));
+      window.history.replaceState({}, '', window.location.pathname);
+    }
+  }, []);
 
   // Fetch WhatsApp data
   const { data, isLoading, refetch } = useQuery({
@@ -172,6 +211,16 @@ export default function WhatsAppSettingsPage() {
       const res = await api.get('/whatsapp/webhook/settings');
       return res.data;
     },
+  });
+
+  // Billing / Line of Credit status query
+  const billingStatusQuery = useQuery({
+    queryKey: ['whatsapp-billing-status'],
+    queryFn: async () => {
+      const res = await api.get('/whatsapp/waba/billing-status');
+      return res.data;
+    },
+    enabled: activeTab === 'billing',
   });
 
   // Mutations
@@ -238,6 +287,30 @@ export default function WhatsAppSettingsPage() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['whatsapp-settings'] });
       setShowPhoneDetail(null);
+      setConfirmDeletePhone(null);
+      setDeletePhoneError(null);
+      setDeleteBlockedByConversations(false);
+    },
+    onError: (err: any) => {
+      setDeletePhoneError(err.response?.data?.error?.message || 'Failed to delete phone number');
+      setDeleteBlockedByConversations(err.response?.data?.error?.code === 'PHONE_HAS_CONVERSATIONS');
+    },
+  });
+
+  const disconnectPhoneMutation = useMutation({
+    mutationFn: async (id: string) => {
+      const response = await api.post(`/whatsapp/phone-numbers/${id}/disconnect`);
+      return response.data;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['whatsapp-settings'] });
+      setShowPhoneDetail(null);
+      setConfirmDeletePhone(null);
+      setDeletePhoneError(null);
+      setDeleteBlockedByConversations(false);
+    },
+    onError: (err: any) => {
+      setDeletePhoneError(err.response?.data?.error?.message || 'Failed to disconnect phone number');
     },
   });
 
@@ -276,6 +349,39 @@ export default function WhatsAppSettingsPage() {
     },
   });
 
+  const registerPhoneMutation = useMutation({
+    mutationFn: async ({ id, pin }: { id: string; pin: string }) => {
+      const response = await api.post(`/whatsapp/phone-numbers/${id}/register`, { pin });
+      return response.data;
+    },
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ['whatsapp-settings'] });
+      setRegisterSuccess(data?.data?.message || 'Phone registered successfully');
+      setRegisterError(null);
+      setRegisterPin('');
+    },
+    onError: (err: any) => {
+      setRegisterError(err.response?.data?.error?.message || 'Registration failed');
+      setRegisterSuccess(null);
+    },
+  });
+
+  const deregisterPhoneMutation = useMutation({
+    mutationFn: async (id: string) => {
+      const response = await api.post(`/whatsapp/phone-numbers/${id}/deregister`);
+      return response.data;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['whatsapp-settings'] });
+      setRegisterSuccess('Phone deregistered from Meta Cloud API');
+      setRegisterError(null);
+    },
+    onError: (err: any) => {
+      setRegisterError(err.response?.data?.error?.message || 'Deregistration failed');
+      setRegisterSuccess(null);
+    },
+  });
+
   const testWebhookMutation = useMutation({
     mutationFn: async () => {
       const response = await api.post('/whatsapp/webhook/test');
@@ -290,11 +396,76 @@ export default function WhatsAppSettingsPage() {
     },
   });
 
+  const connectFacebookMutation = useMutation({
+    mutationFn: async () => {
+      // Prefer the real Embedded Signup popup (Meta's required flow for Tech Providers).
+      // Falls back to the classic OAuth redirect until a Signup Configuration exists.
+      const configRes = await api.get('/whatsapp/embedded-signup/config').catch(() => null);
+      const config = configRes?.data?.data;
+
+      if (config?.appId && config?.configId) {
+        await loadFacebookSdk(config.appId, config.graphApiVersion);
+        const result = await launchEmbeddedSignup(config.configId);
+        const completeRes = await api.post('/whatsapp/embedded-signup/complete', result);
+        return { embedded: true as const, data: completeRes.data };
+      }
+
+      const response = await api.get('/whatsapp/oauth/url');
+      return { embedded: false as const, data: response.data };
+    },
+    onSuccess: (result) => {
+      if (result.embedded) {
+        queryClient.invalidateQueries({ queryKey: ['whatsapp-settings'] });
+        setOauthError(null);
+      } else {
+        const authUrl = result.data?.data?.authUrl;
+        if (authUrl) window.location.href = authUrl;
+      }
+    },
+    onError: (err: any) => {
+      setOauthError(err.response?.data?.error?.message || err.message || 'Failed to connect WhatsApp');
+    },
+  });
+
+  const selectWabaMutation = useMutation({
+    mutationFn: async (waba: { id: string; name: string }) => {
+      const response = await api.post('/whatsapp/oauth/select-waba', { wabaId: waba.id, wabaName: waba.name });
+      return response.data;
+    },
+    onSuccess: (data, waba) => {
+      setOauthSelectedWaba(waba);
+      setOauthPhones(data?.data?.phoneNumbers || []);
+    },
+    onError: (err: any) => {
+      setOauthError(err.response?.data?.error?.message || 'Failed to load phone numbers for this WABA');
+    },
+  });
+
+  const connectPhoneOAuthMutation = useMutation({
+    mutationFn: async (phone: { id: string; verified_name: string }) => {
+      const response = await api.post('/whatsapp/oauth/connect-phone', {
+        phoneNumberId: phone.id,
+        displayName: phone.verified_name,
+      });
+      return response.data;
+    },
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ['whatsapp-settings'] });
+      setOauthConnectedMessage(data?.message || 'Phone number connected successfully!');
+      setOauthWabas(null);
+      setOauthPhones(null);
+      setOauthSelectedWaba(null);
+    },
+    onError: (err: any) => {
+      setOauthError(err.response?.data?.error?.message || 'Failed to connect phone number');
+    },
+  });
+
   const phones: PhoneNumber[] = data?.phones?.data || [];
   const webhookUrl = data?.webhook?.data?.webhookUrl || '';
   const credentials = data?.credentials?.data || {};
   const verification: BusinessVerification = data?.verification?.data || { steps: [] };
-  const rateLimits: RateLimits = data?.rateLimits?.data || { global: { messagesPerMinute: 250, messagesPerHour: 5000, messagesPerDay: 100000 }, phones: [] };
+  const rateLimits: RateLimits = data?.rateLimits?.data || { phones: [] };
   const qualityReport: QualityReport = qualityQuery.data?.data || null;
   const webhookSettings = webhookSettingsQuery.data?.data || { fields: {}, retrySettings: {} };
 
@@ -331,10 +502,22 @@ export default function WhatsAppSettingsPage() {
 
     try {
       if (addForm.accessToken || addForm.wabaId) {
+        // The backend writes appId/wabaId directly with no "keep existing if
+        // blank" fallback (unlike secret/token, which do have that safety
+        // net) — sending a placeholder ID here would silently overwrite the
+        // tenant's real credentials with someone else's. Require the real
+        // values instead of guessing.
+        if (!credentials?.appId) {
+          setFormErrors({ phoneNumber: 'Set your Meta App ID first, under the API Credentials tab.' });
+          return;
+        }
+        if (!addForm.wabaId) {
+          setFormErrors({ phoneNumber: 'WhatsApp Business Account ID is required when providing an access token.' });
+          return;
+        }
         await api.post('/whatsapp/credentials', {
-          appId: credentials?.appId || '1502654484880767',
-          appSecret: credentials?.appSecret || '',
-          wabaId: addForm.wabaId || '1029485569660598',
+          appId: credentials.appId,
+          wabaId: addForm.wabaId,
           accessToken: addForm.accessToken,
         });
       }
@@ -377,13 +560,6 @@ export default function WhatsAppSettingsPage() {
         </div>
         <div className="flex items-center gap-2">
           <button
-            onClick={() => setShowWizardModal(true)}
-            className="px-4 py-2 bg-wa-green text-white font-semibold text-sm rounded-apple-lg hover:bg-wa-green/90 transition shadow-sm flex items-center gap-2"
-          >
-            <Sparkles className="w-4 h-4" />
-            Launch Setup Wizard
-          </button>
-          <button
             onClick={() => refetch()}
             disabled={isLoading}
             className="btn-apple btn-apple-outline flex items-center gap-2"
@@ -394,30 +570,44 @@ export default function WhatsAppSettingsPage() {
         </div>
       </div>
 
-      {/* Quick Setup Wizard Banner */}
-      <div className="p-5 bg-gradient-to-r from-slate-900 via-slate-800 to-slate-900 text-white rounded-apple-2xl shadow-lg flex flex-col md:flex-row items-center justify-between gap-4 border border-slate-700">
+      {/* Primary onboarding path: Connect with Facebook */}
+      <div
+        className="p-5 text-white rounded-apple-2xl shadow-lg flex flex-col md:flex-row items-center justify-between gap-4"
+        style={{ background: 'linear-gradient(135deg, #075E54 0%, #128C7E 55%, #25D366 100%)' }}
+      >
         <div className="flex items-center gap-4">
-          <div className="w-12 h-12 rounded-apple-xl bg-wa-green/20 text-wa-green flex items-center justify-center font-bold text-xl border border-wa-green/30 shrink-0">
-            <Sparkles className="w-6 h-6 text-wa-green" />
+          <div className="w-12 h-12 rounded-apple-xl bg-white/15 text-white flex items-center justify-center font-bold text-xl border border-white/25 shrink-0">
+            <Facebook className="w-6 h-6" />
           </div>
           <div>
-            <h3 className="text-base font-bold text-white flex items-center gap-2">
-              WhatsApp Connection Wizard
-              <span className="text-xs bg-wa-green text-white px-2 py-0.5 rounded-full font-semibold">Recommended</span>
+            <h3 className="text-base font-bold text-white">
+              Connect WhatsApp
             </h3>
-            <p className="text-xs text-slate-300 mt-0.5">
-              Step-by-step setup for Meta App ID, WABA ID, Permanent Token, Phone Number & Meta Phone ID with visual Facebook UI previews.
+            <p className="text-xs text-white/80 mt-0.5">
+              One click via Meta — authorize, pick your WhatsApp Business Account and phone number, done. No App ID or tokens to copy.
             </p>
           </div>
         </div>
         <button
-          onClick={() => setShowWizardModal(true)}
-          className="px-5 py-2.5 bg-wa-green text-white font-semibold text-sm rounded-apple-xl hover:bg-wa-green/90 transition shadow-md shrink-0 flex items-center gap-2"
+          onClick={() => connectFacebookMutation.mutate()}
+          disabled={connectFacebookMutation.isPending}
+          className="px-5 py-2.5 bg-white text-wa-dark font-semibold text-sm rounded-apple-xl hover:bg-white/90 transition shadow-md shrink-0 flex items-center gap-2 disabled:opacity-50"
         >
-          <Sparkles className="w-4 h-4" />
-          Start Setup Wizard
+          {connectFacebookMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Facebook className="w-4 h-4" />}
+          Connect with Facebook
         </button>
       </div>
+
+      {/* Advanced / manual path — for tenants with an existing Meta setup */}
+      <button
+        onClick={() => setShowWizardModal(true)}
+        className="w-full text-left px-4 py-2.5 rounded-apple-lg border border-dashed border-ios-gray text-ios-secondary hover:border-wa-green hover:text-wa-green transition flex items-center gap-2 text-sm"
+      >
+        <Sparkles className="w-4 h-4 shrink-0" />
+        <span>
+          <span className="font-medium">Advanced / Manual Setup</span> — already have a Meta App ID, WABA ID, and permanent token? Enter them directly.
+        </span>
+      </button>
 
       {/* Tabs */}
       <div className="border-b border-black/10">
@@ -429,6 +619,7 @@ export default function WhatsAppSettingsPage() {
             { id: 'credentials', label: 'API Credentials', icon: Key },
             { id: 'quality', label: 'Quality', icon: TrendingUp },
             { id: 'rate-limits', label: 'Rate Limits', icon: Bell },
+            { id: 'billing', label: 'Line of Credit', icon: CreditCard },
           ].map((tab) => (
             <button
               key={tab.id}
@@ -568,7 +759,7 @@ export default function WhatsAppSettingsPage() {
                             Setup & Meta Config
                           </button>
                           <button
-                            onClick={() => { if (confirm('Delete this phone number?')) deletePhoneMutation.mutate(phone.id); }}
+                            onClick={() => { setConfirmDeletePhone(phone); setDeletePhoneError(null); setDeleteBlockedByConversations(false); }}
                             className="p-2 hover:bg-apple-red/10 rounded-apple-lg text-ios-muted hover:text-apple-red transition"
                             title="Delete phone number"
                           >
@@ -779,7 +970,7 @@ export default function WhatsAppSettingsPage() {
                 }}
                 className="px-3 py-1.5 bg-wa-green/20 text-wa-green font-bold text-xs rounded-apple-lg hover:bg-wa-green/30 transition flex items-center gap-1"
               >
-                <Sparkles className="w-3.5 h-3.5 text-wa-green" /> Auto-Fill Meta Credentials
+                <Sparkles className="w-3.5 h-3.5 text-wa-green" /> Edit Credentials
               </button>
               {credentials.isConfigured && (
                 <span className="px-3 py-1 bg-apple-green/20 text-apple-green text-sm rounded-full flex items-center gap-1">
@@ -991,15 +1182,20 @@ export default function WhatsAppSettingsPage() {
                 <div className={`inline-flex items-center gap-2 px-4 py-2 rounded-apple-xl ${
                   qualityReport.qualityScore === 'GREEN' ? 'bg-apple-green/20 text-apple-green' :
                   qualityReport.qualityScore === 'YELLOW' ? 'bg-apple-orange/20 text-apple-orange' :
-                  'bg-apple-red/20 text-apple-red'
+                  qualityReport.qualityScore === 'RED' ? 'bg-apple-red/20 text-apple-red' :
+                  'bg-ios-gray text-ios-muted'
                 }`}>
                   <div className={`w-3 h-3 rounded-full ${
                     qualityReport.qualityScore === 'GREEN' ? 'bg-apple-green' :
                     qualityReport.qualityScore === 'YELLOW' ? 'bg-apple-orange' :
-                    'bg-apple-red'
+                    qualityReport.qualityScore === 'RED' ? 'bg-apple-red' :
+                    'bg-ios-muted'
                   }`} />
                   <span className="font-semibold">
-                    {qualityReport.qualityScore === 'GREEN' ? 'High' : qualityReport.qualityScore === 'YELLOW' ? 'Medium' : 'Low'}
+                    {qualityReport.qualityScore === 'GREEN' ? 'High' :
+                     qualityReport.qualityScore === 'YELLOW' ? 'Medium' :
+                     qualityReport.qualityScore === 'RED' ? 'Low' :
+                     'Not yet available'}
                   </span>
                   <span className="text-sm opacity-70">({qualityReport.period})</span>
                 </div>
@@ -1070,54 +1266,210 @@ export default function WhatsAppSettingsPage() {
       {/* Rate Limits Tab */}
       {activeTab === 'rate-limits' && (
         <div className="space-y-6">
-          {/* Global Limits */}
+          {/* Per-Phone Limits — Meta doesn't publish a per-minute/hour figure
+              at all (that used to be a fabricated "Global Rate Limits" block
+              showing the same numbers for every tenant); the real constraint
+              is a per-phone messaging_limit_tier capping unique customers
+              messaged per rolling 24h, fetched live below. */}
           <div className="card-apple p-6">
-            <h2 className="text-lg font-semibold text-ios-dark mb-4">Global Rate Limits</h2>
-            <div className="grid grid-cols-3 gap-4">
-              <div className="text-center p-4 bg-ios-gray rounded-apple-lg">
-                <p className="text-3xl font-bold text-ios-dark">{rateLimits.global.messagesPerMinute}</p>
-                <p className="text-sm text-ios-muted">Messages / Minute</p>
-              </div>
-              <div className="text-center p-4 bg-ios-gray rounded-apple-lg">
-                <p className="text-3xl font-bold text-ios-dark">{rateLimits.global.messagesPerHour.toLocaleString()}</p>
-                <p className="text-sm text-ios-muted">Messages / Hour</p>
-              </div>
-              <div className="text-center p-4 bg-ios-gray rounded-apple-lg">
-                <p className="text-3xl font-bold text-ios-dark">{rateLimits.global.messagesPerDay.toLocaleString()}</p>
-                <p className="text-sm text-ios-muted">Messages / Day</p>
-              </div>
+            <h2 className="text-lg font-semibold text-ios-dark mb-1">Messaging Limits</h2>
+            <p className="text-sm text-ios-muted mb-4">Meta's real per-phone limit — a cap on unique customers messaged per rolling 24 hours.</p>
+            <div className="space-y-3">
+              {rateLimits.phones.length === 0 ? (
+                <p className="text-sm text-ios-muted">No connected phone numbers.</p>
+              ) : (
+                rateLimits.phones.map(phone => {
+                  const usage = getUsagePercentage(phone.todaySentCount, phone.dailySentLimit);
+                  return (
+                    <div key={phone.id} className="p-4 bg-ios-gray/50 rounded-apple-lg">
+                      <div className="flex items-center justify-between mb-2">
+                        <p className="font-medium text-ios-dark">{phone.phoneNumber}</p>
+                        {phone.messagingLimitTier ? (
+                          <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-wa-green/15 text-wa-green">
+                            {phone.messagingLimitTier.replace('_', ' ')}
+                            {phone.messagingLimit != null ? ` — ${phone.messagingLimit.toLocaleString()}/day` : ' — Unlimited'}
+                          </span>
+                        ) : (
+                          <span className="text-xs text-ios-muted">Tier not available</span>
+                        )}
+                      </div>
+                      <div className="flex items-center justify-between text-sm text-ios-muted mb-1">
+                        <span>Sent today (this app)</span>
+                        <span>{phone.todaySentCount.toLocaleString()} / {phone.dailySentLimit.toLocaleString()}</span>
+                      </div>
+                      <div className="h-2 bg-ios-gray rounded-full overflow-hidden">
+                        <div
+                          className={`h-full transition-all ${usage > 80 ? 'bg-apple-red' : usage > 60 ? 'bg-apple-orange' : 'bg-wa-green'}`}
+                          style={{ width: `${usage}%` }}
+                        />
+                      </div>
+                      {phone.resetAt && (
+                        <p className="text-xs text-ios-muted mt-2">
+                          Resets at: {new Date(phone.resetAt).toLocaleString()}
+                        </p>
+                      )}
+                    </div>
+                  );
+                })
+              )}
             </div>
           </div>
+        </div>
+      )}
 
-          {/* Per-Phone Limits */}
+      {/* Billing / Line of Credit Tab */}
+      {activeTab === 'billing' && (
+        <div className="space-y-6">
+          {/* What is Line of Credit */}
+          <div className="card-apple p-6 border-l-4 border-[#1877F2]">
+            <h2 className="text-lg font-semibold text-ios-dark mb-2 flex items-center gap-2">
+              <CreditCard className="w-5 h-5 text-[#1877F2]" /> Meta Line of Credit
+            </h2>
+            <p className="text-sm text-ios-secondary mb-3">
+              WhatsApp Business API uses Meta's <strong>Line of Credit (LoC)</strong> as the required payment method for conversation charges.
+              Unlike credit cards, LoC allows Meta to invoice your business monthly for WhatsApp conversation fees.
+            </p>
+            <a
+              href="https://business.facebook.com/billing_hub"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-2 px-4 py-2 bg-[#1877F2] text-white text-sm font-semibold rounded-apple-lg hover:bg-[#1464D6] transition"
+            >
+              <ExternalLink className="w-4 h-4" />
+              Open Meta Billing Hub
+            </a>
+          </div>
+
+          {/* Current Status */}
           <div className="card-apple p-6">
-            <h2 className="text-lg font-semibold text-ios-dark mb-4">Per-Phone Limits</h2>
-            <div className="space-y-3">
-              {rateLimits.phones.map(phone => {
-                const usage = getUsagePercentage(phone.todaySentCount, phone.dailySentLimit);
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="font-semibold text-ios-dark">Payment Status</h3>
+              <button
+                onClick={() => billingStatusQuery.refetch()}
+                disabled={billingStatusQuery.isFetching}
+                className="btn-apple btn-apple-outline flex items-center gap-2 text-xs"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${billingStatusQuery.isFetching ? 'animate-spin' : ''}`} />
+                Refresh
+              </button>
+            </div>
+
+            {billingStatusQuery.isLoading || billingStatusQuery.isFetching ? (
+              <div className="flex items-center gap-3 text-ios-muted">
+                <Loader2 className="w-5 h-5 animate-spin" />
+                <span className="text-sm">Checking payment status...</span>
+              </div>
+            ) : (() => {
+              const billing = billingStatusQuery.data?.data;
+              if (!billing?.configured) {
                 return (
-                  <div key={phone.id} className="p-4 bg-ios-gray/50 rounded-apple-lg">
-                    <div className="flex items-center justify-between mb-2">
-                      <p className="font-medium text-ios-dark">{phone.phoneNumber}</p>
-                      <p className="text-sm text-ios-muted">
-                        {phone.todaySentCount.toLocaleString()} / {phone.dailySentLimit.toLocaleString()}
+                  <div className="flex items-start gap-3 p-4 bg-apple-orange/10 rounded-apple-lg">
+                    <AlertTriangle className="w-5 h-5 text-apple-orange mt-0.5 shrink-0" />
+                    <div>
+                      <p className="font-medium text-apple-orange">Not Configured</p>
+                      <p className="text-sm text-ios-secondary mt-1">
+                        No WhatsApp Business Account credentials are set up yet. Complete the account connection first.
                       </p>
                     </div>
-                    <div className="h-2 bg-ios-gray rounded-full overflow-hidden">
-                      <div
-                        className={`h-full transition-all ${usage > 80 ? 'bg-apple-red' : usage > 60 ? 'bg-apple-orange' : 'bg-wa-green'}`}
-                        style={{ width: `${usage}%` }}
-                      />
-                    </div>
-                    {phone.resetAt && (
-                      <p className="text-xs text-ios-muted mt-2">
-                        Resets at: {new Date(phone.resetAt).toLocaleString()}
-                      </p>
-                    )}
                   </div>
                 );
-              })}
+              }
+              if (billing?.hasLineOfCredit) {
+                return (
+                  <div className="space-y-4">
+                    <div className="flex items-start gap-3 p-4 bg-apple-green/10 rounded-apple-lg">
+                      <CheckCircle className="w-5 h-5 text-apple-green mt-0.5 shrink-0" />
+                      <div>
+                        <p className="font-medium text-apple-green">Line of Credit Active</p>
+                        <p className="text-sm text-ios-secondary mt-1">Your WABA has an active line of credit. WhatsApp conversation charges will be invoiced monthly.</p>
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-2 gap-3 text-sm">
+                      {billing.wabaName && (
+                        <div className="p-3 bg-ios-gray/50 rounded-apple-lg">
+                          <p className="text-ios-muted text-xs">WABA Name</p>
+                          <p className="font-medium text-ios-dark mt-0.5">{billing.wabaName}</p>
+                        </div>
+                      )}
+                      {billing.currency && (
+                        <div className="p-3 bg-ios-gray/50 rounded-apple-lg">
+                          <p className="text-ios-muted text-xs">Billing Currency</p>
+                          <p className="font-medium text-ios-dark mt-0.5">{billing.currency}</p>
+                        </div>
+                      )}
+                      {billing.primaryFundingId && (
+                        <div className="p-3 bg-ios-gray/50 rounded-apple-lg col-span-2">
+                          <p className="text-ios-muted text-xs">Funding ID</p>
+                          <p className="font-mono text-xs text-ios-dark mt-0.5">{billing.primaryFundingId}</p>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                );
+              }
+              return (
+                <div className="space-y-4">
+                  <div className="flex items-start gap-3 p-4 bg-apple-red/10 rounded-apple-lg">
+                    <AlertCircle className="w-5 h-5 text-apple-red mt-0.5 shrink-0" />
+                    <div>
+                      <p className="font-medium text-apple-red">No Line of Credit Found</p>
+                      <p className="text-sm text-ios-secondary mt-1">
+                        Your WhatsApp Business Account does not have an active line of credit.
+                        You won't be able to send messages beyond the free tier without setting one up.
+                        {billing?.error && <span className="block mt-1 text-xs text-ios-muted">({billing.error})</span>}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="p-4 bg-ios-gray/50 rounded-apple-lg">
+                    <p className="text-sm font-semibold text-ios-dark mb-2">How to set up Line of Credit:</p>
+                    <ol className="text-sm text-ios-secondary space-y-1.5 list-decimal list-inside">
+                      <li>Go to <strong>Meta Business Manager</strong> → <strong>Billing</strong></li>
+                      <li>Click <strong>Add Payment Method</strong> → select <strong>Invoice / Line of Credit</strong></li>
+                      <li>Complete the credit application (requires business verification)</li>
+                      <li>Once approved, return here to verify the status</li>
+                    </ol>
+                  </div>
+                  <a
+                    href="https://business.facebook.com/billing_hub"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-2 px-4 py-2 bg-[#1877F2] text-white text-sm font-semibold rounded-apple-lg hover:bg-[#1464D6] transition"
+                  >
+                    <ExternalLink className="w-4 h-4" />
+                    Set Up Line of Credit
+                  </a>
+                </div>
+              );
+            })()}
+          </div>
+
+          {/* Pricing Info */}
+          <div className="card-apple p-6">
+            <h3 className="font-semibold text-ios-dark mb-3">WhatsApp Conversation Pricing</h3>
+            <p className="text-sm text-ios-secondary mb-3">
+              Meta charges per conversation (24-hour window), not per message. Rates vary by country and conversation category.
+            </p>
+            <div className="grid grid-cols-2 gap-3">
+              {[
+                { label: 'Marketing', desc: 'Business-initiated promotions', color: 'text-apple-purple bg-apple-purple/10' },
+                { label: 'Utility', desc: 'Transactional updates & alerts', color: 'text-apple-blue bg-apple-blue/10' },
+                { label: 'Authentication', desc: 'OTPs and verification', color: 'text-apple-green bg-apple-green/10' },
+                { label: 'Service', desc: 'User-initiated conversations', color: 'text-apple-orange bg-apple-orange/10' },
+              ].map(cat => (
+                <div key={cat.label} className={`p-3 rounded-apple-lg ${cat.color.split(' ')[1]}`}>
+                  <p className={`text-xs font-bold ${cat.color.split(' ')[0]}`}>{cat.label}</p>
+                  <p className="text-xs text-ios-secondary mt-0.5">{cat.desc}</p>
+                </div>
+              ))}
             </div>
+            <a
+              href="https://developers.facebook.com/docs/whatsapp/pricing"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="mt-3 inline-flex items-center gap-1 text-sm text-[#1877F2] hover:underline"
+            >
+              View full pricing table <ExternalLink className="w-3.5 h-3.5" />
+            </a>
           </div>
         </div>
       )}
@@ -1460,6 +1812,60 @@ export default function WhatsAppSettingsPage() {
                 </div>
               </div>
 
+              {/* Cloud API Registration */}
+              <div className="space-y-3 pt-2">
+                <h4 className="font-medium text-ios-dark flex items-center gap-2">
+                  <Shield className="w-4 h-4 text-wa-green" /> Cloud API Registration
+                </h4>
+                <p className="text-xs text-ios-secondary">
+                  Register this phone number with Meta's Cloud API. Required for migrating from On-Premises API or when setting up a new number with a PIN.
+                </p>
+                <div className="flex gap-2 items-center">
+                  <input
+                    type="text"
+                    value={registerPin}
+                    onChange={(e) => setRegisterPin(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                    placeholder="6-digit PIN"
+                    maxLength={6}
+                    className="input-apple w-36 font-mono text-center text-lg tracking-widest"
+                  />
+                  <button
+                    onClick={() => {
+                      setRegisterError(null);
+                      setRegisterSuccess(null);
+                      registerPhoneMutation.mutate({ id: showPhoneDetail.id, pin: registerPin });
+                    }}
+                    disabled={registerPin.length !== 6 || registerPhoneMutation.isPending}
+                    className="flex-1 py-2.5 btn-apple btn-apple-blue rounded-apple-lg flex items-center justify-center gap-2 disabled:opacity-50"
+                  >
+                    {registerPhoneMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Lock className="w-4 h-4" />}
+                    Register
+                  </button>
+                  <button
+                    onClick={() => {
+                      setRegisterError(null);
+                      setRegisterSuccess(null);
+                      deregisterPhoneMutation.mutate(showPhoneDetail.id);
+                    }}
+                    disabled={deregisterPhoneMutation.isPending}
+                    className="py-2.5 px-4 border border-apple-orange/40 text-apple-orange rounded-apple-lg hover:bg-apple-orange/10 flex items-center gap-1.5 text-sm disabled:opacity-50"
+                  >
+                    {deregisterPhoneMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Unlock className="w-4 h-4" />}
+                    Deregister
+                  </button>
+                </div>
+                {registerError && (
+                  <div className="flex items-center gap-2 p-3 bg-apple-red/10 rounded-apple-lg text-sm text-apple-red">
+                    <AlertCircle className="w-4 h-4 shrink-0" />{registerError}
+                  </div>
+                )}
+                {registerSuccess && (
+                  <div className="flex items-center gap-2 p-3 bg-apple-green/10 rounded-apple-lg text-sm text-apple-green">
+                    <CheckCircle className="w-4 h-4 shrink-0" />{registerSuccess}
+                  </div>
+                )}
+              </div>
+
               {/* Actions */}
               <div className="flex gap-2 pt-4 border-t border-black/5">
                 <button
@@ -1471,13 +1877,187 @@ export default function WhatsAppSettingsPage() {
                   Refresh Quality
                 </button>
                 <button
-                  onClick={() => { if (confirm('Delete this phone number?')) deletePhoneMutation.mutate(showPhoneDetail.id); }}
+                  onClick={() => { setConfirmDeletePhone(showPhoneDetail); setDeletePhoneError(null); setDeleteBlockedByConversations(false); }}
                   className="py-2.5 px-4 border border-apple-red/30 text-apple-red rounded-apple-lg hover:bg-apple-red/10"
                 >
                   <Trash2 className="w-4 h-4" />
                 </button>
               </div>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Delete Phone Confirm Modal */}
+      {confirmDeletePhone && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-xl p-6 max-w-sm w-full mx-4">
+            <div className="flex items-center gap-3 mb-3">
+              <div className="w-10 h-10 rounded-full bg-apple-red/10 flex items-center justify-center flex-shrink-0">
+                <Trash2 className="w-5 h-5 text-apple-red" />
+              </div>
+              <h3 className="text-lg font-semibold text-ios-dark">Delete phone number?</h3>
+            </div>
+            <p className="text-sm text-ios-secondary mb-3">
+              {confirmDeletePhone.displayName || confirmDeletePhone.phoneNumber} will be permanently removed. This action cannot be undone.
+            </p>
+            {deletePhoneError && (
+              <div className="p-3 bg-red-50 border border-red-200 rounded-apple-lg text-sm text-apple-red mb-3">
+                {deletePhoneError}
+              </div>
+            )}
+            {deleteBlockedByConversations ? (
+              <div className="space-y-2">
+                <p className="text-xs text-ios-muted">
+                  It has existing chat history, so deleting it outright isn't possible without losing that. You can disconnect it instead — this keeps the number and its conversation history, just removes the live Meta connection so it stops sending/receiving.
+                </p>
+                <button
+                  onClick={() => disconnectPhoneMutation.mutate(confirmDeletePhone.id)}
+                  disabled={disconnectPhoneMutation.isPending}
+                  className="w-full btn-apple bg-apple-orange text-white hover:bg-apple-orange/90 disabled:opacity-50"
+                >
+                  {disconnectPhoneMutation.isPending ? 'Disconnecting...' : 'Disconnect from app instead'}
+                </button>
+                <button onClick={() => { setConfirmDeletePhone(null); setDeletePhoneError(null); setDeleteBlockedByConversations(false); }} className="w-full btn-apple btn-apple-outline">
+                  Cancel
+                </button>
+              </div>
+            ) : (
+              <div className="flex gap-2">
+                <button
+                  onClick={() => deletePhoneMutation.mutate(confirmDeletePhone.id)}
+                  disabled={deletePhoneMutation.isPending}
+                  className="flex-1 btn-apple bg-apple-red text-white hover:bg-apple-red/90 disabled:opacity-50"
+                >
+                  {deletePhoneMutation.isPending ? 'Deleting...' : 'Delete'}
+                </button>
+                <button onClick={() => { setConfirmDeletePhone(null); setDeletePhoneError(null); }} className="flex-1 btn-apple btn-apple-outline">
+                  Cancel
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* OAuth error toast */}
+      {oauthError && (
+        <div className="fixed bottom-6 right-6 z-50 max-w-sm p-4 bg-apple-red/10 border border-apple-red/30 rounded-apple-lg shadow-lg flex items-start gap-3">
+          <AlertCircle className="w-5 h-5 text-apple-red shrink-0 mt-0.5" />
+          <div className="flex-1">
+            <p className="text-sm font-semibold text-apple-red">Facebook connection failed</p>
+            <p className="text-xs text-ios-secondary mt-1">{oauthError}</p>
+          </div>
+          <button onClick={() => setOauthError(null)} className="p-1 hover:bg-black/5 rounded-apple-lg">
+            <X className="w-4 h-4 text-ios-muted" />
+          </button>
+        </div>
+      )}
+
+      {/* OAuth success toast */}
+      {oauthConnectedMessage && (
+        <div className="fixed bottom-6 right-6 z-50 max-w-sm p-4 bg-apple-green/10 border border-apple-green/30 rounded-apple-lg shadow-lg flex items-start gap-3">
+          <CheckCircle className="w-5 h-5 text-apple-green shrink-0 mt-0.5" />
+          <p className="text-sm text-apple-green flex-1">{oauthConnectedMessage}</p>
+          <button onClick={() => setOauthConnectedMessage(null)} className="p-1 hover:bg-black/5 rounded-apple-lg">
+            <X className="w-4 h-4 text-ios-muted" />
+          </button>
+        </div>
+      )}
+
+      {/* OAuth: WABA Selection Modal */}
+      {oauthWabas && !oauthSelectedWaba && (
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-xl flex items-center justify-center z-50 p-4">
+          <div className="glass-card rounded-apple-xl w-full max-w-lg p-6">
+            <div className="flex items-center justify-between mb-4 border-b border-black/5 pb-3">
+              <div>
+                <h3 className="text-lg font-bold text-ios-dark flex items-center gap-2">
+                  <Facebook className="w-5 h-5 text-[#1877F2]" /> Choose a WhatsApp Business Account
+                </h3>
+                <p className="text-xs text-ios-muted">Signed in via Facebook. Select which WABA to connect.</p>
+              </div>
+              <button onClick={() => { setOauthWabas(null); setOauthSelectedWaba(null); }} className="p-1 hover:bg-ios-gray rounded-apple-lg">
+                <X className="w-5 h-5 text-ios-muted" />
+              </button>
+            </div>
+
+            {oauthWabas.length === 0 ? (
+              <div className="p-8 text-center">
+                <AlertTriangle className="w-10 h-10 text-apple-orange mx-auto mb-3" />
+                <p className="text-sm text-ios-secondary">No WhatsApp Business Accounts found on this Facebook account.</p>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {oauthWabas.map((waba) => (
+                  <button
+                    key={waba.id}
+                    onClick={() => selectWabaMutation.mutate(waba)}
+                    disabled={selectWabaMutation.isPending}
+                    className="w-full flex items-center justify-between p-4 bg-ios-gray/50 hover:bg-ios-gray rounded-apple-lg transition text-left disabled:opacity-50"
+                  >
+                    <div>
+                      <p className="font-medium text-ios-dark">{waba.name}</p>
+                      <p className="text-xs text-ios-muted font-mono">{waba.id}</p>
+                    </div>
+                    {selectWabaMutation.isPending && selectWabaMutation.variables?.id === waba.id ? (
+                      <Loader2 className="w-4 h-4 animate-spin text-wa-green" />
+                    ) : (
+                      <ChevronRight className="w-4 h-4 text-ios-muted" />
+                    )}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* OAuth: Phone Number Selection Modal */}
+      {oauthSelectedWaba && oauthPhones && (
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-xl flex items-center justify-center z-50 p-4">
+          <div className="glass-card rounded-apple-xl w-full max-w-lg p-6">
+            <div className="flex items-center justify-between mb-4 border-b border-black/5 pb-3">
+              <div>
+                <h3 className="text-lg font-bold text-ios-dark flex items-center gap-2">
+                  <Phone className="w-5 h-5 text-wa-green" /> Choose a Phone Number
+                </h3>
+                <p className="text-xs text-ios-muted">From {oauthSelectedWaba.name}</p>
+              </div>
+              <button
+                onClick={() => { setOauthWabas(null); setOauthPhones(null); setOauthSelectedWaba(null); }}
+                className="p-1 hover:bg-ios-gray rounded-apple-lg"
+              >
+                <X className="w-5 h-5 text-ios-muted" />
+              </button>
+            </div>
+
+            {oauthPhones.length === 0 ? (
+              <div className="p-8 text-center">
+                <AlertTriangle className="w-10 h-10 text-apple-orange mx-auto mb-3" />
+                <p className="text-sm text-ios-secondary">No phone numbers found on this WhatsApp Business Account.</p>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {oauthPhones.map((phone) => (
+                  <button
+                    key={phone.id}
+                    onClick={() => connectPhoneOAuthMutation.mutate(phone)}
+                    disabled={connectPhoneOAuthMutation.isPending}
+                    className="w-full flex items-center justify-between p-4 bg-ios-gray/50 hover:bg-ios-gray rounded-apple-lg transition text-left disabled:opacity-50"
+                  >
+                    <div>
+                      <p className="font-medium text-ios-dark">{phone.display_phone_number}</p>
+                      <p className="text-xs text-ios-muted">{phone.verified_name}</p>
+                    </div>
+                    {connectPhoneOAuthMutation.isPending && connectPhoneOAuthMutation.variables?.id === phone.id ? (
+                      <Loader2 className="w-4 h-4 animate-spin text-wa-green" />
+                    ) : (
+                      <Plus className="w-4 h-4 text-wa-green" />
+                    )}
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
         </div>
       )}

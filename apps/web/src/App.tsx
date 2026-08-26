@@ -4,6 +4,7 @@ import { Component, ReactNode } from 'react';
 
 // Pages
 import LoginPage from './pages/LoginPage';
+import ForgotPasswordPage from './pages/ForgotPasswordPage';
 import RegisterPage from './pages/RegisterPage';
 import PricingPage from './pages/PricingPage';
 import DashboardPage from './pages/DashboardPage';
@@ -13,6 +14,7 @@ import CampaignsPage from './pages/CampaignsPage';
 import TeamPage from './pages/TeamPage';
 import SettingsPage from './pages/SettingsPage';
 import BillingPage from './pages/BillingPage';
+import BillingSuccessPage from './pages/BillingSuccessPage';
 import TemplatesPage from './pages/TemplatesPage';
 import AnalyticsPage from './pages/AnalyticsPage';
 import SegmentsPage from './pages/SegmentsPage';
@@ -25,6 +27,7 @@ import SuperAdminSettings from './pages/SuperAdminSettings';
 import SuperAdminSystem from './pages/SuperAdminSystem';
 import BotFlowsPage from './pages/BotFlowsPage';
 import WhatsAppSettingsPage from './pages/WhatsAppSettingsPage';
+import WhatsAppAccountsPage from './pages/WhatsAppAccountsPage';
 import CreditsPage from './pages/CreditsPage';
 
 // Components
@@ -123,9 +126,12 @@ function ClientLayout() {
         <Route path="/analytics" element={<AnalyticsPage />} />
         <Route path="/team" element={<TeamPage />} />
         <Route path="/billing" element={<BillingPage />} />
+        <Route path="/billing/success" element={<BillingSuccessPage />} />
+        <Route path="/billing/cancel" element={<Navigate to="/billing" replace />} />
         <Route path="/credits" element={<CreditsPage />} />
         <Route path="/settings" element={<SettingsPage />} />
         <Route path="/whatsapp" element={<WhatsAppSettingsPage />} />
+        <Route path="/whatsapp/accounts" element={<WhatsAppAccountsPage />} />
         <Route path="/flows" element={<BotFlowsPage />} />
       </Routes>
     </Layout>
@@ -138,6 +144,7 @@ function App() {
       <Routes>
         {/* Public routes */}
         <Route path="/login" element={<LoginPage />} />
+        <Route path="/forgot-password" element={<ForgotPasswordPage />} />
         <Route path="/pricing" element={<PricingPage />} />
         <Route path="/register" element={<RegisterPage />} />
 

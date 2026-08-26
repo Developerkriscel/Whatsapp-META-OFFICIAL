@@ -1,4 +1,5 @@
 import { FastifyInstance } from 'fastify';
+import { decryptSecret } from './credentialEncryption.js';
 
 export interface DispatchMessageParams {
   app: FastifyInstance;
@@ -8,6 +9,14 @@ export interface DispatchMessageParams {
   phoneNumberId: string;
   body: string;
   type?: 'text' | 'template';
+  // Required when type === 'template'. components should already carry any
+  // {{n}} variable substitutions (Meta rejects a bare "text" key on a
+  // component — variables must go through a "parameters" array).
+  template?: {
+    name: string;
+    language: string;
+    components: any[];
+  };
 }
 
 /**
@@ -16,7 +25,7 @@ export interface DispatchMessageParams {
  * Updates message status in database to SENT or FAILED.
  */
 export async function dispatchOutboundMessage(params: DispatchMessageParams): Promise<any> {
-  const { app, messageId, tenantId, contactPhone, phoneNumberId, body } = params;
+  const { app, messageId, tenantId, contactPhone, phoneNumberId, body, type, template } = params;
 
   try {
     // 1. Fetch Tenant's WhatsApp Credentials & Phone Number Record
@@ -25,8 +34,11 @@ export async function dispatchOutboundMessage(params: DispatchMessageParams): Pr
       app.prisma.phoneNumber.findFirst({ where: { id: phoneNumberId, tenantId } }),
     ]);
 
-    const token = phoneRecord?.accessToken || creds?.accessToken || (process.env.META_ACCESS_TOKEN !== 'your-system-user-access-token' ? process.env.META_ACCESS_TOKEN : null);
-    const metaPhoneId = phoneRecord?.metaPhoneId || (creds as any)?.metaPhoneId || (process.env.META_PHONE_NUMBER_ID !== 'your-phone-number-id' ? process.env.META_PHONE_NUMBER_ID : null);
+    // Tenant-scoped credentials only - never fall back to the platform's own
+    // META_ACCESS_TOKEN env var here, or an unconfigured tenant could send
+    // messages under the platform's identity/quota.
+    const token = phoneRecord?.accessToken || (creds?.accessToken ? decryptSecret(creds.accessToken) : null);
+    const metaPhoneId = phoneRecord?.metaPhoneId || null;
 
     // Format phone number to clean E.164 without leading '+' for Meta API
     const formattedTo = contactPhone.replace(/[^\d]/g, '');
@@ -38,19 +50,34 @@ export async function dispatchOutboundMessage(params: DispatchMessageParams): Pr
     // 2. If real Meta credentials & phone ID are available, invoke Meta Graph API
     if (token && metaPhoneId && !isMock) {
       const url = `https://graph.facebook.com/v18.0/${metaPhoneId}/messages`;
+      const payload =
+        type === 'template' && template
+          ? {
+              messaging_product: 'whatsapp',
+              recipient_type: 'individual',
+              to: formattedTo,
+              type: 'template',
+              template: {
+                name: template.name,
+                language: { code: template.language },
+                components: template.components,
+              },
+            }
+          : {
+              messaging_product: 'whatsapp',
+              recipient_type: 'individual',
+              to: formattedTo,
+              type: 'text',
+              text: { body },
+            };
+
       const response = await fetch(url, {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${token}`,
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({
-          messaging_product: 'whatsapp',
-          recipient_type: 'individual',
-          to: formattedTo,
-          type: 'text',
-          text: { body },
-        }),
+        body: JSON.stringify(payload),
       });
 
       const responseData: any = await response.json();

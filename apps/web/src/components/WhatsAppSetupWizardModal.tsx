@@ -353,7 +353,7 @@ export default function WhatsAppSetupWizardModal({
                       type="text"
                       value={formData.displayName}
                       onChange={(e) => setFormData({ ...formData, displayName: e.target.value })}
-                      placeholder="e.g. WA Meta Auto Support"
+                      placeholder="e.g. Kriscel WA Support"
                       className="input-apple w-full text-sm"
                     />
                   </div>

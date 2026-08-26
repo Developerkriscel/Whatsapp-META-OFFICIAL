@@ -7,9 +7,12 @@
 import { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import crypto from 'crypto';
+import axios from 'axios';
+import { Prisma } from '@prisma/client';
 import {
   getMetaAuthUrl,
   exchangeCodeForToken,
+  exchangeEmbeddedSignupCode,
   getLongLivedToken,
   getWhatsAppBusinessAccounts,
   getPhoneNumbers,
@@ -19,6 +22,8 @@ import {
   setupWebhook,
   type MetaOAuthConfig,
 } from '../services/metaOAuth.js';
+import { encryptSecret, decryptSecret, decryptIfPresent } from '../services/credentialEncryption.js';
+import { resolveEffectiveWabaId } from '../services/metaTemplate.js';
 
 export async function registerWhatsAppRoutes(app: FastifyInstance): Promise<void> {
 
@@ -38,7 +43,7 @@ export async function registerWhatsAppRoutes(app: FastifyInstance): Promise<void
     const config: MetaOAuthConfig = {
       appId: process.env.META_APP_ID || '',
       appSecret: process.env.META_APP_SECRET || '',
-      redirectUri: `${process.env.APP_URL || 'http://localhost:3001'}/api/v1/whatsapp/oauth/callback`,
+      redirectUri: `${process.env.PUBLIC_API_URL || process.env.API_URL || 'http://localhost:3001'}/api/v1/whatsapp/oauth/callback`,
     };
 
     if (!config.appId || !config.appSecret) {
@@ -74,13 +79,15 @@ export async function registerWhatsAppRoutes(app: FastifyInstance): Promise<void
       error_reason?: string;
     };
 
+    const frontendUrl = process.env.APP_URL || 'http://localhost:5173';
+
     // Handle OAuth error
     if (error) {
-      return reply.redirect(`/whatsapp-settings?error=${encodeURIComponent(error_reason || error)}`);
+      return reply.redirect(`${frontendUrl}/whatsapp?error=${encodeURIComponent(error_reason || error)}`);
     }
 
     if (!code || !state) {
-      return reply.redirect('/whatsapp-settings?error=missing_params');
+      return reply.redirect(`${frontendUrl}/whatsapp?error=missing_params`);
     }
 
     // Decode and validate state
@@ -88,19 +95,18 @@ export async function registerWhatsAppRoutes(app: FastifyInstance): Promise<void
     try {
       stateData = JSON.parse(Buffer.from(state, 'base64').toString());
     } catch {
-      return reply.redirect('/whatsapp-settings?error=invalid_state');
+      return reply.redirect(`${frontendUrl}/whatsapp?error=invalid_state`);
     }
 
-    // Verify the tenant matches
-    if (stateData.tenantId !== request.authUser.tenantId) {
-      return reply.redirect('/whatsapp-settings?error=tenant_mismatch');
+    if (!stateData.tenantId) {
+      return reply.redirect(`${frontendUrl}/whatsapp?error=invalid_state`);
     }
 
     try {
       const config: MetaOAuthConfig = {
         appId: process.env.META_APP_ID || '',
         appSecret: process.env.META_APP_SECRET || '',
-        redirectUri: `${process.env.APP_URL || 'http://localhost:3001'}/api/v1/whatsapp/oauth/callback`,
+        redirectUri: `${process.env.PUBLIC_API_URL || process.env.API_URL || 'http://localhost:3001'}/api/v1/whatsapp/oauth/callback`,
       };
 
       // Exchange code for short-lived token
@@ -117,28 +123,30 @@ export async function registerWhatsAppRoutes(app: FastifyInstance): Promise<void
         where: { tenantId: stateData.tenantId },
         create: {
           tenantId: stateData.tenantId,
-          accessToken: longLivedToken.access_token,
+          accessToken: encryptSecret(longLivedToken.access_token),
           // Don't store app secret directly - keep in env
         },
         update: {
-          accessToken: longLivedToken.access_token,
+          accessToken: encryptSecret(longLivedToken.access_token),
         },
       });
 
       // Store WABAs for selection
       // Return to frontend for user to select WABA and phone number
-      return reply.redirect(`/whatsapp-settings?oauth=success&wabas=${encodeURIComponent(JSON.stringify(wabas))}`);
+      return reply.redirect(`${frontendUrl}/whatsapp?oauth=success&wabas=${encodeURIComponent(JSON.stringify(wabas))}`);
 
     } catch (err: any) {
-      app.log.error('Meta OAuth error:', err.message);
-      return reply.redirect(`/whatsapp-settings?error=${encodeURIComponent(err.message)}`);
+      const graphError = err.response?.data?.error;
+      app.log.error({ graphError, message: err.message }, 'Meta OAuth error');
+      const displayMessage = graphError?.message || err.message;
+      return reply.redirect(`${frontendUrl}/whatsapp?error=${encodeURIComponent(displayMessage)}`);
     }
   });
 
   /**
    * POST /whatsapp/oauth/select-waba - Select a WABA and get phone numbers
    */
-  app.post('/whatsapp/oauth/select-waba', async (request, reply) => {
+  app.post('/whatsapp/oauth/select-waba', { preHandler: [app.requirePermission('settings', 'update')] }, async (request, reply) => {
     if (!request.authUser.tenantId) {
       return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
     }
@@ -163,7 +171,7 @@ export async function registerWhatsAppRoutes(app: FastifyInstance): Promise<void
     }
 
     // Get phone numbers for selected WABA
-    const phoneNumbers = await getPhoneNumbers(credentials.accessToken, wabaId);
+    const phoneNumbers = await getPhoneNumbers(decryptSecret(credentials.accessToken), wabaId);
 
     // Store WABA info
     await app.prisma.whatsAppCredentials.update({
@@ -187,7 +195,7 @@ export async function registerWhatsAppRoutes(app: FastifyInstance): Promise<void
   /**
    * POST /whatsapp/oauth/connect-phone - Connect a specific phone number
    */
-  app.post('/whatsapp/oauth/connect-phone', async (request, reply) => {
+  app.post('/whatsapp/oauth/connect-phone', { preHandler: [app.requirePermission('phone_numbers', 'create')] }, async (request, reply) => {
     if (!request.authUser.tenantId) {
       return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
     }
@@ -212,7 +220,8 @@ export async function registerWhatsAppRoutes(app: FastifyInstance): Promise<void
     }
 
     // Verify phone number ownership
-    const verifiedPhone = await verifyPhoneNumber(credentials.accessToken, credentials.wabaId, phoneNumberId);
+    const decryptedToken = decryptSecret(credentials.accessToken);
+    const verifiedPhone = await verifyPhoneNumber(decryptedToken, credentials.wabaId, phoneNumberId);
 
     if (!verifiedPhone) {
       return reply.status(400).send({
@@ -221,27 +230,39 @@ export async function registerWhatsAppRoutes(app: FastifyInstance): Promise<void
       });
     }
 
-    // Create phone number record
-    const phone = await app.prisma.phoneNumber.create({
-      data: {
-        tenantId: request.authUser.tenantId,
-        phoneNumber: verifiedPhone.display_phone_number,
-        displayName: displayName || verifiedPhone.verified_name,
-        metaPhoneId: phoneNumberId,
-        wabaId: credentials.wabaId,
-        status: 'connected',
-        canSendMarketing: true,
-        canSendUtility: true,
-        canSendAuth: true,
-      },
-    });
+    // A retried/re-run connection (or a previously disconnected number) can already
+    // have a row for this metaPhoneId — reconnect it instead of erroring on the
+    // unique constraint. A row owned by a different tenant is a real conflict.
+    const existingPhone = await app.prisma.phoneNumber.findUnique({ where: { metaPhoneId: phoneNumberId } });
 
-    // Setup webhook for this phone number
+    if (existingPhone && existingPhone.tenantId !== request.authUser.tenantId) {
+      return reply.status(400).send({
+        success: false,
+        error: { code: 'DUPLICATE', message: 'This phone number is already connected to another workspace' },
+      });
+    }
+
+    const phoneData = {
+      tenantId: request.authUser.tenantId,
+      phoneNumber: verifiedPhone.display_phone_number,
+      displayName: displayName || verifiedPhone.verified_name,
+      metaPhoneId: phoneNumberId,
+      wabaId: credentials.wabaId,
+      status: 'connected',
+      canSendMarketing: true,
+      canSendUtility: true,
+      canSendAuth: true,
+    };
+
+    const phone = existingPhone
+      ? await app.prisma.phoneNumber.update({ where: { id: existingPhone.id }, data: phoneData })
+      : await app.prisma.phoneNumber.create({ data: phoneData });
+
+    // Setup webhook for this WABA
     await setupWebhook(
-      credentials.accessToken,
+      decryptedToken,
       credentials.wabaId,
-      phoneNumberId,
-      `${process.env.APP_URL || 'http://localhost:3001'}/api/v1/webhooks/whatsapp`,
+      `${process.env.PUBLIC_API_URL || process.env.API_URL || 'http://localhost:3001'}/webhook`,
       process.env.META_WEBHOOK_VERIFY_TOKEN || 'whatsapp_webhook_verify_token'
     );
 
@@ -250,6 +271,139 @@ export async function registerWhatsAppRoutes(app: FastifyInstance): Promise<void
       data: phone,
       message: 'Phone number connected successfully!',
     };
+  });
+
+  /**
+   * GET /whatsapp/embedded-signup/config - Public config the frontend needs to
+   * launch Meta's Embedded Signup JS SDK popup (App ID + Signup Configuration ID).
+   */
+  app.get('/whatsapp/embedded-signup/config', async (request, reply) => {
+    if (!request.authUser.tenantId) {
+      return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
+    }
+
+    const appId = process.env.META_APP_ID || '';
+    const configId = process.env.META_SIGNUP_CONFIG_ID || '';
+
+    if (!appId || !configId) {
+      return reply.status(400).send({
+        success: false,
+        error: {
+          code: 'EMBEDDED_SIGNUP_NOT_CONFIGURED',
+          message: 'Embedded Signup is not configured yet. Create a Signup Configuration in the Meta dashboard and set META_SIGNUP_CONFIG_ID.',
+        },
+      });
+    }
+
+    return { success: true, data: { appId, configId, graphApiVersion: 'v21.0' } };
+  });
+
+  /**
+   * POST /whatsapp/embedded-signup/complete - Finalize Meta's Embedded Signup flow.
+   * The frontend JS SDK popup handles WABA creation/selection and phone verification
+   * itself; it hands back a `code` (via FB.login) plus wabaId/phoneNumberId/businessId
+   * (via postMessage). This endpoint exchanges the code and persists the connection.
+   */
+  app.post('/whatsapp/embedded-signup/complete', { preHandler: [app.requirePermission('settings', 'update')] }, async (request, reply) => {
+    if (!request.authUser.tenantId) {
+      return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
+    }
+
+    const schema = z.object({
+      code: z.string(),
+      wabaId: z.string(),
+      phoneNumberId: z.string(),
+      businessId: z.string().optional(),
+    });
+
+    const { code, wabaId, phoneNumberId, businessId } = schema.parse(request.body);
+
+    const config: MetaOAuthConfig = {
+      appId: process.env.META_APP_ID || '',
+      appSecret: process.env.META_APP_SECRET || '',
+      redirectUri: '',
+    };
+
+    if (!config.appId || !config.appSecret) {
+      return reply.status(400).send({
+        success: false,
+        error: { code: 'META_NOT_CONFIGURED', message: 'Meta App credentials not configured. Please contact support.' },
+      });
+    }
+
+    try {
+      const shortLivedToken = await exchangeEmbeddedSignupCode(config, code);
+      const longLivedToken = await getLongLivedToken(config, shortLivedToken.access_token);
+      const accessToken = longLivedToken.access_token;
+
+      const verifiedPhone = await verifyPhoneNumber(accessToken, wabaId, phoneNumberId);
+      if (!verifiedPhone) {
+        return reply.status(400).send({
+          success: false,
+          error: { code: 'VERIFICATION_FAILED', message: 'Could not verify the connected phone number' },
+        });
+      }
+
+      await app.prisma.whatsAppCredentials.upsert({
+        where: { tenantId: request.authUser.tenantId },
+        create: {
+          tenantId: request.authUser.tenantId,
+          accessToken: encryptSecret(accessToken),
+          wabaId,
+          businessId,
+          isConfigured: true,
+        },
+        update: {
+          accessToken: encryptSecret(accessToken),
+          wabaId,
+          businessId,
+          isConfigured: true,
+        },
+      });
+
+      const existingPhone = await app.prisma.phoneNumber.findUnique({ where: { metaPhoneId: phoneNumberId } });
+      const phone = existingPhone
+        ? await app.prisma.phoneNumber.update({
+            where: { id: existingPhone.id },
+            data: {
+              phoneNumber: verifiedPhone.display_phone_number,
+              displayName: verifiedPhone.verified_name,
+              wabaId,
+              status: 'connected',
+            },
+          })
+        : await app.prisma.phoneNumber.create({
+            data: {
+              tenantId: request.authUser.tenantId,
+              phoneNumber: verifiedPhone.display_phone_number,
+              displayName: verifiedPhone.verified_name,
+              metaPhoneId: phoneNumberId,
+              wabaId,
+              status: 'connected',
+              canSendMarketing: true,
+              canSendUtility: true,
+              canSendAuth: true,
+            },
+          });
+
+      await setupWebhook(
+        accessToken,
+        wabaId,
+        `${process.env.PUBLIC_API_URL || process.env.API_URL || 'http://localhost:3001'}/webhook`,
+        process.env.META_WEBHOOK_VERIFY_TOKEN || 'whatsapp_webhook_verify_token'
+      );
+
+      return { success: true, data: phone, message: 'WhatsApp connected successfully!' };
+    } catch (err: any) {
+      app.log.error('Embedded signup completion error:', err.response?.data || err.message);
+      return reply.status(400).send({
+        success: false,
+        error: {
+          code: 'EMBEDDED_SIGNUP_FAILED',
+          message: err.response?.data?.error?.message || 'Failed to complete WhatsApp connection',
+        },
+      });
+    }
   });
 
   // ============================================
@@ -505,7 +659,7 @@ export async function registerWhatsAppRoutes(app: FastifyInstance): Promise<void
   // ============================================
   // POST /whatsapp/phone-numbers — Add a phone number with validation
   // ============================================
-  app.post('/whatsapp/phone-numbers', async (request, reply) => {
+  app.post('/whatsapp/phone-numbers', { preHandler: [app.requirePermission('phone_numbers', 'create')] }, async (request, reply) => {
     if (!request.authUser.tenantId) {
       return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
     }
@@ -612,7 +766,7 @@ export async function registerWhatsAppRoutes(app: FastifyInstance): Promise<void
   // ============================================
   // PATCH /whatsapp/phone-numbers/:id — Update phone with full settings
   // ============================================
-  app.patch('/whatsapp/phone-numbers/:id', async (request, reply) => {
+  app.patch('/whatsapp/phone-numbers/:id', { preHandler: [app.requirePermission('phone_numbers', 'update')] }, async (request, reply) => {
     if (!request.authUser.tenantId) {
       return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
     }
@@ -658,24 +812,77 @@ export async function registerWhatsAppRoutes(app: FastifyInstance): Promise<void
   // ============================================
   // DELETE /whatsapp/phone-numbers/:id — Remove phone number
   // ============================================
-  app.delete('/whatsapp/phone-numbers/:id', async (request, reply) => {
+  app.delete('/whatsapp/phone-numbers/:id', { preHandler: [app.requirePermission('phone_numbers', 'delete')] }, async (request, reply) => {
     if (!request.authUser.tenantId) {
       return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
     }
 
     const { id } = z.object({ id: z.string() }).parse(request.params);
 
-    await app.prisma.phoneNumber.deleteMany({
-      where: { id, tenantId: request.authUser.tenantId },
-    });
+    try {
+      await app.prisma.phoneNumber.deleteMany({
+        where: { id, tenantId: request.authUser.tenantId },
+      });
+    } catch (err) {
+      const isFkViolation =
+        (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2003') ||
+        (err instanceof Error && err.message.includes('foreign key constraint'));
+
+      if (isFkViolation) {
+        return reply.status(409).send({
+          success: false,
+          error: {
+            code: 'PHONE_HAS_CONVERSATIONS',
+            message: 'This phone number has existing conversations and cannot be deleted. Delete or reassign those conversations first.',
+          },
+        });
+      }
+      throw err;
+    }
 
     return { success: true, data: { message: 'Phone number removed' } };
   });
 
   // ============================================
+  // POST /whatsapp/phone-numbers/:id/disconnect — Remove the Meta connection
+  // without deleting the row or its conversation/message history. The FK on
+  // Conversation.phoneNumberId deliberately blocks a hard delete once real
+  // conversations exist (so removing a number can never silently wipe out
+  // chat history) — this is the non-destructive alternative for that case:
+  // clear the live credentials/IDs, keep everything else intact.
+  // ============================================
+  app.post('/whatsapp/phone-numbers/:id/disconnect', { preHandler: [app.requirePermission('phone_numbers', 'update')] }, async (request, reply) => {
+    if (!request.authUser.tenantId) {
+      return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
+    }
+
+    const { id } = z.object({ id: z.string() }).parse(request.params);
+
+    const phone = await app.prisma.phoneNumber.findFirst({
+      where: { id, tenantId: request.authUser.tenantId },
+    });
+    if (!phone) {
+      return reply.status(404).send({ success: false, error: { code: 'NOT_FOUND' } });
+    }
+
+    const updated = await app.prisma.phoneNumber.update({
+      where: { id },
+      data: {
+        status: 'disconnected',
+        metaPhoneId: null,
+        metaHolderId: null,
+        wabaId: null,
+        accessToken: null,
+      },
+    });
+
+    return { success: true, data: updated };
+  });
+
+  // ============================================
   // POST /whatsapp/phone-numbers/:id/refresh-quality — Refresh quality score
   // ============================================
-  app.post('/whatsapp/phone-numbers/:id/refresh-quality', async (request, reply) => {
+  app.post('/whatsapp/phone-numbers/:id/refresh-quality', { preHandler: [app.requirePermission('phone_numbers', 'update')] }, async (request, reply) => {
     if (!request.authUser.tenantId) {
       return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
     }
@@ -695,8 +902,10 @@ export async function registerWhatsAppRoutes(app: FastifyInstance): Promise<void
       where: { tenantId: request.authUser.tenantId },
     });
 
-    const token = phone.accessToken || creds?.accessToken || (process.env.META_ACCESS_TOKEN !== 'your-system-user-access-token' ? process.env.META_ACCESS_TOKEN : null);
-    const metaPhoneId = phone.metaPhoneId || (creds as any)?.metaPhoneId || (process.env.META_PHONE_NUMBER_ID !== 'your-phone-number-id' ? process.env.META_PHONE_NUMBER_ID : null);
+    // Tenant-scoped credentials only - no platform-wide env fallback, so an
+    // unconfigured tenant can't piggyback on the platform's own Meta identity.
+    const token = phone.accessToken || (creds?.accessToken ? decryptSecret(creds.accessToken) : null);
+    const metaPhoneId = phone.metaPhoneId || null;
 
     let realQualityScore = phone.qualityScore || 'GREEN';
     let metaStatus = phone.status;
@@ -761,26 +970,52 @@ export async function registerWhatsAppRoutes(app: FastifyInstance): Promise<void
       return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
     }
 
-    const tenant = await app.prisma.tenant.findUnique({
-      where: { id: request.authUser.tenantId },
-      select: { metaBusinessId: true, name: true },
-    });
+    const [tenant, creds, phoneCount, approvedTemplateCount] = await Promise.all([
+      app.prisma.tenant.findUnique({
+        where: { id: request.authUser.tenantId },
+        select: { metaBusinessId: true, name: true },
+      }),
+      app.prisma.whatsAppCredentials.findUnique({ where: { tenantId: request.authUser.tenantId } }),
+      app.prisma.phoneNumber.count({ where: { tenantId: request.authUser.tenantId } }),
+      app.prisma.template.count({ where: { tenantId: request.authUser.tenantId, status: 'APPROVED' } }),
+    ]);
+
+    // These used to be hardcoded `true` regardless of reality (displayNameApproved,
+    // domainVerified) — pull the real business_verification_status from Meta
+    // when credentials are available instead of always claiming success.
+    let businessVerifiedFromMeta: boolean | null = null;
+    if (creds?.accessToken) {
+      const wabaId = await resolveEffectiveWabaId(app.prisma, request.authUser.tenantId, creds.wabaId);
+      if (wabaId) {
+        try {
+          const res = await axios.get(`https://graph.facebook.com/v18.0/${wabaId}`, {
+            params: { access_token: decryptSecret(creds.accessToken), fields: 'business_verification_status' },
+          });
+          businessVerifiedFromMeta = res.data?.business_verification_status === 'verified';
+        } catch {
+          // Leave as null — the DB-derived fallback below still applies.
+        }
+      }
+    }
+
+    const businessVerified = businessVerifiedFromMeta ?? !!tenant?.metaBusinessId;
+    const hasPhone = phoneCount > 0;
 
     return {
       success: true,
       data: {
-        businessVerified: !!tenant?.metaBusinessId,
-        greenTickEnabled: false,
-        displayNameApproved: true,
-        domainVerified: true,
+        businessVerified,
+        greenTickEnabled: businessVerified,
+        displayNameApproved: businessVerified,
+        domainVerified: businessVerified,
         taxIdVerified: false,
         businessName: tenant?.name || 'Your Business',
         taxId: null,
         steps: [
-          { id: 'business', name: 'Business Verification', status: tenant?.metaBusinessId ? 'completed' : 'pending', description: 'Verify your business with Meta' },
-          { id: 'display_name', name: 'Display Name', status: 'completed', description: 'Your display name is under review' },
-          { id: 'phone', name: 'Phone Numbers', status: 'completed', description: 'Connect at least one phone number' },
-          { id: 'template', name: 'Message Templates', status: 'pending', description: 'Submit templates for approval' },
+          { id: 'business', name: 'Business Verification', status: businessVerified ? 'completed' : 'pending', description: 'Verify your business with Meta' },
+          { id: 'display_name', name: 'Display Name', status: hasPhone ? 'completed' : 'pending', description: hasPhone ? 'Your display name is set' : 'Connect a phone number to set a display name' },
+          { id: 'phone', name: 'Phone Numbers', status: hasPhone ? 'completed' : 'pending', description: 'Connect at least one phone number' },
+          { id: 'template', name: 'Message Templates', status: approvedTemplateCount > 0 ? 'completed' : 'pending', description: 'Submit templates for approval' },
         ],
       },
     };
@@ -789,7 +1024,7 @@ export async function registerWhatsAppRoutes(app: FastifyInstance): Promise<void
   // ============================================
   // PATCH /whatsapp/business-verification — Update verification info
   // ============================================
-  app.patch('/whatsapp/business-verification', async (request, reply) => {
+  app.patch('/whatsapp/business-verification', { preHandler: [app.requirePermission('settings', 'update')] }, async (request, reply) => {
     if (!request.authUser.tenantId) {
       return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
     }
@@ -834,7 +1069,9 @@ export async function registerWhatsAppRoutes(app: FastifyInstance): Promise<void
     const startDate = new Date();
     startDate.setDate(startDate.getDate() - days);
 
-    // Get message stats
+    // Get message stats — includes direction/conversationId now so a real
+    // response rate can be computed (was hardcoded to 0 everywhere before,
+    // both in the headline metric and every daily-trend point).
     const messages = await app.prisma.message.findMany({
       where: {
         phoneNumberId: phoneId,
@@ -844,29 +1081,54 @@ export async function registerWhatsAppRoutes(app: FastifyInstance): Promise<void
         status: true,
         readAt: true,
         createdAt: true,
+        direction: true,
+        conversationId: true,
       },
+      orderBy: { createdAt: 'asc' },
     });
 
     const totalMessages = messages.length;
     const delivered = messages.filter(m => m.status === 'DELIVERED' || m.status === 'SENT').length;
     const read = messages.filter(m => m.readAt).length;
 
+    // A "response" is a real inbound message in the same conversation
+    // within 24h of an outbound one — computed from our own message log,
+    // since Meta doesn't expose this as a queryable metric directly.
+    const RESPONSE_WINDOW_MS = 24 * 60 * 60 * 1000;
+    const incomingByConversation = new Map<string, Date[]>();
+    for (const m of messages) {
+      if (m.direction !== 'INCOMING') continue;
+      const arr = incomingByConversation.get(m.conversationId) || [];
+      arr.push(m.createdAt);
+      incomingByConversation.set(m.conversationId, arr);
+    }
+    const gotResponse = (m: (typeof messages)[number]) => {
+      const replies = incomingByConversation.get(m.conversationId) || [];
+      return replies.some(t => t.getTime() > m.createdAt.getTime() && t.getTime() - m.createdAt.getTime() <= RESPONSE_WINDOW_MS);
+    };
+
+    const outgoing = messages.filter(m => m.direction === 'OUTGOING');
+    const responded = outgoing.filter(gotResponse).length;
+    const responseRate = outgoing.length > 0 ? Math.round((responded / outgoing.length) * 100 * 10) / 10 : 0;
+
     // Calculate real historical daily trends from database records
     const dailyTrend = Array.from({ length: days }, (_, i) => {
       const date = new Date();
       date.setDate(date.getDate() - (days - 1 - i));
       const dateStr = date.toISOString().split('T')[0];
-      
+
       const dayMsgs = messages.filter(m => m.createdAt.toISOString().split('T')[0] === dateStr);
       const dayTotal = dayMsgs.length;
       const dayDelivered = dayMsgs.filter(m => m.status === 'DELIVERED' || m.status === 'SENT').length;
       const dayRead = dayMsgs.filter(m => m.readAt).length;
+      const dayOutgoing = dayMsgs.filter(m => m.direction === 'OUTGOING');
+      const dayResponded = dayOutgoing.filter(gotResponse).length;
 
       return {
         date: dateStr,
         deliveryRate: dayTotal > 0 ? Math.round((dayDelivered / dayTotal) * 100) : 100,
         openRate: dayTotal > 0 ? Math.round((dayRead / dayTotal) * 100) : 0,
-        responseRate: 0,
+        responseRate: dayOutgoing.length > 0 ? Math.round((dayResponded / dayOutgoing.length) * 100) : 0,
         blockRate: 0,
       };
     });
@@ -877,13 +1139,16 @@ export async function registerWhatsAppRoutes(app: FastifyInstance): Promise<void
       success: true,
       data: {
         phoneNumber: phone.phoneNumber,
-        qualityScore: phone.qualityScore || 'GREEN',
+        // Was defaulting to 'GREEN' (the best possible score) whenever we
+        // simply hadn't fetched a real one yet — silently overstated quality
+        // instead of admitting it's unknown.
+        qualityScore: phone.qualityScore || 'UNKNOWN',
         period: `${days} days`,
         metrics: {
           totalMessages,
           deliveryRate: totalMessages > 0 ? Math.round((delivered / totalMessages) * 100 * 10) / 10 : 100,
           openRate: totalMessages > 0 ? Math.round((read / totalMessages) * 100 * 10) / 10 : 0,
-          responseRate: 0,
+          responseRate,
           blockRate: totalMessages > 0 ? Math.round((failed / totalMessages) * 100 * 10) / 10 : 0,
           reportRate: 0,
         },
@@ -915,7 +1180,7 @@ export async function registerWhatsAppRoutes(app: FastifyInstance): Promise<void
   // ============================================
   // GET /whatsapp/credentials — Get THIS TENANT's WhatsApp credentials
   // ============================================
-  app.get('/whatsapp/credentials', async (request, reply) => {
+  app.get('/whatsapp/credentials', { preHandler: [app.requirePermission('settings', 'read')] }, async (request, reply) => {
     if (!request.authUser.tenantId) {
       return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
     }
@@ -948,7 +1213,7 @@ export async function registerWhatsAppRoutes(app: FastifyInstance): Promise<void
   // POST /whatsapp/credentials — Save THIS TENANT's WhatsApp credentials
   // Each tenant saves their own credentials - multi-tenant isolation
   // ============================================
-  app.post('/whatsapp/credentials', async (request, reply) => {
+  app.post('/whatsapp/credentials', { preHandler: [app.requirePermission('settings', 'update')] }, async (request, reply) => {
     if (!request.authUser.tenantId) {
       return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
     }
@@ -968,8 +1233,8 @@ export async function registerWhatsAppRoutes(app: FastifyInstance): Promise<void
       where: { tenantId: request.authUser.tenantId },
     });
 
-    const newSecret = body.appSecret && body.appSecret.length >= 10 ? body.appSecret : existing?.appSecret;
-    const newToken = body.accessToken && body.accessToken.length >= 20 ? body.accessToken : existing?.accessToken;
+    const newSecret = body.appSecret && body.appSecret.length >= 10 ? encryptSecret(body.appSecret) : existing?.appSecret;
+    const newToken = body.accessToken && body.accessToken.length >= 20 ? encryptSecret(body.accessToken) : existing?.accessToken;
 
     await app.prisma.whatsAppCredentials.upsert({
       where: { tenantId: request.authUser.tenantId },
@@ -1004,7 +1269,7 @@ export async function registerWhatsAppRoutes(app: FastifyInstance): Promise<void
   // ============================================
   // POST /whatsapp/credentials/test — Test THIS TENANT's credentials
   // ============================================
-  app.post('/whatsapp/credentials/test', async (request, reply) => {
+  app.post('/whatsapp/credentials/test', { preHandler: [app.requirePermission('settings', 'update')] }, async (request, reply) => {
     if (!request.authUser.tenantId) {
       return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
     }
@@ -1022,10 +1287,10 @@ export async function registerWhatsAppRoutes(app: FastifyInstance): Promise<void
       where: { tenantId: request.authUser.tenantId },
     });
 
-    // Use provided credentials or stored ones
+    // Use provided credentials or stored ones (decrypting anything read from storage)
     const appId = body.appId || creds?.appId;
-    const appSecret = body.appSecret || creds?.appSecret;
-    const accessToken = body.accessToken || creds?.accessToken;
+    const appSecret = body.appSecret || decryptIfPresent(creds?.appSecret);
+    const accessToken = body.accessToken || decryptIfPresent(creds?.accessToken);
 
     const isConfigured = !!(appId && accessToken);
 
@@ -1055,7 +1320,7 @@ export async function registerWhatsAppRoutes(app: FastifyInstance): Promise<void
       create: {
         tenantId: request.authUser.tenantId,
         appId,
-        accessToken,
+        accessToken: accessToken ? encryptSecret(accessToken) : undefined,
         isConfigured,
         lastTestedAt: new Date(),
         lastError: apiError,
@@ -1084,33 +1349,89 @@ export async function registerWhatsAppRoutes(app: FastifyInstance): Promise<void
   // ============================================
   // POST /whatsapp/credentials/send-test — Send test message
   // ============================================
-  app.post('/whatsapp/credentials/send-test', async (request, reply) => {
+  app.post('/whatsapp/credentials/send-test', { preHandler: [app.requirePermission('messages', 'send')] }, async (request, reply) => {
     if (!request.authUser.tenantId) {
       return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
     }
 
     const schema = z.object({
       phoneNumberId: z.string(),
-      testPhone: z.string().regex(/^\+?[1-9]\d{6,14}$/).optional(),
+      testPhone: z.string().regex(/^\+?[1-9]\d{6,14}$/),
     });
 
     const body = schema.parse(request.body);
+    const tenantId = request.authUser.tenantId;
 
     const phone = await app.prisma.phoneNumber.findFirst({
-      where: { id: body.phoneNumberId, tenantId: request.authUser.tenantId },
+      where: { id: body.phoneNumberId, tenantId },
     });
 
     if (!phone) {
       return reply.status(404).send({ success: false, error: { code: 'NOT_FOUND' } });
     }
 
-    // In production, this would send via Meta API
+    let contact = await app.prisma.contact.findFirst({
+      where: { tenantId, phone: body.testPhone },
+    });
+    if (!contact) {
+      contact = await app.prisma.contact.create({
+        data: { tenantId, name: body.testPhone, phone: body.testPhone, country: 'IN' },
+      });
+    }
+
+    let conversation = await app.prisma.conversation.findUnique({
+      where: {
+        contactId_phoneNumberId_tenantId: {
+          contactId: contact.id,
+          phoneNumberId: body.phoneNumberId,
+          tenantId,
+        },
+      },
+    });
+    if (!conversation) {
+      conversation = await app.prisma.conversation.create({
+        data: { tenantId, contactId: contact.id, phoneNumberId: body.phoneNumberId, status: 'OPEN' },
+      });
+    }
+
+    const testText = 'This is a test message from Kriscel WA confirming your WhatsApp connection is working.';
+    const message = await app.prisma.message.create({
+      data: {
+        tenantId,
+        conversationId: conversation.id,
+        contactId: contact.id,
+        phoneNumberId: body.phoneNumberId,
+        direction: 'OUTGOING',
+        type: 'TEXT',
+        body: testText,
+        status: 'PENDING',
+      },
+    });
+
+    const { dispatchOutboundMessage } = await import('../services/whatsappService.js');
+    const result = await dispatchOutboundMessage({
+      app,
+      messageId: message.id,
+      tenantId,
+      contactPhone: body.testPhone,
+      phoneNumberId: body.phoneNumberId,
+      body: testText,
+      type: 'text',
+    });
+
+    if (!result.success) {
+      return reply.status(400).send({
+        success: false,
+        error: { code: 'SEND_FAILED', message: result.error || 'Failed to send test message' },
+      });
+    }
+
     return {
       success: true,
       data: {
         message: 'Test message sent',
-        to: body.testPhone || '+1234567890',
-        messageId: `test_${Date.now()}`,
+        to: body.testPhone,
+        messageId: result.metaMessageId,
         sentAt: new Date().toISOString(),
       },
     };
@@ -1124,8 +1445,8 @@ export async function registerWhatsAppRoutes(app: FastifyInstance): Promise<void
       return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
     }
 
-    const webhookUrl = process.env.APP_URL
-      ? `${new URL(process.env.APP_URL).origin}/webhook`
+    const webhookUrl = process.env.PUBLIC_API_URL || process.env.API_URL
+      ? `${new URL(process.env.PUBLIC_API_URL || process.env.API_URL!).origin}/webhook`
       : `http://localhost:${process.env.PORT || 3001}/webhook`;
 
     return { success: true, data: { webhookUrl } };
@@ -1146,17 +1467,36 @@ export async function registerWhatsAppRoutes(app: FastifyInstance): Promise<void
       take: 50,
     }).catch(() => []) || [];
 
+    // Query Meta directly for the app's real webhook subscription — this
+    // used to hardcode every field as always-enabled, which silently lied:
+    // several of these (message_deliveries, message_reads, etc.) are legacy
+    // On-Premises API fields Meta rejects outright for this app's Cloud API
+    // permission tier (confirmed directly against Meta's own API earlier),
+    // so they were never actually subscribed no matter what this showed.
+    let subscribedFields: string[] = [];
+    const appId = process.env.META_APP_ID;
+    const appSecret = process.env.META_APP_SECRET;
+    if (appId && appSecret) {
+      try {
+        const subRes = await axios.get(`https://graph.facebook.com/v18.0/${appId}/subscriptions`, {
+          params: { access_token: `${appId}|${appSecret}` },
+        });
+        const sub = (subRes.data?.data || []).find((s: any) => s.object === 'whatsapp_business_account');
+        subscribedFields = (sub?.fields || []).map((f: any) => f.name);
+      } catch {
+        // Leave subscribedFields empty — surfaced as all-false below rather
+        // than falling back to a guess.
+      }
+    }
+
+    const KNOWN_FIELDS = ['messages', 'message_template_status_update'];
+    const fields: Record<string, boolean> = {};
+    for (const f of KNOWN_FIELDS) fields[f] = subscribedFields.includes(f);
+
     return {
       success: true,
       data: {
-        fields: {
-          messages: true,
-          message_deliveries: true,
-          message_reads: true,
-          message_reactions: true,
-          conversations: true,
-          phone_number_quality: true,
-        },
+        fields,
         retrySettings: {
           maxRetries: 3,
           retryDelay: 300,
@@ -1169,7 +1509,7 @@ export async function registerWhatsAppRoutes(app: FastifyInstance): Promise<void
   // ============================================
   // PATCH /whatsapp/webhook/settings — Update webhook settings
   // ============================================
-  app.patch('/whatsapp/webhook/settings', async (request, reply) => {
+  app.patch('/whatsapp/webhook/settings', { preHandler: [app.requirePermission('settings', 'update')] }, async (request, reply) => {
     if (!request.authUser.tenantId) {
       return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
     }
@@ -1202,7 +1542,7 @@ export async function registerWhatsAppRoutes(app: FastifyInstance): Promise<void
   // ============================================
   // POST /whatsapp/webhook/test — Test webhook
   // ============================================
-  app.post('/whatsapp/webhook/test', async (request, reply) => {
+  app.post('/whatsapp/webhook/test', { preHandler: [app.requirePermission('settings', 'update')] }, async (request, reply) => {
     if (!request.authUser.tenantId) {
       return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
     }
@@ -1223,7 +1563,7 @@ export async function registerWhatsAppRoutes(app: FastifyInstance): Promise<void
   // ============================================
   // POST /whatsapp/phone-numbers/bulk-import — Bulk import phone numbers
   // ============================================
-  app.post('/whatsapp/phone-numbers/bulk-import', async (request, reply) => {
+  app.post('/whatsapp/phone-numbers/bulk-import', { preHandler: [app.requirePermission('phone_numbers', 'create')] }, async (request, reply) => {
     if (!request.authUser.tenantId) {
       return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
     }
@@ -1302,25 +1642,63 @@ export async function registerWhatsAppRoutes(app: FastifyInstance): Promise<void
       select: {
         id: true,
         phoneNumber: true,
+        metaPhoneId: true,
+        accessToken: true,
         dailySentLimit: true,
         todaySentCount: true,
         lastResetAt: true,
       },
     });
 
+    const creds = await app.prisma.whatsAppCredentials.findUnique({ where: { tenantId: request.authUser.tenantId } });
+
+    // Meta doesn't publish a "messages per minute/hour/day" figure at all —
+    // that was a fabricated shape. What Meta actually enforces is a
+    // messaging_limit_tier per phone number (a cap on unique customers
+    // messaged per rolling 24h). Fetch the real tier live instead of
+    // showing the same fictional numbers for every tenant.
+    const TIER_LIMITS: Record<string, number | null> = {
+      TIER_50: 50,
+      TIER_250: 250,
+      TIER_1K: 1000,
+      TIER_10K: 10000,
+      TIER_100K: 100000,
+      TIER_UNLIMITED: null, // null = no cap
+      NOT_ELIGIBLE: 0,
+    };
+
+    const phonesWithTier = await Promise.all(phoneNumbers.map(async (p) => {
+      const resetAt = p.lastResetAt ? new Date(new Date(p.lastResetAt).getTime() + 24 * 60 * 60 * 1000).toISOString() : null;
+      let messagingLimitTier: string | null = null;
+      let messagingLimit: number | null = null;
+
+      const token = p.accessToken || (creds?.accessToken ? decryptSecret(creds.accessToken) : null);
+      if (token && p.metaPhoneId) {
+        try {
+          const res = await axios.get(`https://graph.facebook.com/v18.0/${p.metaPhoneId}`, {
+            params: { access_token: token, fields: 'messaging_limit_tier' },
+          });
+          messagingLimitTier = res.data?.messaging_limit_tier || null;
+          messagingLimit = messagingLimitTier ? TIER_LIMITS[messagingLimitTier] ?? null : null;
+        } catch {
+          // Leave null — surfaced as "not available" rather than a guess.
+        }
+      }
+
+      return {
+        id: p.id,
+        phoneNumber: p.phoneNumber,
+        dailySentLimit: p.dailySentLimit,
+        todaySentCount: p.todaySentCount,
+        resetAt,
+        messagingLimitTier,
+        messagingLimit,
+      };
+    }));
+
     return {
       success: true,
-      data: {
-        global: {
-          messagesPerMinute: 250,
-          messagesPerHour: 5000,
-          messagesPerDay: 100000,
-        },
-        phones: phoneNumbers.map(p => ({
-          ...p,
-          resetAt: p.lastResetAt ? new Date(new Date(p.lastResetAt).getTime() + 24 * 60 * 60 * 1000).toISOString() : null,
-        })),
-      },
+      data: { phones: phonesWithTier },
     };
   });
 
@@ -1404,7 +1782,7 @@ export async function registerWhatsAppRoutes(app: FastifyInstance): Promise<void
   // ============================================
   // PATCH /whatsapp/phone-numbers/:id/settings — Update phone settings
   // ============================================
-  app.patch('/whatsapp/phone-numbers/:id/settings', async (request, reply) => {
+  app.patch('/whatsapp/phone-numbers/:id/settings', { preHandler: [app.requirePermission('phone_numbers', 'update')] }, async (request, reply) => {
     if (!request.authUser.tenantId) {
       return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
     }
@@ -1451,7 +1829,7 @@ export async function registerWhatsAppRoutes(app: FastifyInstance): Promise<void
   // ============================================
   // POST /whatsapp/phone-numbers/:id/quick-replies — Create quick reply
   // ============================================
-  app.post('/whatsapp/phone-numbers/:id/quick-replies', async (request, reply) => {
+  app.post('/whatsapp/phone-numbers/:id/quick-replies', { preHandler: [app.requirePermission('phone_numbers', 'update')] }, async (request, reply) => {
     if (!request.authUser.tenantId) {
       return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
     }
@@ -1504,7 +1882,7 @@ export async function registerWhatsAppRoutes(app: FastifyInstance): Promise<void
   // ============================================
   // DELETE /whatsapp/phone-numbers/:id/quick-replies/:qrId — Delete quick reply
   // ============================================
-  app.delete('/whatsapp/phone-numbers/:id/quick-replies/:qrId', async (request, reply) => {
+  app.delete('/whatsapp/phone-numbers/:id/quick-replies/:qrId', { preHandler: [app.requirePermission('phone_numbers', 'update')] }, async (request, reply) => {
     if (!request.authUser.tenantId) {
       return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
     }
@@ -1614,6 +1992,179 @@ export async function registerWhatsAppRoutes(app: FastifyInstance): Promise<void
     });
 
     return { success: true, data: phones };
+  });
+
+  // ============================================
+  // POST /whatsapp/phone-numbers/:id/register — Register phone with Meta Cloud API
+  // ============================================
+  app.post('/whatsapp/phone-numbers/:id/register', { preHandler: [app.requirePermission('phone_numbers', 'update')] }, async (request, reply) => {
+    if (!request.authUser.tenantId) {
+      return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
+    }
+
+    const { id } = z.object({ id: z.string() }).parse(request.params);
+    const { pin } = z.object({ pin: z.string().min(6).max(6) }).parse(request.body);
+
+    const phone = await app.prisma.phoneNumber.findFirst({
+      where: { id, tenantId: request.authUser.tenantId },
+    });
+    if (!phone) {
+      return reply.status(404).send({ success: false, error: { code: 'NOT_FOUND', message: 'Phone number not found' } });
+    }
+    if (!phone.metaPhoneId) {
+      return reply.status(400).send({ success: false, error: { code: 'NO_META_PHONE_ID', message: 'Phone number is not linked to a Meta Phone Number ID' } });
+    }
+
+    const creds = await app.prisma.whatsAppCredentials.findUnique({ where: { tenantId: request.authUser.tenantId } });
+    const token = phone.accessToken || (creds?.accessToken ? decryptSecret(creds.accessToken) : null);
+    if (!token) {
+      return reply.status(400).send({ success: false, error: { code: 'NO_TOKEN', message: 'No access token configured for this account' } });
+    }
+
+    try {
+      const res = await fetch(`https://graph.facebook.com/v19.0/${phone.metaPhoneId}/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ messaging_product: 'whatsapp', pin }),
+      });
+      const data: any = await res.json();
+
+      if (!res.ok) {
+        const errMsg = data?.error?.message || 'Meta registration failed';
+        const errCode = data?.error?.code;
+        if (errCode === 190) return reply.status(401).send({ success: false, error: { code: 'TOKEN_EXPIRED', message: 'Access token expired. Please reconnect.' } });
+        return reply.status(400).send({ success: false, error: { code: 'META_ERROR', message: errMsg } });
+      }
+
+      await app.prisma.phoneNumber.update({ where: { id }, data: { status: 'verified' } });
+      return { success: true, data: { message: 'Phone number registered successfully with Meta Cloud API' } };
+    } catch (err: any) {
+      return reply.status(500).send({ success: false, error: { code: 'INTERNAL_ERROR', message: err.message } });
+    }
+  });
+
+  // ============================================
+  // POST /whatsapp/phone-numbers/:id/deregister — Deregister phone from Meta Cloud API
+  // ============================================
+  app.post('/whatsapp/phone-numbers/:id/deregister', { preHandler: [app.requirePermission('phone_numbers', 'update')] }, async (request, reply) => {
+    if (!request.authUser.tenantId) {
+      return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
+    }
+
+    const { id } = z.object({ id: z.string() }).parse(request.params);
+
+    const phone = await app.prisma.phoneNumber.findFirst({
+      where: { id, tenantId: request.authUser.tenantId },
+    });
+    if (!phone) {
+      return reply.status(404).send({ success: false, error: { code: 'NOT_FOUND', message: 'Phone number not found' } });
+    }
+    if (!phone.metaPhoneId) {
+      return reply.status(400).send({ success: false, error: { code: 'NO_META_PHONE_ID', message: 'Phone number is not linked to a Meta Phone Number ID' } });
+    }
+
+    const creds = await app.prisma.whatsAppCredentials.findUnique({ where: { tenantId: request.authUser.tenantId } });
+    const token = phone.accessToken || (creds?.accessToken ? decryptSecret(creds.accessToken) : null);
+    if (!token) {
+      return reply.status(400).send({ success: false, error: { code: 'NO_TOKEN', message: 'No access token configured for this account' } });
+    }
+
+    try {
+      const res = await fetch(`https://graph.facebook.com/v19.0/${phone.metaPhoneId}/deregister`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ messaging_product: 'whatsapp' }),
+      });
+      const data: any = await res.json();
+
+      if (!res.ok) {
+        const errMsg = data?.error?.message || 'Meta deregistration failed';
+        return reply.status(400).send({ success: false, error: { code: 'META_ERROR', message: errMsg } });
+      }
+
+      await app.prisma.phoneNumber.update({ where: { id }, data: { status: 'disconnected' } });
+      return { success: true, data: { message: 'Phone number deregistered from Meta Cloud API' } };
+    } catch (err: any) {
+      return reply.status(500).send({ success: false, error: { code: 'INTERNAL_ERROR', message: err.message } });
+    }
+  });
+
+  // ============================================
+  // GET /whatsapp/waba/billing-status — Check Meta Line of Credit / payment setup
+  // ============================================
+  app.get('/whatsapp/waba/billing-status', async (request, reply) => {
+    if (!request.authUser.tenantId) {
+      return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
+    }
+
+    const creds = await app.prisma.whatsAppCredentials.findUnique({ where: { tenantId: request.authUser.tenantId } });
+    const wabaId = creds?.wabaId;
+    const token = creds?.accessToken ? decryptSecret(creds.accessToken) : null;
+
+    if (!wabaId || !token) {
+      return { success: true, data: { configured: false, hasLineOfCredit: false, primaryFundingId: null, wabaId: null } };
+    }
+
+    try {
+      const res = await fetch(
+        `https://graph.facebook.com/v19.0/${wabaId}?fields=id,name,primary_funding_id,payment_configuration_id,currency&access_token=${token}`
+      );
+      const data: any = await res.json();
+
+      if (!res.ok) {
+        return { success: true, data: { configured: true, hasLineOfCredit: false, primaryFundingId: null, wabaId, error: data?.error?.message } };
+      }
+
+      return {
+        success: true,
+        data: {
+          configured: true,
+          hasLineOfCredit: !!data.primary_funding_id,
+          primaryFundingId: data.primary_funding_id || null,
+          paymentConfigId: data.payment_configuration_id || null,
+          currency: data.currency || null,
+          wabaId,
+          wabaName: data.name || null,
+        },
+      };
+    } catch (err: any) {
+      return { success: true, data: { configured: true, hasLineOfCredit: false, primaryFundingId: null, wabaId, error: err.message } };
+    }
+  });
+
+  // ============================================
+  // GET /whatsapp/accounts — List owned + client WABAs via system user token
+  // ============================================
+  app.get('/whatsapp/accounts', async (request, reply) => {
+    if (!request.authUser.tenantId) {
+      return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
+    }
+
+    const systemToken = process.env.WHATSAPP_SYSTEM_USER_TOKEN;
+    const businessId = process.env.META_BUSINESS_ID;
+    if (!systemToken || !businessId) {
+      return reply.status(503).send({ success: false, error: { code: 'NOT_CONFIGURED', message: 'System user token or Business ID not configured' } });
+    }
+
+    try {
+      const fields = 'id,name,currency,owner_business_info,on_behalf_of_business_info';
+      const [ownedRes, clientRes] = await Promise.all([
+        fetch(`https://graph.facebook.com/v19.0/${businessId}/owned_whatsapp_business_accounts?fields=${fields}&limit=20&access_token=${systemToken}`),
+        fetch(`https://graph.facebook.com/v19.0/${businessId}/client_whatsapp_business_accounts?fields=${fields}&limit=20&access_token=${systemToken}`),
+      ]);
+
+      const [ownedData, clientData]: [any, any] = await Promise.all([ownedRes.json(), clientRes.json()]);
+
+      return {
+        success: true,
+        data: {
+          owned: ownedData.data || [],
+          client: clientData.data || [],
+        },
+      };
+    } catch (err: any) {
+      return reply.status(500).send({ success: false, error: { code: 'INTERNAL_ERROR', message: err.message } });
+    }
   });
 
   // ============================================

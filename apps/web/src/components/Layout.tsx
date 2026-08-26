@@ -27,6 +27,7 @@ import { useState } from 'react';
 import clsx from 'clsx';
 import { useQuery } from '@tanstack/react-query';
 import { api } from '../api/client';
+import HeaderAvatar, { AvatarKind } from './HeaderAvatar';
 
 interface LayoutProps {
   children: ReactNode;
@@ -41,7 +42,6 @@ const navItems = {
     { icon: DollarSign, label: 'Billing Analytics', path: '/superadmin/billing' },
     { icon: Ticket, label: 'Tickets', path: '/superadmin/tickets' },
     { icon: Shield, label: 'System', path: '/superadmin/system' },
-    { icon: Settings, label: 'Settings', path: '/superadmin/settings' },
   ],
   client: [
     { icon: Home, label: 'Overview', path: '/' },
@@ -56,22 +56,27 @@ const navItems = {
     { icon: Coins, label: 'Credits', path: '/credits' },
     { icon: MessageSquare, label: 'WhatsApp', path: '/whatsapp' },
     { icon: FileText, label: 'Chatbot Flows', path: '/flows' },
-    { icon: Settings, label: 'Settings', path: '/settings' },
   ],
 };
 
 export default function Layout({ children, variant }: LayoutProps) {
-  const { user, logout } = useAuth();
+  const { user, logout, exitImpersonation } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
 
   const items = navItems[variant];
+  const isImpersonating = !!user?.impersonatedBy;
 
   const handleLogout = () => {
     logout();
     navigate('/login');
+  };
+
+  const handleExitImpersonation = () => {
+    exitImpersonation();
+    navigate('/superadmin/tenants');
   };
 
   return (
@@ -84,8 +89,23 @@ export default function Layout({ children, variant }: LayoutProps) {
         <div className="absolute inset-0 bg-grid-apple" />
       </div>
 
+      {/* Impersonation banner */}
+      {isImpersonating && (
+        <div className="fixed top-0 left-0 right-0 z-40 bg-apple-orange text-white text-sm font-medium px-4 py-2 flex items-center justify-center gap-3 shadow-md">
+          <span>
+            Viewing <strong>{user?.tenantName}</strong> as Superadmin ({user?.impersonatedBy?.name})
+          </span>
+          <button
+            onClick={handleExitImpersonation}
+            className="px-3 py-1 bg-white/20 hover:bg-white/30 rounded-full text-xs font-semibold transition-colors"
+          >
+            Exit impersonation
+          </button>
+        </div>
+      )}
+
       {/* Apple-style Top Header */}
-      <header className="fixed top-0 left-0 right-0 z-30 px-4 pt-3">
+      <header className={clsx('fixed left-0 right-0 z-30 px-4 pt-3', isImpersonating ? 'top-9' : 'top-0')}>
         <div className="glass-nav mx-auto rounded-2xl shadow-apple">
           <div className="flex items-center justify-between h-14 px-5">
             <div className="flex items-center gap-4">
@@ -96,14 +116,12 @@ export default function Layout({ children, variant }: LayoutProps) {
                 <Menu className="w-5 h-5 text-primary-apple" />
               </button>
 
-              {/* Apple-style Logo */}
+              {/* Logo */}
               <div className="flex items-center gap-3 cursor-pointer" onClick={() => navigate('/')}>
-                <div className="w-9 h-9 bg-wa-gradient rounded-xl flex items-center justify-center shadow-wa">
-                  <span className="text-white font-semibold text-sm tracking-tight">WA</span>
-                </div>
+                {user && <HeaderAvatar kind={pickAvatarKind(user.id, user.avatarGender)} />}
                 <div>
-                  <h1 className="font-semibold text-wa-green text-sm leading-tight">WA Meta Auto</h1>
-                  <p className="text-xs text-secondary-apple leading-tight">WhatsApp Business</p>
+                  <h1 className="font-semibold text-wa-green text-sm leading-tight">Kriscel WA</h1>
+                  <p className="text-xs text-secondary-apple leading-tight">Official WhatsApp Partner</p>
                 </div>
               </div>
             </div>
@@ -158,7 +176,8 @@ export default function Layout({ children, variant }: LayoutProps) {
       {/* Apple-style Sidebar */}
       <aside
         className={clsx(
-          'fixed top-20 left-4 bottom-4 w-64 z-30 transition-all duration-300 lg:translate-x-0',
+          'fixed left-4 bottom-4 w-64 z-30 transition-all duration-300 lg:translate-x-0',
+          isImpersonating ? 'top-[7.25rem]' : 'top-20',
           sidebarOpen ? 'translate-x-0' : '-translate-x-full'
         )}
       >
@@ -182,7 +201,7 @@ export default function Layout({ children, variant }: LayoutProps) {
                   className={clsx(
                     'w-full flex items-center gap-3 px-4 py-2.5 rounded-xl text-left transition-all duration-200 text-sm font-medium',
                     isActive
-                      ? 'bg-wa-gradient text-white shadow-wa'
+                      ? 'bg-[#0866FF] text-white shadow-[0_2px_8px_rgba(8,102,255,0.3)]'
                       : 'text-primary-apple hover:bg-black/5'
                   )}
                 >
@@ -220,7 +239,16 @@ export default function Layout({ children, variant }: LayoutProps) {
       )}
 
       {/* Main content */}
-      <main className="pt-24 lg:pl-72 p-6 relative z-10">
+      {/* No z-index here on purpose: `relative` + an explicit z-index
+          together create a new stacking context, which caps every
+          descendant's z-index at that ceiling — including any full-screen
+          modal a page renders inside <main>. That silently let the sidebar
+          (z-30, outside <main> at the root level) paint on top of modals
+          with a nominally higher z-50/60, across every page in the app.
+          `relative` alone (position only, no z-index) doesn't create that
+          trap, so modals inside <main> now compare directly against the
+          sidebar/header in the root stacking context and correctly win. */}
+      <main className={clsx('lg:pl-72 p-6 relative', isImpersonating ? 'pt-32' : 'pt-24')}>
         <div className="w-full mx-auto">{children}</div>
       </main>
     </div>
@@ -283,4 +311,16 @@ function CreditsBar() {
       </button>
     </>
   );
+}
+
+// Uses the real per-account preference (set by a superadmin in the Tenants
+// panel) when available; otherwise falls back to a consistent per-account
+// pick so the same user always sees the same character either way.
+function pickAvatarKind(userId: string, preference?: 'boy' | 'girl' | null): AvatarKind {
+  if (preference === 'boy' || preference === 'girl') return preference;
+  let hash = 0;
+  for (let i = 0; i < userId.length; i++) {
+    hash = (hash * 31 + userId.charCodeAt(i)) | 0;
+  }
+  return Math.abs(hash) % 2 === 0 ? 'boy' : 'girl';
 }
