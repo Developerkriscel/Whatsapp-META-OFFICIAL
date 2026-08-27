@@ -1,4 +1,5 @@
 import { resolveAccessToken } from './credentialEncryption.js';
+import { reserveSendSlot, releaseSendSlot } from './sendQuota.js';
 /**
  * Dispatches an outbound WhatsApp message to Meta Cloud API.
  * Uses tenant credentials if available, falling back to server environment configuration.
@@ -6,6 +7,9 @@ import { resolveAccessToken } from './credentialEncryption.js';
  */
 export async function dispatchOutboundMessage(params) {
     const { app, messageId, tenantId, contactPhone, phoneNumberId, body, type, template } = params;
+    // Tracked so a throw between reserving and completing the send (a network
+    // error mid-fetch, say) doesn't permanently consume quota.
+    let slotReserved = false;
     try {
         // 1. Fetch Tenant's WhatsApp Credentials & Phone Number Record
         const [creds, phoneRecord] = await Promise.all([
@@ -22,6 +26,23 @@ export async function dispatchOutboundMessage(params) {
         const isMock = process.env.WHATSAPP_MOCK_MODE === 'true';
         // 2. If real Meta credentials & phone ID are available, invoke Meta Graph API
         if (token && metaPhoneId && !isMock) {
+            // Claim a slot against this number's daily quota before calling Meta.
+            // Reserving up front (rather than counting successes afterwards) is what
+            // keeps a parallel campaign batch from collectively blowing past the cap.
+            const slot = await reserveSendSlot(app.prisma, phoneNumberId);
+            if (!slot.allowed) {
+                const updated = await app.prisma.message.update({
+                    where: { id: messageId },
+                    data: {
+                        status: 'FAILED',
+                        errorCode: 'DAILY_LIMIT_REACHED',
+                        errorMessage: slot.reason || 'Daily send limit reached',
+                        failedAt: new Date(),
+                    },
+                });
+                return { success: false, status: 'FAILED', error: slot.reason, data: updated };
+            }
+            slotReserved = true;
             const url = `https://graph.facebook.com/v18.0/${metaPhoneId}/messages`;
             const payload = type === 'template' && template
                 ? {
@@ -66,6 +87,9 @@ export async function dispatchOutboundMessage(params) {
             else {
                 const errMessage = responseData?.error?.message || responseData?.message || 'Meta API call failed';
                 const errCode = responseData?.error?.code?.toString() || 'META_API_ERROR';
+                // Meta didn't accept it, so it shouldn't count against the day's quota.
+                await releaseSendSlot(app.prisma, phoneNumberId);
+                slotReserved = false;
                 const updated = await app.prisma.message.update({
                     where: { id: messageId },
                     data: {
@@ -92,6 +116,10 @@ export async function dispatchOutboundMessage(params) {
     }
     catch (err) {
         const errMessage = err?.message || 'Unknown dispatch error';
+        // The send never completed, so give the quota slot back.
+        if (slotReserved) {
+            await releaseSendSlot(app.prisma, phoneNumberId);
+        }
         await app.prisma.message.update({
             where: { id: messageId },
             data: {

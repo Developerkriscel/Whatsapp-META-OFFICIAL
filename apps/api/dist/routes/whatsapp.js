@@ -805,6 +805,44 @@ export async function registerWhatsAppRoutes(app) {
             where: { id },
             data: { qualityScore: realQualityScore, status: metaStatus },
         });
+        // Record this reading so the trend is built from real observations.
+        // PhoneNumberQualityLog existed with exactly these columns but was never
+        // written to, which left /whatsapp/quality/history with nothing to serve.
+        const sevenDaysAgo = new Date();
+        sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+        const recent = await app.prisma.message.findMany({
+            where: { phoneNumberId: id, createdAt: { gte: sevenDaysAgo } },
+            select: { status: true, direction: true, conversationId: true, createdAt: true },
+        });
+        const outgoing = recent.filter(m => m.direction === 'OUTGOING');
+        const accepted = outgoing.filter(m => m.status === 'SENT' || m.status === 'DELIVERED' || m.status === 'READ');
+        // A response is an inbound message arriving in the same conversation within
+        // 24h of one of ours — the same definition the quality report uses.
+        const RESPONSE_WINDOW_MS = 24 * 60 * 60 * 1000;
+        const inboundByConversation = new Map();
+        for (const m of recent) {
+            if (m.direction !== 'INCOMING')
+                continue;
+            const arr = inboundByConversation.get(m.conversationId) || [];
+            arr.push(m.createdAt);
+            inboundByConversation.set(m.conversationId, arr);
+        }
+        const responded = outgoing.filter(m => {
+            const replies = inboundByConversation.get(m.conversationId) || [];
+            return replies.some(t => t > m.createdAt && t.getTime() - m.createdAt.getTime() <= RESPONSE_WINDOW_MS);
+        }).length;
+        await app.prisma.phoneNumberQualityLog.create({
+            data: {
+                phoneNumberId: id,
+                qualityScore: realQualityScore,
+                messagesLast7Days: outgoing.length,
+                deliveryRate: outgoing.length > 0 ? Math.round((accepted.length / outgoing.length) * 1000) / 10 : 0,
+                responseRate: outgoing.length > 0 ? Math.round((responded / outgoing.length) * 1000) / 10 : 0,
+            },
+        }).catch((err) => {
+            // Logging the reading must never fail the refresh itself.
+            console.error(`[quality] could not log reading for phone ${id}:`, err?.message);
+        });
         return {
             success: true,
             data: {
@@ -1644,24 +1682,67 @@ export async function registerWhatsAppRoutes(app) {
         if (!request.authUser.tenantId) {
             return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
         }
-        const { days } = z.object({
+        const { days, phoneId } = z.object({
             days: z.string().optional().transform(v => parseInt(v || '30')),
+            phoneId: z.string().optional(),
         }).parse(request.query);
-        // Generate mock historical data
-        const history = [];
-        const now = new Date();
-        for (let i = days - 1; i >= 0; i--) {
-            const date = new Date(now);
-            date.setDate(date.getDate() - i);
-            history.push({
-                date: date.toISOString().split('T')[0],
-                score: Math.random() > 0.3 ? 'GREEN' : (Math.random() > 0.5 ? 'YELLOW' : 'RED'),
-                messagesSent: Math.floor(Math.random() * 500),
-                deliveryRate: 90 + Math.random() * 10,
-                responseRate: 30 + Math.random() * 40,
-            });
+        const since = new Date();
+        since.setDate(since.getDate() - days);
+        // Scope to this tenant's own phones — the log table is keyed by phone, so
+        // the tenant filter has to come from the phone side.
+        const phones = await app.prisma.phoneNumber.findMany({
+            where: {
+                tenantId: request.authUser.tenantId,
+                ...(phoneId ? { id: phoneId } : {}),
+            },
+            select: { id: true },
+        });
+        if (phones.length === 0) {
+            return { success: true, data: { history: [], readings: 0 } };
         }
-        return { success: true, data: history };
+        const logs = await app.prisma.phoneNumberQualityLog.findMany({
+            where: {
+                phoneNumberId: { in: phones.map(p => p.id) },
+                createdAt: { gte: since },
+            },
+            orderBy: { createdAt: 'asc' },
+            select: {
+                phoneNumberId: true,
+                qualityScore: true,
+                messagesLast7Days: true,
+                deliveryRate: true,
+                responseRate: true,
+                createdAt: true,
+            },
+        });
+        // Quality is refreshed on demand, so a day can hold several readings or
+        // none. Collapse to one point per day (the last reading of that day) and
+        // report only days actually observed rather than padding the gaps — an
+        // invented point is what made the previous version of this endpoint
+        // untrustworthy.
+        const byDay = new Map();
+        for (const log of logs) {
+            byDay.set(log.createdAt.toISOString().split('T')[0], log);
+        }
+        const history = [...byDay.entries()].map(([date, log]) => ({
+            date,
+            score: log.qualityScore,
+            messagesSent: log.messagesLast7Days,
+            deliveryRate: log.deliveryRate,
+            responseRate: log.responseRate,
+        }));
+        return {
+            success: true,
+            data: {
+                history,
+                readings: logs.length,
+                // Lets the UI say "no data yet, refresh quality to start the trend"
+                // instead of rendering an empty chart as though quality were zero.
+                note: history.length === 0
+                    ? 'No quality readings recorded yet for this period.'
+                    : undefined,
+            },
+        };
     });
     // ============================================
     // GET /whatsapp/quality-report — Get overall quality report (all phones)
