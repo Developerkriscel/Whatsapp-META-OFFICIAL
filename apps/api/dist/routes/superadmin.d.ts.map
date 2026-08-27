@@ -1,1 +1,1 @@
-{"version":3,"file":"superadmin.d.ts","sourceRoot":"","sources":["../../src/routes/superadmin.ts"],"names":[],"mappings":"AAEA,OAAO,EAAE,eAAe,EAAE,MAAM,SAAS,CAAC;AAY1C;;GAEG;AACH,wBAAsB,wBAAwB,CAAC,GAAG,EAAE,eAAe,GAAG,OAAO,CAAC,IAAI,CAAC,CA65BlF"}
+{"version":3,"file":"superadmin.d.ts","sourceRoot":"","sources":["../../src/routes/superadmin.ts"],"names":[],"mappings":"AAEA,OAAO,EAAE,eAAe,EAAE,MAAM,SAAS,CAAC;AAY1C;;GAEG;AACH,wBAAsB,wBAAwB,CAAC,GAAG,EAAE,eAAe,GAAG,OAAO,CAAC,IAAI,CAAC,CA6iClF"}

@@ -2,7 +2,7 @@
  * SuperAdmin Credit Routes — Platform-wide credit management
  */
 import { z } from 'zod';
-import { addCredits, getTenantCreditInfo, seedCreditRates } from '../services/creditService.js';
+import { addCredits, getTenantCreditInfo, seedCreditRates, creditsToUsd } from '../services/creditService.js';
 import { requireSuperadmin, createAuditLog } from '../middleware/auth.js';
 export async function registerSuperadminCreditRoutes(app) {
     // Apply superadmin auth to all routes in this module
@@ -70,7 +70,7 @@ export async function registerSuperadminCreditRoutes(app) {
                     balance: info?.balance || 0,
                     totalPurchased: info?.totalPurchased || 0,
                     totalUsed: info?.totalUsed || 0,
-                    balanceUsd: ((info?.balance || 0) / 100).toFixed(2),
+                    balanceUsd: creditsToUsd(info?.balance || 0).toFixed(2),
                 },
                 transactions: (info?.transactions || []).map((t) => ({
                     id: t.id,
@@ -109,7 +109,7 @@ export async function registerSuperadminCreditRoutes(app) {
             resource: 'credits',
             resourceId: tenantId,
             tenantId,
-            metadata: { amount: body.amount, type: body.type, newBalance: result.balanceAfter },
+            metadata: { amount: body.amount, type: body.type, newBalance: result.balanceAfter, reason: body.description || `${body.type} credits` },
             ipAddress: request.ip,
             userAgent: request.headers['user-agent'],
         });
@@ -118,7 +118,7 @@ export async function registerSuperadminCreditRoutes(app) {
             data: {
                 creditsAdded: body.amount,
                 balanceAfter: result.balanceAfter,
-                balanceUsd: (result.balanceAfter / 100).toFixed(2),
+                balanceUsd: creditsToUsd(result.balanceAfter).toFixed(2),
             },
         };
     });
@@ -144,7 +144,7 @@ export async function registerSuperadminCreditRoutes(app) {
             resource: 'credits',
             resourceId: tenantId,
             tenantId,
-            metadata: { amount: body.amount, newBalance: result.balanceAfter },
+            metadata: { amount: -body.amount, newBalance: result.balanceAfter, reason: body.description || 'Manual deduction by admin' },
             ipAddress: request.ip,
             userAgent: request.headers['user-agent'],
         });
@@ -223,17 +223,17 @@ export async function registerSuperadminCreditRoutes(app) {
             success: true,
             data: {
                 totalCredits: totalCredits._sum.balance || 0,
-                totalCreditsUsd: ((totalCredits._sum.balance || 0) / 100).toFixed(2),
+                totalCreditsUsd: creditsToUsd(totalCredits._sum.balance || 0).toFixed(2),
                 totalPurchased: totalPurchased._sum.totalPurchased || 0,
-                totalPurchasedUsd: ((totalPurchased._sum.totalPurchased || 0) / 100).toFixed(2),
+                totalPurchasedUsd: creditsToUsd(totalPurchased._sum.totalPurchased || 0).toFixed(2),
                 totalUsed: totalUsed._sum.totalUsed || 0,
-                totalUsedUsd: ((totalUsed._sum.totalUsed || 0) / 100).toFixed(2),
+                totalUsedUsd: creditsToUsd(totalUsed._sum.totalUsed || 0).toFixed(2),
                 topTenants: topTenants.map((t) => ({
                     tenantId: t.tenantId,
                     name: t.tenant.name,
                     billingEmail: t.tenant.billingEmail,
                     balance: t.balance,
-                    balanceUsd: (t.balance / 100).toFixed(2),
+                    balanceUsd: creditsToUsd(t.balance).toFixed(2),
                 })),
             },
         };

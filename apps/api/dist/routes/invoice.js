@@ -6,7 +6,7 @@ export async function registerInvoiceRoutes(app) {
     // ============================================
     // GET /billing/invoices/:invoiceId/pdf - Download PDF
     // ============================================
-    app.get('/billing/invoices/:invoiceId/pdf', async (request, reply) => {
+    app.get('/billing/invoices/:invoiceId/pdf', { preHandler: [app.requirePermission('billing', 'read')] }, async (request, reply) => {
         if (!request.authUser.tenantId) {
             return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
         }
@@ -70,6 +70,8 @@ export async function registerInvoiceRoutes(app) {
                 number: invoiceNumber,
                 status: 'pending',
                 amount: body.amount,
+                subtotal: body.amount,
+                netAmount: body.amount,
                 periodStart: body.periodStart ? new Date(body.periodStart) : new Date(),
                 periodEnd: body.periodEnd ? new Date(body.periodEnd) : new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
                 dueDate: body.dueDate ? new Date(body.dueDate) : new Date(Date.now() + 14 * 24 * 60 * 60 * 1000),

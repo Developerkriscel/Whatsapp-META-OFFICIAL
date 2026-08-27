@@ -170,7 +170,7 @@ export async function registerCreditRoutes(app) {
     // ============================================
     // PURCHASE CREDITS — Buy credit pack
     // ============================================
-    app.post('/credits/purchase', async (request, reply) => {
+    app.post('/credits/purchase', { preHandler: [app.requirePermission('billing', 'update')] }, async (request, reply) => {
         if (!request.authUser?.tenantId) {
             return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
         }
@@ -231,7 +231,7 @@ export async function registerCreditRoutes(app) {
     // ============================================
     // ADD BONUS CREDITS — Free/trial credits
     // ============================================
-    app.post('/credits/bonus', async (request, reply) => {
+    app.post('/credits/bonus', { preHandler: [app.requirePermission('billing', 'update')] }, async (request, reply) => {
         if (!request.authUser?.tenantId) {
             return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
         }

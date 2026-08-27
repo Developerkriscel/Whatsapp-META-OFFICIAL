@@ -7,6 +7,11 @@ export interface DispatchMessageParams {
     phoneNumberId: string;
     body: string;
     type?: 'text' | 'template';
+    template?: {
+        name: string;
+        language: string;
+        components: any[];
+    };
 }
 /**
  * Dispatches an outbound WhatsApp message to Meta Cloud API.

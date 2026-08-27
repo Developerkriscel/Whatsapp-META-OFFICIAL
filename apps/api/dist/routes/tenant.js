@@ -1300,6 +1300,8 @@ export async function registerTenantRoutes(app) {
             segmentIds: z.array(z.string()).optional(),
             contactIds: z.array(z.string()).optional(),
             scheduledAt: z.string().datetime().nullable().optional(),
+            mediaUrl: z.string().url().nullable().optional(),
+            mediaPath: z.string().nullable().optional(),
         });
         const body = schema.parse(request.body);
         // Validate segment/contact selection based on audience type
@@ -1347,6 +1349,8 @@ export async function registerTenantRoutes(app) {
                 segmentIds: body.segmentIds || [],
                 contactIds: body.contactIds || [],
                 totalRecipients,
+                mediaUrl: body.mediaUrl ?? null,
+                mediaPath: body.mediaPath ?? null,
                 scheduledAt: body.scheduledAt ? new Date(body.scheduledAt) : null,
                 status: body.scheduledAt ? 'SCHEDULED' : 'DRAFT',
                 createdById: request.authUser.id,
@@ -1541,6 +1545,8 @@ export async function registerTenantRoutes(app) {
             phoneNumberId: z.string().nullable().optional(),
             audienceType: z.enum(['all', 'segment', 'contacts']).optional(),
             scheduledAt: z.string().nullable().optional(),
+            mediaUrl: z.string().url().nullable().optional(),
+            mediaPath: z.string().nullable().optional(),
         }).parse(request.body);
         const campaign = await app.prisma.campaign.findUnique({
             where: { id: campaignId, tenantId: request.authUser.tenantId },
@@ -1555,6 +1561,8 @@ export async function registerTenantRoutes(app) {
                 ...(body.templateId !== undefined && { templateId: body.templateId }),
                 ...(body.phoneNumberId !== undefined && { phoneNumberId: body.phoneNumberId }),
                 ...(body.audienceType && { audienceType: body.audienceType }),
+                ...(body.mediaUrl !== undefined && { mediaUrl: body.mediaUrl }),
+                ...(body.mediaPath !== undefined && { mediaPath: body.mediaPath }),
                 ...(body.scheduledAt !== undefined && {
                     scheduledAt: body.scheduledAt ? new Date(body.scheduledAt) : null,
                     status: body.scheduledAt ? 'SCHEDULED' : campaign.status,
@@ -1568,9 +1576,19 @@ export async function registerTenantRoutes(app) {
             return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
         }
         const { campaignId } = z.object({ campaignId: z.string() }).parse(request.params);
+        // Read the media path before the row goes away, otherwise the uploaded file
+        // is orphaned on disk with nothing left pointing at it.
+        const existing = await app.prisma.campaign.findFirst({
+            where: { id: campaignId, tenantId: request.authUser.tenantId },
+            select: { mediaPath: true },
+        });
         await app.prisma.campaign.deleteMany({
             where: { id: campaignId, tenantId: request.authUser.tenantId },
         });
+        if (existing?.mediaPath) {
+            const { deleteCampaignMedia } = await import('./uploads.js');
+            await deleteCampaignMedia(existing.mediaPath);
+        }
         return { success: true, data: { message: 'Campaign deleted' } };
     });
     // ============================================
@@ -3154,6 +3172,49 @@ export async function createNotification(prisma, data) {
 // ============================================
 // Campaign Message Sender
 // ============================================
+/**
+ * Maps a media URL to the Meta header parameter shape for its type. Meta keys
+ * the parameter by media kind rather than accepting a generic "url", so the
+ * extension decides which of image/video/document to send.
+ */
+function mediaHeaderParameter(mediaUrl) {
+    const ext = mediaUrl.split('?')[0].split('.').pop()?.toLowerCase() || '';
+    if (['mp4', '3gp'].includes(ext)) {
+        return { type: 'video', video: { link: mediaUrl } };
+    }
+    if (ext === 'pdf') {
+        return { type: 'document', document: { link: mediaUrl } };
+    }
+    return { type: 'image', image: { link: mediaUrl } };
+}
+/**
+ * Removes a campaign's uploaded header media once it can no longer be needed.
+ * Meta fetches the file during the send, so this must run only after the
+ * campaign reaches a terminal state — never mid-send.
+ */
+async function cleanUpCampaignMedia(app, campaignId) {
+    try {
+        const campaign = await app.prisma.campaign.findUnique({
+            where: { id: campaignId },
+            select: { mediaPath: true },
+        });
+        if (!campaign?.mediaPath)
+            return;
+        const { deleteCampaignMedia } = await import('./uploads.js');
+        await deleteCampaignMedia(campaign.mediaPath);
+        // Drop the now-dangling URL too, so the UI stops offering a dead link.
+        await app.prisma.campaign.update({
+            where: { id: campaignId },
+            data: { mediaUrl: null, mediaPath: null },
+        });
+        console.log(`[Campaign] ${campaignId} media cleaned up`);
+    }
+    catch (err) {
+        // Cleanup is housekeeping — a failure here must never change the campaign's
+        // outcome, so it is logged and swallowed.
+        console.error(`[Campaign] ${campaignId} media cleanup failed:`, err?.message);
+    }
+}
 export async function sendCampaignMessages(app, campaignId, tenantId) {
     try {
         await sendCampaignMessagesInner(app, campaignId, tenantId);
@@ -3168,6 +3229,11 @@ export async function sendCampaignMessages(app, campaignId, tenantId) {
             where: { id: campaignId },
             data: { status: 'FAILED', completedAt: new Date() },
         }).catch(() => { });
+    }
+    finally {
+        // Runs for both the success and failure paths — a campaign that died
+        // partway through still leaves an uploaded file that nothing will use.
+        await cleanUpCampaignMedia(app, campaignId);
     }
 }
 async function sendCampaignMessagesInner(app, campaignId, tenantId) {
@@ -3287,17 +3353,25 @@ async function sendCampaignMessagesInner(app, campaignId, tenantId) {
                 // There's no per-contact variable-mapping UI yet, so every {{n}} is
                 // filled with the contact's name as a reasonable default.
                 const variableCount = new Set([...messageBody.matchAll(/\{\{(\d+)\}\}/g)].map((m) => m[1])).size;
-                const components = variableCount > 0
-                    ? [
-                        {
-                            type: 'body',
-                            parameters: Array.from({ length: variableCount }, () => ({
-                                type: 'text',
-                                text: contact.name || contact.phone,
-                            })),
-                        },
-                    ]
-                    : [];
+                const components = [];
+                // A header component only belongs on the payload when the campaign
+                // actually carries media — Meta rejects a header on a template whose
+                // approved definition has none.
+                if (campaign.mediaUrl) {
+                    components.push({
+                        type: 'header',
+                        parameters: [mediaHeaderParameter(campaign.mediaUrl)],
+                    });
+                }
+                if (variableCount > 0) {
+                    components.push({
+                        type: 'body',
+                        parameters: Array.from({ length: variableCount }, () => ({
+                            type: 'text',
+                            text: contact.name || contact.phone,
+                        })),
+                    });
+                }
                 // Create the message record first (PENDING), then dispatch — mirrors
                 // the already-verified-working /messages/send path, which uses each
                 // tenant's own connected credentials rather than a shared platform

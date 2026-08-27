@@ -1,1 +1,1 @@
-{"version":3,"file":"invoice.d.ts","sourceRoot":"","sources":["../../src/routes/invoice.ts"],"names":[],"mappings":"AAAA;;GAEG;AAEH,OAAO,EAAE,eAAe,EAAE,MAAM,SAAS,CAAC;AAG1C,wBAAsB,qBAAqB,CAAC,GAAG,EAAE,eAAe,GAAG,OAAO,CAAC,IAAI,CAAC,CA8F/E"}
+{"version":3,"file":"invoice.d.ts","sourceRoot":"","sources":["../../src/routes/invoice.ts"],"names":[],"mappings":"AAAA;;GAEG;AAEH,OAAO,EAAE,eAAe,EAAE,MAAM,SAAS,CAAC;AAG1C,wBAAsB,qBAAqB,CAAC,GAAG,EAAE,eAAe,GAAG,OAAO,CAAC,IAAI,CAAC,CAgG/E"}

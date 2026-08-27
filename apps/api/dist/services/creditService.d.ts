@@ -87,6 +87,7 @@ export declare function deductCredits(prisma: PrismaClient, tenantId: string, am
     balanceAfter: number;
     error?: string;
 }>;
+export declare function maybeAutoRecharge(prisma: PrismaClient, tenantId: string, balanceAfter: number): Promise<void>;
 export declare function addCredits(prisma: PrismaClient, tenantId: string, amount: number, type: 'PURCHASE' | 'BONUS' | 'REFUND' | 'ADJUSTMENT', referenceId?: string, description?: string): Promise<{
     success: boolean;
     balanceAfter: number;

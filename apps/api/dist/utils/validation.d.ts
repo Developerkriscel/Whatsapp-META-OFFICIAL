@@ -160,8 +160,8 @@ export declare const createCampaignSchema: z.ZodObject<{
     message?: string | undefined;
     phoneNumberId?: string | undefined;
     templateId?: string | undefined;
-    segmentIds?: string[] | undefined;
     contactIds?: string[] | undefined;
+    segmentIds?: string[] | undefined;
     scheduledAt?: string | undefined;
 }, {
     name: string;
@@ -169,8 +169,8 @@ export declare const createCampaignSchema: z.ZodObject<{
     message?: string | undefined;
     phoneNumberId?: string | undefined;
     templateId?: string | undefined;
-    segmentIds?: string[] | undefined;
     contactIds?: string[] | undefined;
+    segmentIds?: string[] | undefined;
     scheduledAt?: string | undefined;
 }>;
 export declare const updateCampaignSchema: z.ZodObject<{
@@ -216,7 +216,7 @@ export declare const createTemplateSchema: z.ZodObject<{
     name: string;
     category: "MARKETING" | "UTILITY" | "AUTHENTICATION";
     language: string;
-    headerType: "text" | "image" | "video" | "document" | "none";
+    headerType: "none" | "text" | "image" | "video" | "document";
     buttons?: {
         type: "url" | "phone" | "quick_reply";
         text: string;
@@ -224,8 +224,8 @@ export declare const createTemplateSchema: z.ZodObject<{
         phone?: string | undefined;
     }[] | undefined;
     headerText?: string | undefined;
-    headerMediaUrl?: string | undefined;
     footerText?: string | undefined;
+    headerMediaUrl?: string | undefined;
 }, {
     body: string;
     name: string;
@@ -237,22 +237,22 @@ export declare const createTemplateSchema: z.ZodObject<{
         url?: string | undefined;
         phone?: string | undefined;
     }[] | undefined;
-    headerType?: "text" | "image" | "video" | "document" | "none" | undefined;
     headerText?: string | undefined;
-    headerMediaUrl?: string | undefined;
     footerText?: string | undefined;
+    headerType?: "none" | "text" | "image" | "video" | "document" | undefined;
+    headerMediaUrl?: string | undefined;
 }>;
 export declare const segmentConditionSchema: z.ZodObject<{
     field: z.ZodEnum<["tags", "city", "country", "lastMessageAt", "createdAt", "messagesSent", "language", "company"]>;
     operator: z.ZodEnum<["equals", "not_equals", "contains", "not_contains", "starts_with", "ends_with", "is_empty", "is_not_empty", "gt", "lt", "within_days"]>;
     value: z.ZodOptional<z.ZodUnion<[z.ZodString, z.ZodNumber]>>;
 }, "strip", z.ZodTypeAny, {
-    field: "createdAt" | "tags" | "lastMessageAt" | "company" | "city" | "country" | "language" | "messagesSent";
-    operator: "gt" | "lt" | "equals" | "contains" | "not_equals" | "not_contains" | "starts_with" | "ends_with" | "is_empty" | "is_not_empty" | "within_days";
+    field: "createdAt" | "tags" | "company" | "language" | "city" | "country" | "lastMessageAt" | "messagesSent";
+    operator: "gt" | "equals" | "not_equals" | "contains" | "not_contains" | "starts_with" | "ends_with" | "is_empty" | "is_not_empty" | "lt" | "within_days";
     value?: string | number | undefined;
 }, {
-    field: "createdAt" | "tags" | "lastMessageAt" | "company" | "city" | "country" | "language" | "messagesSent";
-    operator: "gt" | "lt" | "equals" | "contains" | "not_equals" | "not_contains" | "starts_with" | "ends_with" | "is_empty" | "is_not_empty" | "within_days";
+    field: "createdAt" | "tags" | "company" | "language" | "city" | "country" | "lastMessageAt" | "messagesSent";
+    operator: "gt" | "equals" | "not_equals" | "contains" | "not_contains" | "starts_with" | "ends_with" | "is_empty" | "is_not_empty" | "lt" | "within_days";
     value?: string | number | undefined;
 }>;
 export declare const createSegmentSchema: z.ZodObject<{
@@ -263,20 +263,20 @@ export declare const createSegmentSchema: z.ZodObject<{
         operator: z.ZodEnum<["equals", "not_equals", "contains", "not_contains", "starts_with", "ends_with", "is_empty", "is_not_empty", "gt", "lt", "within_days"]>;
         value: z.ZodOptional<z.ZodUnion<[z.ZodString, z.ZodNumber]>>;
     }, "strip", z.ZodTypeAny, {
-        field: "createdAt" | "tags" | "lastMessageAt" | "company" | "city" | "country" | "language" | "messagesSent";
-        operator: "gt" | "lt" | "equals" | "contains" | "not_equals" | "not_contains" | "starts_with" | "ends_with" | "is_empty" | "is_not_empty" | "within_days";
+        field: "createdAt" | "tags" | "company" | "language" | "city" | "country" | "lastMessageAt" | "messagesSent";
+        operator: "gt" | "equals" | "not_equals" | "contains" | "not_contains" | "starts_with" | "ends_with" | "is_empty" | "is_not_empty" | "lt" | "within_days";
         value?: string | number | undefined;
     }, {
-        field: "createdAt" | "tags" | "lastMessageAt" | "company" | "city" | "country" | "language" | "messagesSent";
-        operator: "gt" | "lt" | "equals" | "contains" | "not_equals" | "not_contains" | "starts_with" | "ends_with" | "is_empty" | "is_not_empty" | "within_days";
+        field: "createdAt" | "tags" | "company" | "language" | "city" | "country" | "lastMessageAt" | "messagesSent";
+        operator: "gt" | "equals" | "not_equals" | "contains" | "not_contains" | "starts_with" | "ends_with" | "is_empty" | "is_not_empty" | "lt" | "within_days";
         value?: string | number | undefined;
     }>, "many">;
     matchType: z.ZodDefault<z.ZodEnum<["ALL", "ANY"]>>;
 }, "strip", z.ZodTypeAny, {
     name: string;
     conditions: {
-        field: "createdAt" | "tags" | "lastMessageAt" | "company" | "city" | "country" | "language" | "messagesSent";
-        operator: "gt" | "lt" | "equals" | "contains" | "not_equals" | "not_contains" | "starts_with" | "ends_with" | "is_empty" | "is_not_empty" | "within_days";
+        field: "createdAt" | "tags" | "company" | "language" | "city" | "country" | "lastMessageAt" | "messagesSent";
+        operator: "gt" | "equals" | "not_equals" | "contains" | "not_contains" | "starts_with" | "ends_with" | "is_empty" | "is_not_empty" | "lt" | "within_days";
         value?: string | number | undefined;
     }[];
     matchType: "ALL" | "ANY";
@@ -284,8 +284,8 @@ export declare const createSegmentSchema: z.ZodObject<{
 }, {
     name: string;
     conditions: {
-        field: "createdAt" | "tags" | "lastMessageAt" | "company" | "city" | "country" | "language" | "messagesSent";
-        operator: "gt" | "lt" | "equals" | "contains" | "not_equals" | "not_contains" | "starts_with" | "ends_with" | "is_empty" | "is_not_empty" | "within_days";
+        field: "createdAt" | "tags" | "company" | "language" | "city" | "country" | "lastMessageAt" | "messagesSent";
+        operator: "gt" | "equals" | "not_equals" | "contains" | "not_contains" | "starts_with" | "ends_with" | "is_empty" | "is_not_empty" | "lt" | "within_days";
         value?: string | number | undefined;
     }[];
     description?: string | undefined;
@@ -434,14 +434,14 @@ export declare const paginationSchema: z.ZodObject<{
     order: z.ZodDefault<z.ZodEnum<["asc", "desc"]>>;
 }, "strip", z.ZodTypeAny, {
     limit: number;
-    page: number;
     order: "asc" | "desc";
+    page: number;
     sort?: string | undefined;
 }, {
     limit?: number | undefined;
     sort?: string | undefined;
-    page?: number | undefined;
     order?: "asc" | "desc" | undefined;
+    page?: number | undefined;
 }>;
 export declare const dateRangeSchema: z.ZodObject<{
     start: z.ZodOptional<z.ZodString>;

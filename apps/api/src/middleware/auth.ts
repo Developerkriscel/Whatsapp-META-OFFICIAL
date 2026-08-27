@@ -59,6 +59,12 @@ const PUBLIC_ROUTES = [
   '/api/v1/meta/data-deletion-status',
   '/api/v1/meta/deauthorize',
   '/api/v1/data-deletion-instructions',
+  // Campaign header media. Meta fetches these from its own servers with no
+  // credentials of ours, so the files have to be readable anonymously. Names
+  // are unguessable UUIDs and each file is deleted once its campaign finishes.
+  // Note this covers only GETs of already-uploaded files — the upload endpoint
+  // itself lives under /api/v1/uploads/ and stays authenticated.
+  '/uploads/campaign-media/',
 ];
 
 /**

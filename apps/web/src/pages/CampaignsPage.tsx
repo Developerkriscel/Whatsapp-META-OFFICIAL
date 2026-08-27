@@ -145,12 +145,52 @@ export default function CampaignsPage() {
     phoneNumberId: '',
     message: '',
     mediaUrl: '',
+    // Set only for files uploaded to our server; the backend uses it to delete
+    // the file once the campaign finishes. Pasted URLs leave this empty.
+    mediaPath: '',
     scheduleType: 'now' as 'now' | 'scheduled',
     scheduledAt: '',
     timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
   });
   const [showMediaInput, setShowMediaInput] = useState(false);
+  const [mediaUploading, setMediaUploading] = useState(false);
+  const [mediaError, setMediaError] = useState('');
+  const [mediaName, setMediaName] = useState('');
   const messageTextareaRef = useRef<HTMLTextAreaElement>(null);
+  const mediaFileRef = useRef<HTMLInputElement>(null);
+
+  const uploadMediaFile = async (file: File) => {
+    setMediaError('');
+    setMediaUploading(true);
+    try {
+      const body = new FormData();
+      body.append('file', file);
+      const res = await api.post('/uploads/campaign-media', body, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+      });
+      const uploaded = res.data?.data;
+      setForm((f) => ({ ...f, mediaUrl: uploaded.url, mediaPath: uploaded.path }));
+      setMediaName(uploaded.originalName || file.name);
+    } catch (err: any) {
+      setMediaError(err?.response?.data?.error?.message || 'Upload failed. Please try again.');
+    } finally {
+      setMediaUploading(false);
+      // Clear the input so re-picking the same file still fires onChange.
+      if (mediaFileRef.current) mediaFileRef.current.value = '';
+    }
+  };
+
+  const clearMedia = async () => {
+    const orphan = form.mediaPath;
+    setForm((f) => ({ ...f, mediaUrl: '', mediaPath: '' }));
+    setMediaName('');
+    setMediaError('');
+    // Remove the file now rather than waiting for a campaign that may never be
+    // created — otherwise a user who uploads then changes their mind leaks it.
+    if (orphan) {
+      await api.delete(`/uploads/campaign-media/${orphan}`).catch(() => {});
+    }
+  };
 
   // Fetch campaigns
   const { data, isLoading } = useQuery({
@@ -351,11 +391,15 @@ export default function CampaignsPage() {
       phoneNumberId: '',
       message: '',
       mediaUrl: '',
+      mediaPath: '',
       scheduleType: 'now',
       scheduledAt: '',
       timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
     });
     setShowMediaInput(false);
+    setMediaName('');
+    setMediaError('');
+    setMediaUploading(false);
   };
 
   // Handle next step with validation
@@ -399,6 +443,7 @@ export default function CampaignsPage() {
       segmentIds,
       contactIds,
       ...(form.mediaUrl ? { mediaUrl: form.mediaUrl } : {}),
+      ...(form.mediaPath ? { mediaPath: form.mediaPath } : {}),
     };
   };
 
@@ -1019,22 +1064,88 @@ export default function CampaignsPage() {
                 </button>
               </div>
               {showMediaInput && (
-                <div className="mt-2 flex gap-2 items-center">
+                <div className="mt-2 space-y-2">
                   <input
-                    type="url"
-                    value={form.mediaUrl}
-                    onChange={(e) => setForm({ ...form, mediaUrl: e.target.value })}
-                    placeholder="https://example.com/image.jpg"
-                    className="input-apple flex-1 text-sm"
+                    ref={mediaFileRef}
+                    type="file"
+                    accept="image/jpeg,image/png,video/mp4,video/3gpp,application/pdf"
+                    className="hidden"
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      if (file) uploadMediaFile(file);
+                    }}
                   />
-                  {form.mediaUrl && (
-                    <button
-                      type="button"
-                      onClick={() => setForm({ ...form, mediaUrl: '' })}
-                      className="text-ios-muted hover:text-apple-red transition"
-                    >
-                      <X className="w-4 h-4" />
-                    </button>
+
+                  {form.mediaUrl ? (
+                    <div className="flex items-center gap-3 p-3 rounded-xl border border-wa-green/30 bg-wa-green/5">
+                      {/\.(jpg|jpeg|png)$/i.test(form.mediaUrl) ? (
+                        <img
+                          src={form.mediaUrl}
+                          alt="Campaign media preview"
+                          className="w-12 h-12 rounded-lg object-cover flex-shrink-0"
+                        />
+                      ) : (
+                        <div className="w-12 h-12 rounded-lg bg-wa-green/15 flex items-center justify-center flex-shrink-0">
+                          <Image className="w-5 h-5 text-wa-green" />
+                        </div>
+                      )}
+                      <div className="min-w-0 flex-1">
+                        <p className="text-sm text-ios-dark truncate">{mediaName || 'Attached media'}</p>
+                        <p className="text-xs text-ios-muted">
+                          {form.mediaPath ? 'Uploaded — removed automatically after the campaign sends' : 'External URL'}
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={clearMedia}
+                        className="text-ios-muted hover:text-apple-red transition flex-shrink-0"
+                        aria-label="Remove media"
+                      >
+                        <X className="w-4 h-4" />
+                      </button>
+                    </div>
+                  ) : (
+                    <>
+                      <button
+                        type="button"
+                        disabled={mediaUploading}
+                        onClick={() => mediaFileRef.current?.click()}
+                        className="w-full flex items-center justify-center gap-2 p-4 rounded-xl border-2 border-dashed border-ios-muted/30 hover:border-wa-green/50 hover:bg-wa-green/5 transition text-sm text-ios-muted disabled:opacity-60"
+                      >
+                        {mediaUploading ? (
+                          <>
+                            <Loader2 className="w-4 h-4 animate-spin" />
+                            Uploading…
+                          </>
+                        ) : (
+                          <>
+                            <Image className="w-4 h-4" />
+                            Choose a file — JPG, PNG, MP4, 3GP or PDF
+                          </>
+                        )}
+                      </button>
+
+                      <div className="flex items-center gap-2">
+                        <div className="h-px flex-1 bg-ios-muted/20" />
+                        <span className="text-xs text-ios-muted">or paste a URL</span>
+                        <div className="h-px flex-1 bg-ios-muted/20" />
+                      </div>
+
+                      <input
+                        type="url"
+                        value={form.mediaUrl}
+                        onChange={(e) => setForm({ ...form, mediaUrl: e.target.value, mediaPath: '' })}
+                        placeholder="https://example.com/image.jpg"
+                        className="input-apple w-full text-sm"
+                      />
+                    </>
+                  )}
+
+                  {mediaError && (
+                    <p className="text-xs text-apple-red flex items-center gap-1">
+                      <AlertCircle className="w-3 h-3 flex-shrink-0" />
+                      {mediaError}
+                    </p>
                   )}
                 </div>
               )}

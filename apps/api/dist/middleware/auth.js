@@ -5,6 +5,10 @@ import { hasPermission } from '@whatsapp-saas/config/rbac';
 // Public routes that don't require authentication
 const PUBLIC_ROUTES = [
     '/health',
+    '/api/ready',
+    '/api/live',
+    '/api/health/detailed',
+    '/api/metrics',
     '/api/v1/auth/login',
     '/api/v1/auth/register',
     '/api/v1/auth/forgot-password',
@@ -17,6 +21,17 @@ const PUBLIC_ROUTES = [
     '/webhook',
     '/api/v1/webhooks/whatsapp',
     '/api/v1/stripe/webhook',
+    '/api/v1/whatsapp/oauth/callback',
+    '/api/v1/meta/data-deletion',
+    '/api/v1/meta/data-deletion-status',
+    '/api/v1/meta/deauthorize',
+    '/api/v1/data-deletion-instructions',
+    // Campaign header media. Meta fetches these from its own servers with no
+    // credentials of ours, so the files have to be readable anonymously. Names
+    // are unguessable UUIDs and each file is deleted once its campaign finishes.
+    // Note this covers only GETs of already-uploaded files — the upload endpoint
+    // itself lives under /api/v1/uploads/ and stays authenticated.
+    '/uploads/campaign-media/',
 ];
 /**
  * Check if a route is public
@@ -239,7 +254,7 @@ export function requirePermission(resource, action) {
                 campaigns: 'analytics',
                 templates: 'analytics',
                 chatbot: 'chatbotBuilder',
-                flows: 'whatsAppFlows',
+                flows: 'chatbotBuilder',
                 phone_numbers: 'analytics',
                 analytics: 'analytics',
                 team: 'analytics',

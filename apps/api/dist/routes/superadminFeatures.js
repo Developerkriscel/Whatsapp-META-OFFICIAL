@@ -35,8 +35,12 @@ export async function registerSuperadminAdvancedRoutes(app) {
             });
         }
         const user = tenant.users[0];
+        const superadminActor = await app.prisma.superadmin.findUnique({
+            where: { id: request.authUser.id },
+            select: { id: true, name: true, email: true },
+        });
         const accessToken = app.jwt.sign({
-            userId: user.id,
+            sub: user.id,
             email: user.email,
             role: user.role,
             tenantId: tenant.id,
@@ -67,6 +71,11 @@ export async function registerSuperadminAdvancedRoutes(app) {
                     role: user.role,
                     tenantId: tenant.id,
                     tenantName: tenant.name,
+                    impersonatedBy: {
+                        id: request.authUser.id,
+                        name: superadminActor?.name || 'Superadmin',
+                        email: superadminActor?.email || request.authUser.email,
+                    },
                 },
             },
         };
@@ -154,6 +163,9 @@ export async function registerSuperadminAdvancedRoutes(app) {
             app.prisma.message.count(),
             app.prisma.message.count({ where: { status: 'FAILED' } }),
         ]);
+        const successRatePercentage = totalMessages > 0
+            ? (((totalMessages - failedMessages) / totalMessages) * 100).toFixed(1)
+            : '100.0';
         return {
             success: true,
             data: {
@@ -161,6 +173,7 @@ export async function registerSuperadminAdvancedRoutes(app) {
                 queueDepth: 0,
                 processedTotal: totalMessages,
                 failedTotal: failedMessages,
+                successRatePercentage,
                 metaApiRateLimit: {
                     percentageUsed: 14,
                     status: 'HEALTHY',

@@ -4,6 +4,8 @@ import Fastify, { FastifyInstance } from 'fastify';
 import cors from '@fastify/cors';
 import jwt from '@fastify/jwt';
 import cookie from '@fastify/cookie';
+import multipart from '@fastify/multipart';
+import fastifyStatic from '@fastify/static';
 import rawBody from 'fastify-raw-body';
 import { PrismaClient } from '@prisma/client';
 import { authMiddleware, requirePermission, requireOwner } from './middleware/auth.js';
@@ -28,6 +30,7 @@ import { registerSystemRoutes } from './routes/monitoring.js';
 import { registerMetaComplianceRoutes } from './routes/metaCompliance.js';
 import { registerAIRoutes } from './routes/ai.js';
 import { registerKnowledgeBaseRoutes } from './routes/knowledgeBase.js';
+import { registerUploadRoutes, campaignMediaDir } from './routes/uploads.js';
 
 // Extend Fastify instance with custom properties
 declare module 'fastify' {
@@ -54,6 +57,21 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(cors, {
     origin: process.env.CORS_ORIGIN || 'http://localhost:3000',
     credentials: true,
+  });
+
+  // Campaign header media uploads. The per-file ceiling is Meta's largest
+  // (100MB, documents); the upload route enforces the tighter per-type limits.
+  await app.register(multipart, {
+    limits: { fileSize: 100 * 1024 * 1024, files: 1 },
+  });
+
+  // Meta fetches header media over plain HTTP from its own servers, so uploaded
+  // files are served unauthenticated. Names are random UUIDs and the files are
+  // deleted once their campaign finishes, which keeps the exposure window short.
+  await app.register(fastifyStatic, {
+    root: campaignMediaDir(),
+    prefix: '/uploads/campaign-media/',
+    decorateReply: false,
   });
 
   // Register cookie support (httpOnly refresh token cookie)
@@ -127,6 +145,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(registerMetaComplianceRoutes, { prefix: '/api/v1' });
   await app.register(registerAIRoutes, { prefix: '/api/v1' });
   await app.register(registerKnowledgeBaseRoutes, { prefix: '/api/v1' });
+  await app.register(registerUploadRoutes, { prefix: '/api/v1' });
 
   // Global error handler
   app.setErrorHandler((error, request, reply) => {

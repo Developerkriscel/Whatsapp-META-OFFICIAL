@@ -66,7 +66,7 @@ export async function registerStripeWebhook(app) {
 // ============================================
 // Event Handlers
 // ============================================
-async function handleCheckoutCompleted(app, session) {
+export async function handleCheckoutCompleted(app, session) {
     const tenantId = session.metadata?.tenantId;
     if (!tenantId) {
         console.warn('Checkout completed without tenantId metadata');
@@ -90,7 +90,7 @@ async function handleCheckoutCompleted(app, session) {
         console.log(`Tenant ${tenantId} subscribed: ${subscriptionId}`);
     }
 }
-async function handleSubscriptionUpsert(app, subscription) {
+export async function handleSubscriptionUpsert(app, subscription) {
     const tenantId = subscription.metadata?.tenantId;
     if (!tenantId) {
         console.warn('Subscription event without tenantId metadata');
@@ -140,7 +140,7 @@ async function handleSubscriptionDeleted(app, subscription) {
     });
     console.log(`Subscription canceled for tenant ${tenantId}`);
 }
-async function handleInvoicePaid(app, invoice) {
+export async function handleInvoicePaid(app, invoice) {
     const customerId = typeof invoice.customer === 'string'
         ? invoice.customer
         : invoice.customer?.id;
@@ -164,6 +164,8 @@ async function handleInvoicePaid(app, invoice) {
             number: invoice.number || `temp_${invoice.id}`,
             status: 'paid',
             amount: (invoice.amount_paid || 0) / 100,
+            subtotal: (invoice.amount_paid || 0) / 100,
+            netAmount: (invoice.amount_paid || 0) / 100,
             currency: invoice.currency,
             periodStart: new Date((invoice.period_start || 0) * 1000),
             periodEnd: new Date((invoice.period_end || 0) * 1000),
@@ -201,6 +203,8 @@ async function handleInvoicePaymentFailed(app, invoice) {
             number: invoice.number || `temp_${invoice.id}`,
             status: 'failed',
             amount: (invoice.amount_due || 0) / 100,
+            subtotal: (invoice.amount_due || 0) / 100,
+            netAmount: (invoice.amount_due || 0) / 100,
             currency: invoice.currency,
             periodStart: new Date((invoice.period_start || 0) * 1000),
             periodEnd: new Date((invoice.period_end || 0) * 1000),

@@ -2,9 +2,12 @@
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import jwt from '@fastify/jwt';
+import cookie from '@fastify/cookie';
+import multipart from '@fastify/multipart';
+import fastifyStatic from '@fastify/static';
 import rawBody from 'fastify-raw-body';
 import { PrismaClient } from '@prisma/client';
-import { authMiddleware } from './middleware/auth.js';
+import { authMiddleware, requirePermission, requireOwner } from './middleware/auth.js';
 import { rateLimitMiddleware } from './middleware/rate-limit.js';
 import { securityMiddleware } from './middleware/security.js';
 import { registerAuthRoutes } from './routes/auth.js';
@@ -18,6 +21,15 @@ import { registerInvoiceRoutes } from './routes/invoice.js';
 import { registerWhatsAppRoutes } from './routes/whatsapp.js';
 import { registerCreditRoutes } from './routes/credits.js';
 import { registerSuperadminCreditRoutes } from './routes/superadminCredits.js';
+import { registerSSERoutes } from './routes/sse.js';
+import { registerAutomationRoutes } from './routes/automation.js';
+import { registerTeamRoutes } from './routes/teams.js';
+import { registerInsightsRoutes } from './routes/analytics.js';
+import { registerSystemRoutes } from './routes/monitoring.js';
+import { registerMetaComplianceRoutes } from './routes/metaCompliance.js';
+import { registerAIRoutes } from './routes/ai.js';
+import { registerKnowledgeBaseRoutes } from './routes/knowledgeBase.js';
+import { registerUploadRoutes, campaignMediaDir } from './routes/uploads.js';
 export async function buildApp() {
     const app = Fastify({
         logger: {
@@ -31,6 +43,23 @@ export async function buildApp() {
     await app.register(cors, {
         origin: process.env.CORS_ORIGIN || 'http://localhost:3000',
         credentials: true,
+    });
+    // Campaign header media uploads. The per-file ceiling is Meta's largest
+    // (100MB, documents); the upload route enforces the tighter per-type limits.
+    await app.register(multipart, {
+        limits: { fileSize: 100 * 1024 * 1024, files: 1 },
+    });
+    // Meta fetches header media over plain HTTP from its own servers, so uploaded
+    // files are served unauthenticated. Names are random UUIDs and the files are
+    // deleted once their campaign finishes, which keeps the exposure window short.
+    await app.register(fastifyStatic, {
+        root: campaignMediaDir(),
+        prefix: '/uploads/campaign-media/',
+        decorateReply: false,
+    });
+    // Register cookie support (httpOnly refresh token cookie)
+    await app.register(cookie, {
+        secret: process.env.JWT_SECRET || 'fallback-secret-for-development',
     });
     // Register JWT
     await app.register(jwt, {
@@ -49,8 +78,20 @@ export async function buildApp() {
         global: false,
         routes: ['/api/v1/stripe/webhook'],
     });
+    // Meta calls the Data Deletion callback as application/x-www-form-urlencoded
+    app.addContentTypeParser('application/x-www-form-urlencoded', { parseAs: 'string' }, (_req, body, done) => {
+        try {
+            done(null, Object.fromEntries(new URLSearchParams(body)));
+        }
+        catch (err) {
+            done(err, undefined);
+        }
+    });
     // Register auth middleware
     await app.register(authMiddleware);
+    // Decorate with RBAC guards (must run after authMiddleware sets request.authUser)
+    app.decorate('requirePermission', (resource, action) => requirePermission(resource, action));
+    app.decorate('requireOwner', () => requireOwner());
     // Health check
     app.get('/health', async () => {
         return { status: 'ok', timestamp: new Date().toISOString() };
@@ -69,6 +110,15 @@ export async function buildApp() {
     await app.register(registerSuperadminAdvancedRoutes, { prefix: '/api/v1/superadmin' });
     await app.register(registerWebhookRoutes);
     await app.register(registerStripeWebhook);
+    await app.register(registerSSERoutes, { prefix: '/api/v1' });
+    await app.register(registerAutomationRoutes, { prefix: '/api/v1' });
+    await app.register(registerTeamRoutes, { prefix: '/api/v1' });
+    await app.register(registerInsightsRoutes, { prefix: '/api/v1' });
+    await app.register(registerSystemRoutes);
+    await app.register(registerMetaComplianceRoutes, { prefix: '/api/v1' });
+    await app.register(registerAIRoutes, { prefix: '/api/v1' });
+    await app.register(registerKnowledgeBaseRoutes, { prefix: '/api/v1' });
+    await app.register(registerUploadRoutes, { prefix: '/api/v1' });
     // Global error handler
     app.setErrorHandler((error, request, reply) => {
         app.log.error(error);

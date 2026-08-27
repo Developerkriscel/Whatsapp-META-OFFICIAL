@@ -2,7 +2,8 @@
  * Billing Routes - Stripe integration endpoints
  */
 import { z } from 'zod';
-import { createCheckoutSession, createCustomer, cancelSubscription, updateSubscription, createPortalSession, listInvoices, getUpcomingInvoice, mapPlanTierToPriceId, STRIPE_CONFIG, } from '../services/stripe.js';
+import { createCheckoutSession, createCustomer, cancelSubscription, updateSubscription, createPortalSession, listInvoices, getUpcomingInvoice, mapPlanTierToPriceId, STRIPE_CONFIG, stripe, } from '../services/stripe.js';
+import { handleCheckoutCompleted, handleSubscriptionUpsert, handleInvoicePaid } from './stripe-webhook.js';
 const createCheckoutSchema = z.object({
     planTier: z.enum(['STARTER', 'GROWTH', 'BUSINESS']),
     interval: z.enum(['monthly', 'annual']).default('monthly'),
@@ -18,7 +19,7 @@ export async function registerBillingRoutes(app) {
     // ============================================
     // GET /billing - Get billing info
     // ============================================
-    app.get('/billing', async (request, reply) => {
+    app.get('/billing', { preHandler: [app.requirePermission('billing', 'read')] }, async (request, reply) => {
         if (!request.authUser.tenantId) {
             return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
         }
@@ -112,7 +113,7 @@ export async function registerBillingRoutes(app) {
     // ============================================
     // POST /billing/checkout - Create checkout session
     // ============================================
-    app.post('/billing/checkout', async (request, reply) => {
+    app.post('/billing/checkout', { preHandler: [app.requirePermission('billing', 'update')] }, async (request, reply) => {
         if (!request.authUser.tenantId) {
             return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
         }
@@ -146,7 +147,7 @@ export async function registerBillingRoutes(app) {
             });
         }
         // Create checkout session
-        const baseUrl = process.env.APP_URL || 'http://localhost:3000';
+        const baseUrl = process.env.APP_URL || 'http://localhost:5173';
         const session = await createCheckoutSession({
             customerId,
             priceId,
@@ -162,7 +163,7 @@ export async function registerBillingRoutes(app) {
     // ============================================
     // POST /billing/portal - Customer portal
     // ============================================
-    app.post('/billing/portal', async (request, reply) => {
+    app.post('/billing/portal', { preHandler: [app.requirePermission('billing', 'update')] }, async (request, reply) => {
         if (!request.authUser.tenantId) {
             return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
         }
@@ -175,7 +176,7 @@ export async function registerBillingRoutes(app) {
                 error: { code: 'NO_CUSTOMER', message: 'No Stripe customer found' },
             });
         }
-        const baseUrl = process.env.APP_URL || 'http://localhost:3000';
+        const baseUrl = process.env.APP_URL || 'http://localhost:5173';
         const session = await createPortalSession({
             customerId: tenant.stripeCustomerId,
             returnUrl: `${baseUrl}/billing`,
@@ -204,20 +205,19 @@ export async function registerBillingRoutes(app) {
                 error: { code: 'NO_SUBSCRIPTION', message: 'No active subscription' },
             });
         }
+        // Do not flip tenant status here — the subscription stays active (and so does
+        // the tenant's access) until Stripe actually ends it at period end, at which
+        // point the customer.subscription.deleted webhook marks the tenant CHURNED.
         await cancelSubscription(tenant.stripeSubId);
-        await app.prisma.tenant.update({
-            where: { id: tenant.id },
-            data: { status: 'CHURNED' },
-        });
         return {
             success: true,
-            data: { message: 'Subscription will be canceled at period end' },
+            data: { message: 'Subscription will be canceled at the end of your current billing period' },
         };
     });
     // ============================================
     // POST /billing/upgrade - Change plan
     // ============================================
-    app.post('/billing/upgrade', async (request, reply) => {
+    app.post('/billing/upgrade', { preHandler: [app.requirePermission('billing', 'update')] }, async (request, reply) => {
         if (!request.authUser.tenantId) {
             return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
         }
@@ -265,7 +265,7 @@ export async function registerBillingRoutes(app) {
     // ============================================
     // POST /billing/downgrade - Downgrade plan
     // ============================================
-    app.post('/billing/downgrade', async (request, reply) => {
+    app.post('/billing/downgrade', { preHandler: [app.requirePermission('billing', 'update')] }, async (request, reply) => {
         if (!request.authUser.tenantId) {
             return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
         }
@@ -307,7 +307,7 @@ export async function registerBillingRoutes(app) {
     // ============================================
     // GET /billing/invoices - List invoices
     // ============================================
-    app.get('/billing/invoices', async (request, reply) => {
+    app.get('/billing/invoices', { preHandler: [app.requirePermission('billing', 'read')] }, async (request, reply) => {
         if (!request.authUser.tenantId) {
             return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
         }
@@ -337,6 +337,8 @@ export async function registerBillingRoutes(app) {
                             number: stripeInv.number || `temp_${stripeInv.id}`,
                             status: stripeInv.status || 'pending',
                             amount: (stripeInv.amount_due || 0) / 100,
+                            subtotal: (stripeInv.amount_due || 0) / 100,
+                            netAmount: (stripeInv.amount_due || 0) / 100,
                             periodStart: new Date((stripeInv.period_start || 0) * 1000),
                             periodEnd: new Date((stripeInv.period_end || 0) * 1000),
                             paidAt: stripeInv.status === 'paid' ? new Date() : null,
@@ -358,7 +360,7 @@ export async function registerBillingRoutes(app) {
     // ============================================
     // GET /billing/success - Checkout success
     // ============================================
-    app.get('/billing/success', async (request, reply) => {
+    app.get('/billing/success', { preHandler: [app.requirePermission('billing', 'read')] }, async (request, reply) => {
         const { session_id } = request.query;
         if (!session_id) {
             return reply.status(400).send({
@@ -366,18 +368,40 @@ export async function registerBillingRoutes(app) {
                 error: { code: 'MISSING_SESSION', message: 'Session ID required' },
             });
         }
+        // Reconcile immediately rather than waiting on the Stripe webhook — the webhook
+        // may be delayed, misconfigured, or never delivered, and a customer should never
+        // pay and stay on their old plan pending manual intervention.
+        const session = await stripe.checkout.sessions.retrieve(session_id, {
+            expand: ['subscription', 'invoice'],
+        });
+        if (session.metadata?.tenantId !== request.authUser.tenantId) {
+            return reply.status(403).send({
+                success: false,
+                error: { code: 'FORBIDDEN', message: 'This checkout session does not belong to your account' },
+            });
+        }
+        if (session.payment_status !== 'paid' && session.status !== 'complete') {
+            return {
+                success: true,
+                data: { sessionId: session_id, reconciled: false, message: 'Payment not yet completed' },
+            };
+        }
+        await handleCheckoutCompleted(app, session);
+        if (session.subscription && typeof session.subscription !== 'string') {
+            await handleSubscriptionUpsert(app, session.subscription);
+        }
+        if (session.invoice && typeof session.invoice !== 'string') {
+            await handleInvoicePaid(app, session.invoice);
+        }
         return {
             success: true,
-            data: {
-                sessionId: session_id,
-                message: 'Checkout completed successfully',
-            },
+            data: { sessionId: session_id, reconciled: true, message: 'Checkout completed successfully' },
         };
     });
     // ============================================
     // GET /billing/usage - Detailed usage
     // ============================================
-    app.get('/billing/usage', async (request, reply) => {
+    app.get('/billing/usage', { preHandler: [app.requirePermission('billing', 'read')] }, async (request, reply) => {
         if (!request.authUser.tenantId) {
             return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
         }
@@ -432,7 +456,7 @@ export async function registerBillingRoutes(app) {
     // ============================================
     // GET /billing/proration - Preview plan change proration
     // ============================================
-    app.get('/billing/proration', async (request, reply) => {
+    app.get('/billing/proration', { preHandler: [app.requirePermission('billing', 'read')] }, async (request, reply) => {
         if (!request.authUser.tenantId) {
             return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
         }
@@ -453,9 +477,9 @@ export async function registerBillingRoutes(app) {
         if (!newPlanData) {
             return reply.status(404).send({ success: false, error: { code: 'PLAN_NOT_FOUND' } });
         }
-        // Calculate proration
-        const currentPrice = Number(tenant.plan.monthlyPrice);
-        const newPrice = Number(newPlanData.monthlyPrice);
+        // Calculate proration (custom-priced plans use -1 as a "contact sales" sentinel, not a real price)
+        const currentPrice = Math.max(0, Number(tenant.plan.monthlyPrice));
+        const newPrice = Math.max(0, Number(newPlanData.monthlyPrice));
         const daysInMonth = new Date(new Date().getFullYear(), new Date().getMonth() + 1, 0).getDate();
         const dayOfMonth = new Date().getDate();
         const daysRemaining = daysInMonth - dayOfMonth;
@@ -477,7 +501,7 @@ export async function registerBillingRoutes(app) {
         };
     });
     // PATCH /billing/settings - Update billing settings
-    app.patch('/billing/settings', async (request, reply) => {
+    app.patch('/billing/settings', { preHandler: [app.requirePermission('billing', 'update')] }, async (request, reply) => {
         if (!request.authUser.tenantId) {
             return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
         }
@@ -495,7 +519,7 @@ export async function registerBillingRoutes(app) {
         return { success: true, data: tenant };
     });
     // GET /billing/settings - Get billing settings
-    app.get('/billing/settings', async (request, reply) => {
+    app.get('/billing/settings', { preHandler: [app.requirePermission('billing', 'read')] }, async (request, reply) => {
         if (!request.authUser.tenantId) {
             return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
         }
@@ -506,23 +530,59 @@ export async function registerBillingRoutes(app) {
                 billingAddress: true,
                 billingName: true,
                 taxId: true,
+                autoRechargeEnabled: true,
+                autoRechargeThreshold: true,
+                autoRechargeAmount: true,
+                usageAlertEnabled: true,
+                usageAlertContactsPercent: true,
+                usageAlertMessagesPercent: true,
             },
         });
-        return {
-            success: true,
-            data: {
-                ...tenant,
-                autoRechargeEnabled: false,
-                autoRechargeThreshold: 1000,
-                autoRechargeAmount: 5000,
-                usageAlertEnabled: true,
-                usageAlertContactsPercent: 80,
-                usageAlertMessagesPercent: 80,
+        return { success: true, data: tenant };
+    });
+    // PATCH /billing/auto-recharge - Configure auto-recharge (requires a saved Stripe payment method)
+    app.patch('/billing/auto-recharge', { preHandler: [app.requirePermission('billing', 'update')] }, async (request, reply) => {
+        if (!request.authUser.tenantId) {
+            return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
+        }
+        const body = z.object({
+            enabled: z.boolean(),
+            threshold: z.number().int().min(100).optional(),
+            amount: z.number().int().min(500).optional(),
+        }).parse(request.body);
+        const tenant = await app.prisma.tenant.findUnique({
+            where: { id: request.authUser.tenantId },
+            select: { stripeCustomerId: true },
+        });
+        if (body.enabled) {
+            if (!tenant?.stripeCustomerId) {
+                return reply.status(400).send({
+                    success: false,
+                    error: { code: 'NO_PAYMENT_METHOD', message: 'Add a payment method before enabling auto-recharge.' },
+                });
             }
-        };
+            const { stripe } = await import('../services/stripe.js');
+            const paymentMethods = await stripe.paymentMethods.list({ customer: tenant.stripeCustomerId, type: 'card', limit: 1 });
+            if (paymentMethods.data.length === 0) {
+                return reply.status(400).send({
+                    success: false,
+                    error: { code: 'NO_PAYMENT_METHOD', message: 'Add a payment method before enabling auto-recharge.' },
+                });
+            }
+        }
+        const updated = await app.prisma.tenant.update({
+            where: { id: request.authUser.tenantId },
+            data: {
+                autoRechargeEnabled: body.enabled,
+                ...(body.threshold !== undefined && { autoRechargeThreshold: body.threshold }),
+                ...(body.amount !== undefined && { autoRechargeAmount: body.amount }),
+            },
+            select: { autoRechargeEnabled: true, autoRechargeThreshold: true, autoRechargeAmount: true },
+        });
+        return { success: true, data: updated };
     });
     // GET /billing/invoices/:id - Get single invoice with details
-    app.get('/billing/invoices/:invoiceId', async (request, reply) => {
+    app.get('/billing/invoices/:invoiceId', { preHandler: [app.requirePermission('billing', 'read')] }, async (request, reply) => {
         if (!request.authUser.tenantId) {
             return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
         }
@@ -546,13 +606,17 @@ export async function registerBillingRoutes(app) {
         };
     });
     // GET /billing/credits - Get credit balance and auto-recharge settings
-    app.get('/billing/credits', async (request, reply) => {
+    app.get('/billing/credits', { preHandler: [app.requirePermission('billing', 'read')] }, async (request, reply) => {
         if (!request.authUser.tenantId) {
             return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
         }
-        const tenantCredit = await app.prisma.tenantCredit.findUnique({
-            where: { tenantId: request.authUser.tenantId },
-        });
+        const [tenantCredit, tenant] = await Promise.all([
+            app.prisma.tenantCredit.findUnique({ where: { tenantId: request.authUser.tenantId } }),
+            app.prisma.tenant.findUnique({
+                where: { id: request.authUser.tenantId },
+                select: { autoRechargeEnabled: true, autoRechargeThreshold: true, autoRechargeAmount: true },
+            }),
+        ]);
         const creditBalance = tenantCredit?.balance || 0;
         return {
             success: true,
@@ -561,15 +625,15 @@ export async function registerBillingRoutes(app) {
                 pricePerMessage: 0.0001,
                 estimatedMessages: Math.floor(creditBalance / 0.0001),
                 autoRecharge: {
-                    enabled: false,
-                    threshold: 1000,
-                    amount: 5000,
+                    enabled: tenant?.autoRechargeEnabled ?? false,
+                    threshold: tenant?.autoRechargeThreshold ?? 1000,
+                    amount: tenant?.autoRechargeAmount ?? 5000,
                 },
             },
         };
     });
     // POST /billing/credits/purchase - Purchase credits
-    app.post('/billing/credits/purchase', async (request, reply) => {
+    app.post('/billing/credits/purchase', { preHandler: [app.requirePermission('billing', 'update')] }, async (request, reply) => {
         if (!request.authUser.tenantId) {
             return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
         }

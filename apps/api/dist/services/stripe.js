@@ -90,9 +90,11 @@ export async function getSubscription(subscriptionId) {
 }
 export async function cancelSubscription(subscriptionId) {
     if (isMockMode) {
-        return { id: subscriptionId, status: 'canceled' };
+        return { id: subscriptionId, status: 'active', cancel_at_period_end: true };
     }
-    return await stripe.subscriptions.cancel(subscriptionId);
+    // Schedule cancellation for period end rather than cancelling immediately —
+    // the customer keeps access through what they already paid for.
+    return await stripe.subscriptions.update(subscriptionId, { cancel_at_period_end: true });
 }
 export async function updateSubscription(params) {
     if (isMockMode) {

@@ -844,6 +844,13 @@ model Campaign {
   contactIds       String[]
   variableMappings Json     @default("[]")
 
+  // Optional header media sent with the template. mediaUrl is the publicly
+  // reachable URL handed to Meta; mediaPath is set only for files uploaded to
+  // this server, and is what the post-send cleanup deletes from disk (an
+  // externally-hosted URL has no local file and must never be touched).
+  mediaUrl  String?
+  mediaPath String?
+
   scheduledAt DateTime?
   startedAt   DateTime?
   completedAt DateTime?

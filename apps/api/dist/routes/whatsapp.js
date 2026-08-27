@@ -4,7 +4,525 @@
  * No need to modify server .env for each new client!
  */
 import { z } from 'zod';
+import crypto from 'crypto';
+import axios from 'axios';
+import { Prisma } from '@prisma/client';
+import { getMetaAuthUrl, exchangeCodeForToken, exchangeEmbeddedSignupCode, getLongLivedToken, getWhatsAppBusinessAccounts, getPhoneNumbers, verifyPhoneNumber, setupWebhook, } from '../services/metaOAuth.js';
+import { encryptSecret, decryptSecret, decryptIfPresent } from '../services/credentialEncryption.js';
+import { resolveEffectiveWabaId } from '../services/metaTemplate.js';
 export async function registerWhatsAppRoutes(app) {
+    // ============================================
+    // META OAUTH EMBEDDED SIGNUP FLOW
+    // ============================================
+    /**
+     * GET /whatsapp/oauth/url - Get Meta OAuth URL for onboarding
+     */
+    app.get('/whatsapp/oauth/url', async (request, reply) => {
+        if (!request.authUser.tenantId) {
+            return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
+        }
+        // Get platform Meta credentials
+        const config = {
+            appId: process.env.META_APP_ID || '',
+            appSecret: process.env.META_APP_SECRET || '',
+            redirectUri: `${process.env.PUBLIC_API_URL || process.env.API_URL || 'http://localhost:3001'}/api/v1/whatsapp/oauth/callback`,
+        };
+        if (!config.appId || !config.appSecret) {
+            return reply.status(400).send({
+                success: false,
+                error: {
+                    code: 'META_NOT_CONFIGURED',
+                    message: 'Meta App credentials not configured. Please contact support.',
+                },
+            });
+        }
+        // Generate state token for CSRF protection (contains tenant ID)
+        const state = Buffer.from(JSON.stringify({
+            tenantId: request.authUser.tenantId,
+            userId: request.authUser.id,
+            nonce: crypto.randomBytes(16).toString('hex'),
+        })).toString('base64');
+        const authUrl = getMetaAuthUrl(config, state);
+        return { success: true, data: { authUrl, state } };
+    });
+    /**
+     * GET /whatsapp/oauth/callback - Handle Meta OAuth callback
+     */
+    app.get('/whatsapp/oauth/callback', async (request, reply) => {
+        const { code, state, error, error_reason } = request.query;
+        const frontendUrl = process.env.APP_URL || 'http://localhost:5173';
+        // Handle OAuth error
+        if (error) {
+            return reply.redirect(`${frontendUrl}/whatsapp?error=${encodeURIComponent(error_reason || error)}`);
+        }
+        if (!code || !state) {
+            return reply.redirect(`${frontendUrl}/whatsapp?error=missing_params`);
+        }
+        // Decode and validate state
+        let stateData;
+        try {
+            stateData = JSON.parse(Buffer.from(state, 'base64').toString());
+        }
+        catch {
+            return reply.redirect(`${frontendUrl}/whatsapp?error=invalid_state`);
+        }
+        if (!stateData.tenantId) {
+            return reply.redirect(`${frontendUrl}/whatsapp?error=invalid_state`);
+        }
+        try {
+            const config = {
+                appId: process.env.META_APP_ID || '',
+                appSecret: process.env.META_APP_SECRET || '',
+                redirectUri: `${process.env.PUBLIC_API_URL || process.env.API_URL || 'http://localhost:3001'}/api/v1/whatsapp/oauth/callback`,
+            };
+            // Exchange code for short-lived token
+            const shortLivedToken = await exchangeCodeForToken(config, code);
+            // Get long-lived token (valid for 60 days)
+            const longLivedToken = await getLongLivedToken(config, shortLivedToken.access_token);
+            // Get WhatsApp Business Accounts
+            const wabas = await getWhatsAppBusinessAccounts(longLivedToken.access_token);
+            // Store credentials and WABAs in tenant settings
+            await app.prisma.whatsAppCredentials.upsert({
+                where: { tenantId: stateData.tenantId },
+                create: {
+                    tenantId: stateData.tenantId,
+                    accessToken: encryptSecret(longLivedToken.access_token),
+                    // Don't store app secret directly - keep in env
+                },
+                update: {
+                    accessToken: encryptSecret(longLivedToken.access_token),
+                },
+            });
+            // Store WABAs for selection
+            // Return to frontend for user to select WABA and phone number
+            return reply.redirect(`${frontendUrl}/whatsapp?oauth=success&wabas=${encodeURIComponent(JSON.stringify(wabas))}`);
+        }
+        catch (err) {
+            const graphError = err.response?.data?.error;
+            app.log.error({ graphError, message: err.message }, 'Meta OAuth error');
+            const displayMessage = graphError?.message || err.message;
+            return reply.redirect(`${frontendUrl}/whatsapp?error=${encodeURIComponent(displayMessage)}`);
+        }
+    });
+    /**
+     * POST /whatsapp/oauth/select-waba - Select a WABA and get phone numbers
+     */
+    app.post('/whatsapp/oauth/select-waba', { preHandler: [app.requirePermission('settings', 'update')] }, async (request, reply) => {
+        if (!request.authUser.tenantId) {
+            return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
+        }
+        const schema = z.object({
+            wabaId: z.string(),
+            wabaName: z.string(),
+        });
+        const { wabaId, wabaName } = schema.parse(request.body);
+        // Get stored access token
+        const credentials = await app.prisma.whatsAppCredentials.findUnique({
+            where: { tenantId: request.authUser.tenantId },
+        });
+        if (!credentials?.accessToken) {
+            return reply.status(400).send({
+                success: false,
+                error: { code: 'NO_TOKEN', message: 'Please complete Meta OAuth first' },
+            });
+        }
+        // Get phone numbers for selected WABA
+        const phoneNumbers = await getPhoneNumbers(decryptSecret(credentials.accessToken), wabaId);
+        // Store WABA info
+        await app.prisma.whatsAppCredentials.update({
+            where: { tenantId: request.authUser.tenantId },
+            data: {
+                wabaId: wabaId,
+                wabaName: wabaName,
+            },
+        });
+        return {
+            success: true,
+            data: {
+                wabaId,
+                wabaName,
+                phoneNumbers,
+            },
+        };
+    });
+    /**
+     * POST /whatsapp/oauth/connect-phone - Connect a specific phone number
+     */
+    app.post('/whatsapp/oauth/connect-phone', { preHandler: [app.requirePermission('phone_numbers', 'create')] }, async (request, reply) => {
+        if (!request.authUser.tenantId) {
+            return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
+        }
+        const schema = z.object({
+            phoneNumberId: z.string(),
+            displayName: z.string().optional(),
+        });
+        const { phoneNumberId, displayName } = schema.parse(request.body);
+        // Get stored access token
+        const credentials = await app.prisma.whatsAppCredentials.findUnique({
+            where: { tenantId: request.authUser.tenantId },
+        });
+        if (!credentials?.accessToken || !credentials.wabaId) {
+            return reply.status(400).send({
+                success: false,
+                error: { code: 'NO_TOKEN', message: 'Please complete Meta OAuth first' },
+            });
+        }
+        // Verify phone number ownership
+        const decryptedToken = decryptSecret(credentials.accessToken);
+        const verifiedPhone = await verifyPhoneNumber(decryptedToken, credentials.wabaId, phoneNumberId);
+        if (!verifiedPhone) {
+            return reply.status(400).send({
+                success: false,
+                error: { code: 'VERIFICATION_FAILED', message: 'Could not verify phone number ownership' },
+            });
+        }
+        // A retried/re-run connection (or a previously disconnected number) can already
+        // have a row for this metaPhoneId — reconnect it instead of erroring on the
+        // unique constraint. A row owned by a different tenant is a real conflict.
+        const existingPhone = await app.prisma.phoneNumber.findUnique({ where: { metaPhoneId: phoneNumberId } });
+        if (existingPhone && existingPhone.tenantId !== request.authUser.tenantId) {
+            return reply.status(400).send({
+                success: false,
+                error: { code: 'DUPLICATE', message: 'This phone number is already connected to another workspace' },
+            });
+        }
+        const phoneData = {
+            tenantId: request.authUser.tenantId,
+            phoneNumber: verifiedPhone.display_phone_number,
+            displayName: displayName || verifiedPhone.verified_name,
+            metaPhoneId: phoneNumberId,
+            wabaId: credentials.wabaId,
+            status: 'connected',
+            canSendMarketing: true,
+            canSendUtility: true,
+            canSendAuth: true,
+        };
+        const phone = existingPhone
+            ? await app.prisma.phoneNumber.update({ where: { id: existingPhone.id }, data: phoneData })
+            : await app.prisma.phoneNumber.create({ data: phoneData });
+        // Setup webhook for this WABA
+        await setupWebhook(decryptedToken, credentials.wabaId, `${process.env.PUBLIC_API_URL || process.env.API_URL || 'http://localhost:3001'}/webhook`, process.env.META_WEBHOOK_VERIFY_TOKEN || 'whatsapp_webhook_verify_token');
+        return {
+            success: true,
+            data: phone,
+            message: 'Phone number connected successfully!',
+        };
+    });
+    /**
+     * GET /whatsapp/embedded-signup/config - Public config the frontend needs to
+     * launch Meta's Embedded Signup JS SDK popup (App ID + Signup Configuration ID).
+     */
+    app.get('/whatsapp/embedded-signup/config', async (request, reply) => {
+        if (!request.authUser.tenantId) {
+            return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
+        }
+        const appId = process.env.META_APP_ID || '';
+        const configId = process.env.META_SIGNUP_CONFIG_ID || '';
+        if (!appId || !configId) {
+            return reply.status(400).send({
+                success: false,
+                error: {
+                    code: 'EMBEDDED_SIGNUP_NOT_CONFIGURED',
+                    message: 'Embedded Signup is not configured yet. Create a Signup Configuration in the Meta dashboard and set META_SIGNUP_CONFIG_ID.',
+                },
+            });
+        }
+        return { success: true, data: { appId, configId, graphApiVersion: 'v21.0' } };
+    });
+    /**
+     * POST /whatsapp/embedded-signup/complete - Finalize Meta's Embedded Signup flow.
+     * The frontend JS SDK popup handles WABA creation/selection and phone verification
+     * itself; it hands back a `code` (via FB.login) plus wabaId/phoneNumberId/businessId
+     * (via postMessage). This endpoint exchanges the code and persists the connection.
+     */
+    app.post('/whatsapp/embedded-signup/complete', { preHandler: [app.requirePermission('settings', 'update')] }, async (request, reply) => {
+        if (!request.authUser.tenantId) {
+            return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
+        }
+        const schema = z.object({
+            code: z.string(),
+            wabaId: z.string(),
+            phoneNumberId: z.string(),
+            businessId: z.string().optional(),
+        });
+        const { code, wabaId, phoneNumberId, businessId } = schema.parse(request.body);
+        const config = {
+            appId: process.env.META_APP_ID || '',
+            appSecret: process.env.META_APP_SECRET || '',
+            redirectUri: '',
+        };
+        if (!config.appId || !config.appSecret) {
+            return reply.status(400).send({
+                success: false,
+                error: { code: 'META_NOT_CONFIGURED', message: 'Meta App credentials not configured. Please contact support.' },
+            });
+        }
+        try {
+            const shortLivedToken = await exchangeEmbeddedSignupCode(config, code);
+            const longLivedToken = await getLongLivedToken(config, shortLivedToken.access_token);
+            const accessToken = longLivedToken.access_token;
+            const verifiedPhone = await verifyPhoneNumber(accessToken, wabaId, phoneNumberId);
+            if (!verifiedPhone) {
+                return reply.status(400).send({
+                    success: false,
+                    error: { code: 'VERIFICATION_FAILED', message: 'Could not verify the connected phone number' },
+                });
+            }
+            await app.prisma.whatsAppCredentials.upsert({
+                where: { tenantId: request.authUser.tenantId },
+                create: {
+                    tenantId: request.authUser.tenantId,
+                    accessToken: encryptSecret(accessToken),
+                    wabaId,
+                    businessId,
+                    isConfigured: true,
+                },
+                update: {
+                    accessToken: encryptSecret(accessToken),
+                    wabaId,
+                    businessId,
+                    isConfigured: true,
+                },
+            });
+            const existingPhone = await app.prisma.phoneNumber.findUnique({ where: { metaPhoneId: phoneNumberId } });
+            const phone = existingPhone
+                ? await app.prisma.phoneNumber.update({
+                    where: { id: existingPhone.id },
+                    data: {
+                        phoneNumber: verifiedPhone.display_phone_number,
+                        displayName: verifiedPhone.verified_name,
+                        wabaId,
+                        status: 'connected',
+                    },
+                })
+                : await app.prisma.phoneNumber.create({
+                    data: {
+                        tenantId: request.authUser.tenantId,
+                        phoneNumber: verifiedPhone.display_phone_number,
+                        displayName: verifiedPhone.verified_name,
+                        metaPhoneId: phoneNumberId,
+                        wabaId,
+                        status: 'connected',
+                        canSendMarketing: true,
+                        canSendUtility: true,
+                        canSendAuth: true,
+                    },
+                });
+            await setupWebhook(accessToken, wabaId, `${process.env.PUBLIC_API_URL || process.env.API_URL || 'http://localhost:3001'}/webhook`, process.env.META_WEBHOOK_VERIFY_TOKEN || 'whatsapp_webhook_verify_token');
+            return { success: true, data: phone, message: 'WhatsApp connected successfully!' };
+        }
+        catch (err) {
+            app.log.error('Embedded signup completion error:', err.response?.data || err.message);
+            return reply.status(400).send({
+                success: false,
+                error: {
+                    code: 'EMBEDDED_SIGNUP_FAILED',
+                    message: err.response?.data?.error?.message || 'Failed to complete WhatsApp connection',
+                },
+            });
+        }
+    });
+    // ============================================
+    // WHATSAPP HEALTH CENTER - Connection Status Overview
+    // ============================================
+    /**
+     * GET /whatsapp/health - Get WhatsApp connection health status
+     */
+    app.get('/whatsapp/health', async (request, reply) => {
+        if (!request.authUser.tenantId) {
+            return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
+        }
+        // Get credentials
+        const credentials = await app.prisma.whatsAppCredentials.findUnique({
+            where: { tenantId: request.authUser.tenantId },
+        });
+        // Get all phone numbers with usage stats
+        const phoneNumbers = await app.prisma.phoneNumber.findMany({
+            where: { tenantId: request.authUser.tenantId },
+            include: {
+                _count: {
+                    select: {
+                        messages: true,
+                    },
+                },
+            },
+        });
+        // Calculate health metrics
+        const connectedCount = phoneNumbers.filter(p => p.status === 'connected').length;
+        const disconnectedCount = phoneNumbers.filter(p => p.status === 'disconnected').length;
+        // Get token expiry info (estimate from stored token)
+        const tokenStatus = credentials?.accessToken
+            ? { isValid: true, hasToken: true }
+            : { isValid: false, hasToken: false, needsReauth: true };
+        // Get recent webhook activity (last 24 hours)
+        const last24Hours = new Date(Date.now() - 24 * 60 * 60 * 1000);
+        const recentWebhookActivity = await app.prisma.webhookLog.count({
+            where: {
+                tenantId: request.authUser.tenantId,
+                createdAt: { gte: last24Hours },
+            },
+        });
+        return {
+            success: true,
+            data: {
+                overall: {
+                    connected: connectedCount,
+                    disconnected: disconnectedCount,
+                    total: phoneNumbers.length,
+                    healthScore: phoneNumbers.length > 0
+                        ? Math.round((connectedCount / phoneNumbers.length) * 100)
+                        : 0,
+                },
+                credentials: {
+                    hasToken: !!credentials?.accessToken,
+                    tokenStatus: tokenStatus.isValid ? 'valid' : 'missing',
+                    needsReauth: tokenStatus.needsReauth,
+                },
+                webhook: {
+                    recentActivity: recentWebhookActivity,
+                    configured: !!credentials?.webhookUrl,
+                },
+                phones: phoneNumbers.map(p => ({
+                    id: p.id,
+                    phoneNumber: p.phoneNumber,
+                    displayName: p.displayName,
+                    status: p.status,
+                    qualityScore: p.qualityScore,
+                    wabaId: p.wabaId,
+                    metaPhoneId: p.metaPhoneId,
+                    verifiedAt: p.verifiedAt,
+                    canSendMarketing: p.canSendMarketing,
+                    canSendUtility: p.canSendUtility,
+                    canSendAuth: p.canSendAuth,
+                    dailySentLimit: p.dailySentLimit,
+                    todaySentCount: p.todaySentCount,
+                    messagesLast30Days: p._count.messages,
+                })),
+            },
+        };
+    });
+    /**
+     * GET /whatsapp/health/:phoneId - Get detailed health for specific phone
+     */
+    app.get('/whatsapp/health/:phoneId', async (request, reply) => {
+        if (!request.authUser.tenantId) {
+            return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
+        }
+        const { phoneId } = z.object({ phoneId: z.string() }).parse(request.params);
+        const phone = await app.prisma.phoneNumber.findFirst({
+            where: { id: phoneId, tenantId: request.authUser.tenantId },
+        });
+        if (!phone) {
+            return reply.status(404).send({ success: false, error: { code: 'NOT_FOUND' } });
+        }
+        // Get message stats for last 30 days
+        const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+        const messages = await app.prisma.message.findMany({
+            where: {
+                phoneNumberId: phoneId,
+                createdAt: { gte: thirtyDaysAgo },
+            },
+            select: { status: true, createdAt: true },
+        });
+        // Calculate delivery metrics
+        const sent = messages.filter(m => m.status === 'SENT').length;
+        const delivered = messages.filter(m => m.status === 'DELIVERED').length;
+        const read = messages.filter(m => m.status === 'READ').length;
+        const failed = messages.filter(m => m.status === 'FAILED').length;
+        // Get last webhook received
+        const lastWebhook = await app.prisma.webhookLog.findFirst({
+            where: { tenantId: request.authUser.tenantId },
+            orderBy: { createdAt: 'desc' },
+        });
+        // Get quality trends (if available)
+        const qualityHistory = await app.prisma.phoneNumberQualityLog.findMany({
+            where: { phoneNumberId: phoneId },
+            orderBy: { createdAt: 'desc' },
+            take: 30,
+        });
+        return {
+            success: true,
+            data: {
+                phone: {
+                    id: phone.id,
+                    phoneNumber: phone.phoneNumber,
+                    displayName: phone.displayName,
+                    status: phone.status,
+                    qualityScore: phone.qualityScore,
+                    verifiedAt: phone.verifiedAt,
+                    canSendMarketing: phone.canSendMarketing,
+                    canSendUtility: phone.canSendUtility,
+                    canSendAuth: phone.canSendAuth,
+                },
+                metrics: {
+                    last30Days: {
+                        totalSent: messages.length,
+                        delivered,
+                        read,
+                        failed,
+                        deliveryRate: sent > 0 ? Math.round((delivered / sent) * 100) : 0,
+                        readRate: delivered > 0 ? Math.round((read / delivered) * 100) : 0,
+                    },
+                    limits: {
+                        dailyLimit: phone.dailySentLimit,
+                        todaySent: phone.todaySentCount,
+                        remaining: phone.dailySentLimit - phone.todaySentCount,
+                    },
+                },
+                webhook: {
+                    lastReceived: lastWebhook?.createdAt || null,
+                    lastEventType: lastWebhook?.event || null,
+                },
+                qualityHistory,
+            },
+        };
+    });
+    // ============================================
+    // WEBHOOK LOGS - Developer Webhook Debugging UI
+    // ============================================
+    /**
+     * GET /whatsapp/webhook-logs - Get webhook activity logs
+     */
+    app.get('/whatsapp/webhook-logs', async (request, reply) => {
+        if (!request.authUser.tenantId) {
+            return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
+        }
+        const query = z.object({
+            page: z.coerce.number().min(1).default(1),
+            limit: z.coerce.number().min(1).max(100).default(20),
+            phoneId: z.string().optional(),
+            eventType: z.string().optional(),
+            status: z.string().optional(),
+        }).parse(request.query);
+        const { page, limit, phoneId, eventType, status } = query;
+        const skip = (page - 1) * limit;
+        const where = { tenantId: request.authUser.tenantId };
+        if (phoneId)
+            where.phoneNumberId = phoneId;
+        if (eventType)
+            where.event = eventType;
+        if (status)
+            where.status = status;
+        const [logs, total] = await Promise.all([
+            app.prisma.webhookLog.findMany({
+                where,
+                orderBy: { createdAt: 'desc' },
+                skip,
+                take: limit,
+            }),
+            app.prisma.webhookLog.count({ where }),
+        ]);
+        return {
+            success: true,
+            data: logs,
+            meta: {
+                page,
+                limit,
+                total,
+                totalPages: Math.ceil(total / limit),
+            },
+        };
+    });
     // ============================================
     // GET /whatsapp/phone-numbers — List tenant's phone numbers
     // ============================================
@@ -33,7 +551,7 @@ export async function registerWhatsAppRoutes(app) {
     // ============================================
     // POST /whatsapp/phone-numbers — Add a phone number with validation
     // ============================================
-    app.post('/whatsapp/phone-numbers', async (request, reply) => {
+    app.post('/whatsapp/phone-numbers', { preHandler: [app.requirePermission('phone_numbers', 'create')] }, async (request, reply) => {
         if (!request.authUser.tenantId) {
             return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
         }
@@ -122,7 +640,7 @@ export async function registerWhatsAppRoutes(app) {
     // ============================================
     // PATCH /whatsapp/phone-numbers/:id — Update phone with full settings
     // ============================================
-    app.patch('/whatsapp/phone-numbers/:id', async (request, reply) => {
+    app.patch('/whatsapp/phone-numbers/:id', { preHandler: [app.requirePermission('phone_numbers', 'update')] }, async (request, reply) => {
         if (!request.authUser.tenantId) {
             return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
         }
@@ -163,20 +681,41 @@ export async function registerWhatsAppRoutes(app) {
     // ============================================
     // DELETE /whatsapp/phone-numbers/:id — Remove phone number
     // ============================================
-    app.delete('/whatsapp/phone-numbers/:id', async (request, reply) => {
+    app.delete('/whatsapp/phone-numbers/:id', { preHandler: [app.requirePermission('phone_numbers', 'delete')] }, async (request, reply) => {
         if (!request.authUser.tenantId) {
             return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
         }
         const { id } = z.object({ id: z.string() }).parse(request.params);
-        await app.prisma.phoneNumber.deleteMany({
-            where: { id, tenantId: request.authUser.tenantId },
-        });
+        try {
+            await app.prisma.phoneNumber.deleteMany({
+                where: { id, tenantId: request.authUser.tenantId },
+            });
+        }
+        catch (err) {
+            const isFkViolation = (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2003') ||
+                (err instanceof Error && err.message.includes('foreign key constraint'));
+            if (isFkViolation) {
+                return reply.status(409).send({
+                    success: false,
+                    error: {
+                        code: 'PHONE_HAS_CONVERSATIONS',
+                        message: 'This phone number has existing conversations and cannot be deleted. Delete or reassign those conversations first.',
+                    },
+                });
+            }
+            throw err;
+        }
         return { success: true, data: { message: 'Phone number removed' } };
     });
     // ============================================
-    // POST /whatsapp/phone-numbers/:id/refresh-quality — Refresh quality score
+    // POST /whatsapp/phone-numbers/:id/disconnect — Remove the Meta connection
+    // without deleting the row or its conversation/message history. The FK on
+    // Conversation.phoneNumberId deliberately blocks a hard delete once real
+    // conversations exist (so removing a number can never silently wipe out
+    // chat history) — this is the non-destructive alternative for that case:
+    // clear the live credentials/IDs, keep everything else intact.
     // ============================================
-    app.post('/whatsapp/phone-numbers/:id/refresh-quality', async (request, reply) => {
+    app.post('/whatsapp/phone-numbers/:id/disconnect', { preHandler: [app.requirePermission('phone_numbers', 'update')] }, async (request, reply) => {
         if (!request.authUser.tenantId) {
             return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
         }
@@ -187,18 +726,83 @@ export async function registerWhatsAppRoutes(app) {
         if (!phone) {
             return reply.status(404).send({ success: false, error: { code: 'NOT_FOUND' } });
         }
-        // In production, this would fetch from Meta API
-        // For demo, simulate score changes
-        const scores = ['GREEN', 'YELLOW', 'RED'];
-        const randomScore = scores[Math.floor(Math.random() * scores.length)];
+        const updated = await app.prisma.phoneNumber.update({
+            where: { id },
+            data: {
+                status: 'disconnected',
+                metaPhoneId: null,
+                metaHolderId: null,
+                wabaId: null,
+                accessToken: null,
+            },
+        });
+        return { success: true, data: updated };
+    });
+    // ============================================
+    // POST /whatsapp/phone-numbers/:id/refresh-quality — Refresh quality score
+    // ============================================
+    app.post('/whatsapp/phone-numbers/:id/refresh-quality', { preHandler: [app.requirePermission('phone_numbers', 'update')] }, async (request, reply) => {
+        if (!request.authUser.tenantId) {
+            return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
+        }
+        const { id } = z.object({ id: z.string() }).parse(request.params);
+        const phone = await app.prisma.phoneNumber.findFirst({
+            where: { id, tenantId: request.authUser.tenantId },
+        });
+        if (!phone) {
+            return reply.status(404).send({ success: false, error: { code: 'NOT_FOUND' } });
+        }
+        // 1. Load tenant credentials for fallback access token
+        const creds = await app.prisma.whatsAppCredentials.findUnique({
+            where: { tenantId: request.authUser.tenantId },
+        });
+        // Tenant-scoped credentials only - no platform-wide env fallback, so an
+        // unconfigured tenant can't piggyback on the platform's own Meta identity.
+        const token = phone.accessToken || (creds?.accessToken ? decryptSecret(creds.accessToken) : null);
+        const metaPhoneId = phone.metaPhoneId || null;
+        let realQualityScore = phone.qualityScore || 'GREEN';
+        let metaStatus = phone.status;
+        // 2. Try fetching real Meta Graph API quality rating & line status
+        if (token && metaPhoneId) {
+            try {
+                const metaRes = await fetch(`https://graph.facebook.com/v19.0/${metaPhoneId}?fields=display_phone_number,quality_rating,name_status,status&access_token=${token}`);
+                if (metaRes.ok) {
+                    const metaData = await metaRes.json();
+                    if (metaData.quality_rating) {
+                        const ratingMap = { GREEN: 'GREEN', YELLOW: 'YELLOW', RED: 'RED', UNKNOWN: 'GREEN' };
+                        realQualityScore = ratingMap[metaData.quality_rating?.toUpperCase()] || 'GREEN';
+                    }
+                    if (metaData.status) {
+                        metaStatus = metaData.status.toLowerCase() === 'connected' || metaData.status.toLowerCase() === 'approved' ? 'verified' : phone.status;
+                    }
+                }
+            }
+            catch (e) {
+                // Fall back to database calculation below
+            }
+        }
+        // 3. Fallback: Calculate real quality score from actual database message history
+        if (!token || !metaPhoneId) {
+            const thirtyDaysAgo = new Date();
+            thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+            const [totalCount, failedCount] = await Promise.all([
+                app.prisma.message.count({ where: { phoneNumberId: id, createdAt: { gte: thirtyDaysAgo } } }),
+                app.prisma.message.count({ where: { phoneNumberId: id, status: 'FAILED', createdAt: { gte: thirtyDaysAgo } } }),
+            ]);
+            if (totalCount > 0) {
+                const failRate = failedCount / totalCount;
+                realQualityScore = failRate > 0.15 ? 'RED' : failRate > 0.05 ? 'YELLOW' : 'GREEN';
+            }
+        }
         await app.prisma.phoneNumber.update({
             where: { id },
-            data: { qualityScore: randomScore },
+            data: { qualityScore: realQualityScore, status: metaStatus },
         });
         return {
             success: true,
             data: {
-                qualityScore: randomScore,
+                qualityScore: realQualityScore,
+                status: metaStatus,
                 updated: new Date().toISOString(),
             },
         };
@@ -210,25 +814,50 @@ export async function registerWhatsAppRoutes(app) {
         if (!request.authUser.tenantId) {
             return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
         }
-        const tenant = await app.prisma.tenant.findUnique({
-            where: { id: request.authUser.tenantId },
-            select: { metaBusinessId: true, name: true },
-        });
+        const [tenant, creds, phoneCount, approvedTemplateCount] = await Promise.all([
+            app.prisma.tenant.findUnique({
+                where: { id: request.authUser.tenantId },
+                select: { metaBusinessId: true, name: true },
+            }),
+            app.prisma.whatsAppCredentials.findUnique({ where: { tenantId: request.authUser.tenantId } }),
+            app.prisma.phoneNumber.count({ where: { tenantId: request.authUser.tenantId } }),
+            app.prisma.template.count({ where: { tenantId: request.authUser.tenantId, status: 'APPROVED' } }),
+        ]);
+        // These used to be hardcoded `true` regardless of reality (displayNameApproved,
+        // domainVerified) — pull the real business_verification_status from Meta
+        // when credentials are available instead of always claiming success.
+        let businessVerifiedFromMeta = null;
+        if (creds?.accessToken) {
+            const wabaId = await resolveEffectiveWabaId(app.prisma, request.authUser.tenantId, creds.wabaId);
+            if (wabaId) {
+                try {
+                    const res = await axios.get(`https://graph.facebook.com/v18.0/${wabaId}`, {
+                        params: { access_token: decryptSecret(creds.accessToken), fields: 'business_verification_status' },
+                    });
+                    businessVerifiedFromMeta = res.data?.business_verification_status === 'verified';
+                }
+                catch {
+                    // Leave as null — the DB-derived fallback below still applies.
+                }
+            }
+        }
+        const businessVerified = businessVerifiedFromMeta ?? !!tenant?.metaBusinessId;
+        const hasPhone = phoneCount > 0;
         return {
             success: true,
             data: {
-                businessVerified: !!tenant?.metaBusinessId,
-                greenTickEnabled: false,
-                displayNameApproved: true,
-                domainVerified: true,
+                businessVerified,
+                greenTickEnabled: businessVerified,
+                displayNameApproved: businessVerified,
+                domainVerified: businessVerified,
                 taxIdVerified: false,
                 businessName: tenant?.name || 'Your Business',
                 taxId: null,
                 steps: [
-                    { id: 'business', name: 'Business Verification', status: tenant?.metaBusinessId ? 'completed' : 'pending', description: 'Verify your business with Meta' },
-                    { id: 'display_name', name: 'Display Name', status: 'completed', description: 'Your display name is under review' },
-                    { id: 'phone', name: 'Phone Numbers', status: 'completed', description: 'Connect at least one phone number' },
-                    { id: 'template', name: 'Message Templates', status: 'pending', description: 'Submit templates for approval' },
+                    { id: 'business', name: 'Business Verification', status: businessVerified ? 'completed' : 'pending', description: 'Verify your business with Meta' },
+                    { id: 'display_name', name: 'Display Name', status: hasPhone ? 'completed' : 'pending', description: hasPhone ? 'Your display name is set' : 'Connect a phone number to set a display name' },
+                    { id: 'phone', name: 'Phone Numbers', status: hasPhone ? 'completed' : 'pending', description: 'Connect at least one phone number' },
+                    { id: 'template', name: 'Message Templates', status: approvedTemplateCount > 0 ? 'completed' : 'pending', description: 'Submit templates for approval' },
                 ],
             },
         };
@@ -236,7 +865,7 @@ export async function registerWhatsAppRoutes(app) {
     // ============================================
     // PATCH /whatsapp/business-verification — Update verification info
     // ============================================
-    app.patch('/whatsapp/business-verification', async (request, reply) => {
+    app.patch('/whatsapp/business-verification', { preHandler: [app.requirePermission('settings', 'update')] }, async (request, reply) => {
         if (!request.authUser.tenantId) {
             return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
         }
@@ -272,7 +901,9 @@ export async function registerWhatsAppRoutes(app) {
         const days = period === '90' ? 90 : period === '30' ? 30 : 7;
         const startDate = new Date();
         startDate.setDate(startDate.getDate() - days);
-        // Get message stats
+        // Get message stats — includes direction/conversationId now so a real
+        // response rate can be computed (was hardcoded to 0 everywhere before,
+        // both in the headline metric and every daily-trend point).
         const messages = await app.prisma.message.findMany({
             where: {
                 phoneNumberId: phoneId,
@@ -282,36 +913,69 @@ export async function registerWhatsAppRoutes(app) {
                 status: true,
                 readAt: true,
                 createdAt: true,
+                direction: true,
+                conversationId: true,
             },
+            orderBy: { createdAt: 'asc' },
         });
         const totalMessages = messages.length;
         const delivered = messages.filter(m => m.status === 'DELIVERED' || m.status === 'SENT').length;
         const read = messages.filter(m => m.readAt).length;
-        // Mock historical data for trends
+        // A "response" is a real inbound message in the same conversation
+        // within 24h of an outbound one — computed from our own message log,
+        // since Meta doesn't expose this as a queryable metric directly.
+        const RESPONSE_WINDOW_MS = 24 * 60 * 60 * 1000;
+        const incomingByConversation = new Map();
+        for (const m of messages) {
+            if (m.direction !== 'INCOMING')
+                continue;
+            const arr = incomingByConversation.get(m.conversationId) || [];
+            arr.push(m.createdAt);
+            incomingByConversation.set(m.conversationId, arr);
+        }
+        const gotResponse = (m) => {
+            const replies = incomingByConversation.get(m.conversationId) || [];
+            return replies.some(t => t.getTime() > m.createdAt.getTime() && t.getTime() - m.createdAt.getTime() <= RESPONSE_WINDOW_MS);
+        };
+        const outgoing = messages.filter(m => m.direction === 'OUTGOING');
+        const responded = outgoing.filter(gotResponse).length;
+        const responseRate = outgoing.length > 0 ? Math.round((responded / outgoing.length) * 100 * 10) / 10 : 0;
+        // Calculate real historical daily trends from database records
         const dailyTrend = Array.from({ length: days }, (_, i) => {
             const date = new Date();
             date.setDate(date.getDate() - (days - 1 - i));
+            const dateStr = date.toISOString().split('T')[0];
+            const dayMsgs = messages.filter(m => m.createdAt.toISOString().split('T')[0] === dateStr);
+            const dayTotal = dayMsgs.length;
+            const dayDelivered = dayMsgs.filter(m => m.status === 'DELIVERED' || m.status === 'SENT').length;
+            const dayRead = dayMsgs.filter(m => m.readAt).length;
+            const dayOutgoing = dayMsgs.filter(m => m.direction === 'OUTGOING');
+            const dayResponded = dayOutgoing.filter(gotResponse).length;
             return {
-                date: date.toISOString().split('T')[0],
-                deliveryRate: 95 + Math.random() * 5,
-                openRate: 70 + Math.random() * 20,
-                responseRate: 30 + Math.random() * 30,
-                blockRate: Math.random() * 2,
+                date: dateStr,
+                deliveryRate: dayTotal > 0 ? Math.round((dayDelivered / dayTotal) * 100) : 100,
+                openRate: dayTotal > 0 ? Math.round((dayRead / dayTotal) * 100) : 0,
+                responseRate: dayOutgoing.length > 0 ? Math.round((dayResponded / dayOutgoing.length) * 100) : 0,
+                blockRate: 0,
             };
         });
+        const failed = messages.filter(m => m.status === 'FAILED').length;
         return {
             success: true,
             data: {
                 phoneNumber: phone.phoneNumber,
-                qualityScore: phone.qualityScore || 'GREEN',
+                // Was defaulting to 'GREEN' (the best possible score) whenever we
+                // simply hadn't fetched a real one yet — silently overstated quality
+                // instead of admitting it's unknown.
+                qualityScore: phone.qualityScore || 'UNKNOWN',
                 period: `${days} days`,
                 metrics: {
                     totalMessages,
-                    deliveryRate: totalMessages > 0 ? Math.round((delivered / totalMessages) * 100 * 10) / 10 : 0,
+                    deliveryRate: totalMessages > 0 ? Math.round((delivered / totalMessages) * 100 * 10) / 10 : 100,
                     openRate: totalMessages > 0 ? Math.round((read / totalMessages) * 100 * 10) / 10 : 0,
-                    responseRate: 40 + Math.random() * 20,
-                    blockRate: Math.random() * 2,
-                    reportRate: Math.random() * 0.5,
+                    responseRate,
+                    blockRate: totalMessages > 0 ? Math.round((failed / totalMessages) * 100 * 10) / 10 : 0,
+                    reportRate: 0,
                 },
                 dailyTrend,
                 benchmark: {
@@ -340,7 +1004,7 @@ export async function registerWhatsAppRoutes(app) {
     // ============================================
     // GET /whatsapp/credentials — Get THIS TENANT's WhatsApp credentials
     // ============================================
-    app.get('/whatsapp/credentials', async (request, reply) => {
+    app.get('/whatsapp/credentials', { preHandler: [app.requirePermission('settings', 'read')] }, async (request, reply) => {
         if (!request.authUser.tenantId) {
             return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
         }
@@ -370,7 +1034,7 @@ export async function registerWhatsAppRoutes(app) {
     // POST /whatsapp/credentials — Save THIS TENANT's WhatsApp credentials
     // Each tenant saves their own credentials - multi-tenant isolation
     // ============================================
-    app.post('/whatsapp/credentials', async (request, reply) => {
+    app.post('/whatsapp/credentials', { preHandler: [app.requirePermission('settings', 'update')] }, async (request, reply) => {
         if (!request.authUser.tenantId) {
             return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
         }
@@ -386,8 +1050,8 @@ export async function registerWhatsAppRoutes(app) {
         const existing = await app.prisma.whatsAppCredentials.findUnique({
             where: { tenantId: request.authUser.tenantId },
         });
-        const newSecret = body.appSecret && body.appSecret.length >= 10 ? body.appSecret : existing?.appSecret;
-        const newToken = body.accessToken && body.accessToken.length >= 20 ? body.accessToken : existing?.accessToken;
+        const newSecret = body.appSecret && body.appSecret.length >= 10 ? encryptSecret(body.appSecret) : existing?.appSecret;
+        const newToken = body.accessToken && body.accessToken.length >= 20 ? encryptSecret(body.accessToken) : existing?.accessToken;
         await app.prisma.whatsAppCredentials.upsert({
             where: { tenantId: request.authUser.tenantId },
             update: {
@@ -419,7 +1083,7 @@ export async function registerWhatsAppRoutes(app) {
     // ============================================
     // POST /whatsapp/credentials/test — Test THIS TENANT's credentials
     // ============================================
-    app.post('/whatsapp/credentials/test', async (request, reply) => {
+    app.post('/whatsapp/credentials/test', { preHandler: [app.requirePermission('settings', 'update')] }, async (request, reply) => {
         if (!request.authUser.tenantId) {
             return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
         }
@@ -433,10 +1097,10 @@ export async function registerWhatsAppRoutes(app) {
         const creds = await app.prisma.whatsAppCredentials.findUnique({
             where: { tenantId: request.authUser.tenantId },
         });
-        // Use provided credentials or stored ones
+        // Use provided credentials or stored ones (decrypting anything read from storage)
         const appId = body.appId || creds?.appId;
-        const appSecret = body.appSecret || creds?.appSecret;
-        const accessToken = body.accessToken || creds?.accessToken;
+        const appSecret = body.appSecret || decryptIfPresent(creds?.appSecret);
+        const accessToken = body.accessToken || decryptIfPresent(creds?.accessToken);
         const isConfigured = !!(appId && accessToken);
         // Test connection to Meta API
         let connectionValid = false;
@@ -461,7 +1125,7 @@ export async function registerWhatsAppRoutes(app) {
             create: {
                 tenantId: request.authUser.tenantId,
                 appId,
-                accessToken,
+                accessToken: accessToken ? encryptSecret(accessToken) : undefined,
                 isConfigured,
                 lastTestedAt: new Date(),
                 lastError: apiError,
@@ -488,28 +1152,79 @@ export async function registerWhatsAppRoutes(app) {
     // ============================================
     // POST /whatsapp/credentials/send-test — Send test message
     // ============================================
-    app.post('/whatsapp/credentials/send-test', async (request, reply) => {
+    app.post('/whatsapp/credentials/send-test', { preHandler: [app.requirePermission('messages', 'send')] }, async (request, reply) => {
         if (!request.authUser.tenantId) {
             return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
         }
         const schema = z.object({
             phoneNumberId: z.string(),
-            testPhone: z.string().regex(/^\+?[1-9]\d{6,14}$/).optional(),
+            testPhone: z.string().regex(/^\+?[1-9]\d{6,14}$/),
         });
         const body = schema.parse(request.body);
+        const tenantId = request.authUser.tenantId;
         const phone = await app.prisma.phoneNumber.findFirst({
-            where: { id: body.phoneNumberId, tenantId: request.authUser.tenantId },
+            where: { id: body.phoneNumberId, tenantId },
         });
         if (!phone) {
             return reply.status(404).send({ success: false, error: { code: 'NOT_FOUND' } });
         }
-        // In production, this would send via Meta API
+        let contact = await app.prisma.contact.findFirst({
+            where: { tenantId, phone: body.testPhone },
+        });
+        if (!contact) {
+            contact = await app.prisma.contact.create({
+                data: { tenantId, name: body.testPhone, phone: body.testPhone, country: 'IN' },
+            });
+        }
+        let conversation = await app.prisma.conversation.findUnique({
+            where: {
+                contactId_phoneNumberId_tenantId: {
+                    contactId: contact.id,
+                    phoneNumberId: body.phoneNumberId,
+                    tenantId,
+                },
+            },
+        });
+        if (!conversation) {
+            conversation = await app.prisma.conversation.create({
+                data: { tenantId, contactId: contact.id, phoneNumberId: body.phoneNumberId, status: 'OPEN' },
+            });
+        }
+        const testText = 'This is a test message from Kriscel WA confirming your WhatsApp connection is working.';
+        const message = await app.prisma.message.create({
+            data: {
+                tenantId,
+                conversationId: conversation.id,
+                contactId: contact.id,
+                phoneNumberId: body.phoneNumberId,
+                direction: 'OUTGOING',
+                type: 'TEXT',
+                body: testText,
+                status: 'PENDING',
+            },
+        });
+        const { dispatchOutboundMessage } = await import('../services/whatsappService.js');
+        const result = await dispatchOutboundMessage({
+            app,
+            messageId: message.id,
+            tenantId,
+            contactPhone: body.testPhone,
+            phoneNumberId: body.phoneNumberId,
+            body: testText,
+            type: 'text',
+        });
+        if (!result.success) {
+            return reply.status(400).send({
+                success: false,
+                error: { code: 'SEND_FAILED', message: result.error || 'Failed to send test message' },
+            });
+        }
         return {
             success: true,
             data: {
                 message: 'Test message sent',
-                to: body.testPhone || '+1234567890',
-                messageId: `test_${Date.now()}`,
+                to: body.testPhone,
+                messageId: result.metaMessageId,
                 sentAt: new Date().toISOString(),
             },
         };
@@ -521,8 +1236,8 @@ export async function registerWhatsAppRoutes(app) {
         if (!request.authUser.tenantId) {
             return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
         }
-        const webhookUrl = process.env.APP_URL
-            ? `${new URL(process.env.APP_URL).origin}/webhook`
+        const webhookUrl = process.env.PUBLIC_API_URL || process.env.API_URL
+            ? `${new URL(process.env.PUBLIC_API_URL || process.env.API_URL).origin}/webhook`
             : `http://localhost:${process.env.PORT || 3001}/webhook`;
         return { success: true, data: { webhookUrl } };
     });
@@ -539,17 +1254,36 @@ export async function registerWhatsAppRoutes(app) {
             orderBy: { createdAt: 'desc' },
             take: 50,
         }).catch(() => []) || [];
+        // Query Meta directly for the app's real webhook subscription — this
+        // used to hardcode every field as always-enabled, which silently lied:
+        // several of these (message_deliveries, message_reads, etc.) are legacy
+        // On-Premises API fields Meta rejects outright for this app's Cloud API
+        // permission tier (confirmed directly against Meta's own API earlier),
+        // so they were never actually subscribed no matter what this showed.
+        let subscribedFields = [];
+        const appId = process.env.META_APP_ID;
+        const appSecret = process.env.META_APP_SECRET;
+        if (appId && appSecret) {
+            try {
+                const subRes = await axios.get(`https://graph.facebook.com/v18.0/${appId}/subscriptions`, {
+                    params: { access_token: `${appId}|${appSecret}` },
+                });
+                const sub = (subRes.data?.data || []).find((s) => s.object === 'whatsapp_business_account');
+                subscribedFields = (sub?.fields || []).map((f) => f.name);
+            }
+            catch {
+                // Leave subscribedFields empty — surfaced as all-false below rather
+                // than falling back to a guess.
+            }
+        }
+        const KNOWN_FIELDS = ['messages', 'message_template_status_update'];
+        const fields = {};
+        for (const f of KNOWN_FIELDS)
+            fields[f] = subscribedFields.includes(f);
         return {
             success: true,
             data: {
-                fields: {
-                    messages: true,
-                    message_deliveries: true,
-                    message_reads: true,
-                    message_reactions: true,
-                    conversations: true,
-                    phone_number_quality: true,
-                },
+                fields,
                 retrySettings: {
                     maxRetries: 3,
                     retryDelay: 300,
@@ -561,7 +1295,7 @@ export async function registerWhatsAppRoutes(app) {
     // ============================================
     // PATCH /whatsapp/webhook/settings — Update webhook settings
     // ============================================
-    app.patch('/whatsapp/webhook/settings', async (request, reply) => {
+    app.patch('/whatsapp/webhook/settings', { preHandler: [app.requirePermission('settings', 'update')] }, async (request, reply) => {
         if (!request.authUser.tenantId) {
             return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
         }
@@ -591,7 +1325,7 @@ export async function registerWhatsAppRoutes(app) {
     // ============================================
     // POST /whatsapp/webhook/test — Test webhook
     // ============================================
-    app.post('/whatsapp/webhook/test', async (request, reply) => {
+    app.post('/whatsapp/webhook/test', { preHandler: [app.requirePermission('settings', 'update')] }, async (request, reply) => {
         if (!request.authUser.tenantId) {
             return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
         }
@@ -610,7 +1344,7 @@ export async function registerWhatsAppRoutes(app) {
     // ============================================
     // POST /whatsapp/phone-numbers/bulk-import — Bulk import phone numbers
     // ============================================
-    app.post('/whatsapp/phone-numbers/bulk-import', async (request, reply) => {
+    app.post('/whatsapp/phone-numbers/bulk-import', { preHandler: [app.requirePermission('phone_numbers', 'create')] }, async (request, reply) => {
         if (!request.authUser.tenantId) {
             return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
         }
@@ -678,24 +1412,58 @@ export async function registerWhatsAppRoutes(app) {
             select: {
                 id: true,
                 phoneNumber: true,
+                metaPhoneId: true,
+                accessToken: true,
                 dailySentLimit: true,
                 todaySentCount: true,
                 lastResetAt: true,
             },
         });
+        const creds = await app.prisma.whatsAppCredentials.findUnique({ where: { tenantId: request.authUser.tenantId } });
+        // Meta doesn't publish a "messages per minute/hour/day" figure at all —
+        // that was a fabricated shape. What Meta actually enforces is a
+        // messaging_limit_tier per phone number (a cap on unique customers
+        // messaged per rolling 24h). Fetch the real tier live instead of
+        // showing the same fictional numbers for every tenant.
+        const TIER_LIMITS = {
+            TIER_50: 50,
+            TIER_250: 250,
+            TIER_1K: 1000,
+            TIER_10K: 10000,
+            TIER_100K: 100000,
+            TIER_UNLIMITED: null, // null = no cap
+            NOT_ELIGIBLE: 0,
+        };
+        const phonesWithTier = await Promise.all(phoneNumbers.map(async (p) => {
+            const resetAt = p.lastResetAt ? new Date(new Date(p.lastResetAt).getTime() + 24 * 60 * 60 * 1000).toISOString() : null;
+            let messagingLimitTier = null;
+            let messagingLimit = null;
+            const token = p.accessToken || (creds?.accessToken ? decryptSecret(creds.accessToken) : null);
+            if (token && p.metaPhoneId) {
+                try {
+                    const res = await axios.get(`https://graph.facebook.com/v18.0/${p.metaPhoneId}`, {
+                        params: { access_token: token, fields: 'messaging_limit_tier' },
+                    });
+                    messagingLimitTier = res.data?.messaging_limit_tier || null;
+                    messagingLimit = messagingLimitTier ? TIER_LIMITS[messagingLimitTier] ?? null : null;
+                }
+                catch {
+                    // Leave null — surfaced as "not available" rather than a guess.
+                }
+            }
+            return {
+                id: p.id,
+                phoneNumber: p.phoneNumber,
+                dailySentLimit: p.dailySentLimit,
+                todaySentCount: p.todaySentCount,
+                resetAt,
+                messagingLimitTier,
+                messagingLimit,
+            };
+        }));
         return {
             success: true,
-            data: {
-                global: {
-                    messagesPerMinute: 250,
-                    messagesPerHour: 5000,
-                    messagesPerDay: 100000,
-                },
-                phones: phoneNumbers.map(p => ({
-                    ...p,
-                    resetAt: p.lastResetAt ? new Date(new Date(p.lastResetAt).getTime() + 24 * 60 * 60 * 1000).toISOString() : null,
-                })),
-            },
+            data: { phones: phonesWithTier },
         };
     });
     // ============================================
@@ -766,7 +1534,7 @@ export async function registerWhatsAppRoutes(app) {
     // ============================================
     // PATCH /whatsapp/phone-numbers/:id/settings — Update phone settings
     // ============================================
-    app.patch('/whatsapp/phone-numbers/:id/settings', async (request, reply) => {
+    app.patch('/whatsapp/phone-numbers/:id/settings', { preHandler: [app.requirePermission('phone_numbers', 'update')] }, async (request, reply) => {
         if (!request.authUser.tenantId) {
             return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
         }
@@ -809,7 +1577,7 @@ export async function registerWhatsAppRoutes(app) {
     // ============================================
     // POST /whatsapp/phone-numbers/:id/quick-replies — Create quick reply
     // ============================================
-    app.post('/whatsapp/phone-numbers/:id/quick-replies', async (request, reply) => {
+    app.post('/whatsapp/phone-numbers/:id/quick-replies', { preHandler: [app.requirePermission('phone_numbers', 'update')] }, async (request, reply) => {
         if (!request.authUser.tenantId) {
             return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
         }
@@ -852,7 +1620,7 @@ export async function registerWhatsAppRoutes(app) {
     // ============================================
     // DELETE /whatsapp/phone-numbers/:id/quick-replies/:qrId — Delete quick reply
     // ============================================
-    app.delete('/whatsapp/phone-numbers/:id/quick-replies/:qrId', async (request, reply) => {
+    app.delete('/whatsapp/phone-numbers/:id/quick-replies/:qrId', { preHandler: [app.requirePermission('phone_numbers', 'update')] }, async (request, reply) => {
         if (!request.authUser.tenantId) {
             return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
         }
@@ -945,6 +1713,177 @@ export async function registerWhatsAppRoutes(app) {
             take: 20,
         });
         return { success: true, data: phones };
+    });
+    // ============================================
+    // POST /whatsapp/phone-numbers/:id/register — Register phone with Meta Cloud API
+    // ============================================
+    app.post('/whatsapp/phone-numbers/:id/register', { preHandler: [app.requirePermission('phone_numbers', 'update')] }, async (request, reply) => {
+        if (!request.authUser.tenantId) {
+            return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
+        }
+        const { id } = z.object({ id: z.string() }).parse(request.params);
+        const { pin } = z.object({ pin: z.string().min(6).max(6) }).parse(request.body);
+        const phone = await app.prisma.phoneNumber.findFirst({
+            where: { id, tenantId: request.authUser.tenantId },
+        });
+        if (!phone) {
+            return reply.status(404).send({ success: false, error: { code: 'NOT_FOUND', message: 'Phone number not found' } });
+        }
+        if (!phone.metaPhoneId) {
+            return reply.status(400).send({ success: false, error: { code: 'NO_META_PHONE_ID', message: 'Phone number is not linked to a Meta Phone Number ID' } });
+        }
+        const creds = await app.prisma.whatsAppCredentials.findUnique({ where: { tenantId: request.authUser.tenantId } });
+        const token = phone.accessToken || (creds?.accessToken ? decryptSecret(creds.accessToken) : null);
+        if (!token) {
+            return reply.status(400).send({ success: false, error: { code: 'NO_TOKEN', message: 'No access token configured for this account' } });
+        }
+        try {
+            const res = await fetch(`https://graph.facebook.com/v19.0/${phone.metaPhoneId}/register`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ messaging_product: 'whatsapp', pin }),
+            });
+            const data = await res.json();
+            if (!res.ok) {
+                const errMsg = data?.error?.message || 'Meta registration failed';
+                const errCode = data?.error?.code;
+                if (errCode === 190)
+                    return reply.status(401).send({ success: false, error: { code: 'TOKEN_EXPIRED', message: 'Access token expired. Please reconnect.' } });
+                return reply.status(400).send({ success: false, error: { code: 'META_ERROR', message: errMsg } });
+            }
+            await app.prisma.phoneNumber.update({ where: { id }, data: { status: 'verified' } });
+            return { success: true, data: { message: 'Phone number registered successfully with Meta Cloud API' } };
+        }
+        catch (err) {
+            return reply.status(500).send({ success: false, error: { code: 'INTERNAL_ERROR', message: err.message } });
+        }
+    });
+    // ============================================
+    // POST /whatsapp/phone-numbers/:id/deregister — Deregister phone from Meta Cloud API
+    // ============================================
+    app.post('/whatsapp/phone-numbers/:id/deregister', { preHandler: [app.requirePermission('phone_numbers', 'update')] }, async (request, reply) => {
+        if (!request.authUser.tenantId) {
+            return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
+        }
+        const { id } = z.object({ id: z.string() }).parse(request.params);
+        const phone = await app.prisma.phoneNumber.findFirst({
+            where: { id, tenantId: request.authUser.tenantId },
+        });
+        if (!phone) {
+            return reply.status(404).send({ success: false, error: { code: 'NOT_FOUND', message: 'Phone number not found' } });
+        }
+        if (!phone.metaPhoneId) {
+            return reply.status(400).send({ success: false, error: { code: 'NO_META_PHONE_ID', message: 'Phone number is not linked to a Meta Phone Number ID' } });
+        }
+        const creds = await app.prisma.whatsAppCredentials.findUnique({ where: { tenantId: request.authUser.tenantId } });
+        const token = phone.accessToken || (creds?.accessToken ? decryptSecret(creds.accessToken) : null);
+        if (!token) {
+            return reply.status(400).send({ success: false, error: { code: 'NO_TOKEN', message: 'No access token configured for this account' } });
+        }
+        try {
+            const res = await fetch(`https://graph.facebook.com/v19.0/${phone.metaPhoneId}/deregister`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                body: JSON.stringify({ messaging_product: 'whatsapp' }),
+            });
+            const data = await res.json();
+            if (!res.ok) {
+                const errMsg = data?.error?.message || 'Meta deregistration failed';
+                return reply.status(400).send({ success: false, error: { code: 'META_ERROR', message: errMsg } });
+            }
+            await app.prisma.phoneNumber.update({ where: { id }, data: { status: 'disconnected' } });
+            return { success: true, data: { message: 'Phone number deregistered from Meta Cloud API' } };
+        }
+        catch (err) {
+            return reply.status(500).send({ success: false, error: { code: 'INTERNAL_ERROR', message: err.message } });
+        }
+    });
+    // ============================================
+    // GET /whatsapp/waba/billing-status — Check Meta Line of Credit / payment setup
+    // ============================================
+    app.get('/whatsapp/waba/billing-status', async (request, reply) => {
+        if (!request.authUser.tenantId) {
+            return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
+        }
+        const creds = await app.prisma.whatsAppCredentials.findUnique({ where: { tenantId: request.authUser.tenantId } });
+        const wabaId = creds?.wabaId;
+        const token = creds?.accessToken ? decryptSecret(creds.accessToken) : null;
+        if (!wabaId || !token) {
+            return { success: true, data: { configured: false, hasLineOfCredit: false, primaryFundingId: null, wabaId: null } };
+        }
+        try {
+            // Phase 1: fetch basic WABA info (always accessible with any valid token)
+            const res = await fetch(`https://graph.facebook.com/v19.0/${wabaId}?fields=id,name,currency&access_token=${token}`);
+            const data = await res.json();
+            if (!res.ok) {
+                return { success: true, data: { configured: true, hasLineOfCredit: false, primaryFundingId: null, wabaId, error: data?.error?.message } };
+            }
+            // Phase 2: try to read billing fields (requires BSP access — may fail for non-BSPs)
+            let primaryFundingId = null;
+            let paymentConfigId = null;
+            let billingError = null;
+            try {
+                const billingRes = await fetch(`https://graph.facebook.com/v19.0/${wabaId}?fields=primary_funding_id,payment_configuration_id&access_token=${token}`);
+                const billingData = await billingRes.json();
+                if (billingRes.ok) {
+                    primaryFundingId = billingData.primary_funding_id || null;
+                    paymentConfigId = billingData.payment_configuration_id || null;
+                }
+                else {
+                    billingError = billingData?.error?.message || 'Failed to read billing info';
+                }
+            }
+            catch {
+                billingError = 'Could not reach Meta billing API';
+            }
+            return {
+                success: true,
+                data: {
+                    configured: true,
+                    hasLineOfCredit: !!primaryFundingId,
+                    primaryFundingId,
+                    paymentConfigId,
+                    currency: data.currency || null,
+                    wabaId,
+                    wabaName: data.name || null,
+                    billingError,
+                },
+            };
+        }
+        catch (err) {
+            return { success: true, data: { configured: true, hasLineOfCredit: false, primaryFundingId: null, wabaId, billingError: err.message } };
+        }
+    });
+    // ============================================
+    // GET /whatsapp/accounts — List owned + client WABAs via system user token
+    // ============================================
+    app.get('/whatsapp/accounts', async (request, reply) => {
+        if (!request.authUser.tenantId) {
+            return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
+        }
+        const systemToken = process.env.WHATSAPP_SYSTEM_USER_TOKEN;
+        const businessId = process.env.META_BUSINESS_ID;
+        if (!systemToken || !businessId) {
+            return reply.status(503).send({ success: false, error: { code: 'NOT_CONFIGURED', message: 'System user token or Business ID not configured' } });
+        }
+        try {
+            const fields = 'id,name,currency,owner_business_info,on_behalf_of_business_info';
+            const [ownedRes, clientRes] = await Promise.all([
+                fetch(`https://graph.facebook.com/v19.0/${businessId}/owned_whatsapp_business_accounts?fields=${fields}&limit=20&access_token=${systemToken}`),
+                fetch(`https://graph.facebook.com/v19.0/${businessId}/client_whatsapp_business_accounts?fields=${fields}&limit=20&access_token=${systemToken}`),
+            ]);
+            const [ownedData, clientData] = await Promise.all([ownedRes.json(), clientRes.json()]);
+            return {
+                success: true,
+                data: {
+                    owned: ownedData.data || [],
+                    client: clientData.data || [],
+                },
+            };
+        }
+        catch (err) {
+            return reply.status(500).send({ success: false, error: { code: 'INTERNAL_ERROR', message: err.message } });
+        }
     });
     // ============================================
     // GET /whatsapp/phone-numbers/export — Export phone numbers
