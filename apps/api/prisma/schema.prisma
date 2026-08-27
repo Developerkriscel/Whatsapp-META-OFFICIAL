@@ -727,8 +727,14 @@ model PhoneNumber {
   tenantId String
   tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
-  phoneNumber  String  @unique
+  // Scoped per tenant by @@unique([tenantId, phoneNumber]) below, NOT globally:
+  // a global constraint here meant one tenant adding a number blocked every
+  // other tenant from adding the same one, and the resulting 409 disclosed that
+  // the number already existed somewhere in the platform.
+  phoneNumber  String
   displayName  String?
+  // Still globally unique — a Meta phone number ID genuinely belongs to exactly
+  // one WABA, so the same ID under two tenants is a real conflict worth rejecting.
   metaPhoneId  String? @unique
   metaHolderId String?
   wabaId       String? // WhatsApp Business Account this phone belongs to

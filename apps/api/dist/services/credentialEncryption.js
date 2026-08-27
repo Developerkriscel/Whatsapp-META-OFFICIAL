@@ -39,4 +39,16 @@ export function decryptSecret(value) {
 export function decryptIfPresent(value) {
     return value ? decryptSecret(value) : undefined;
 }
+/**
+ * Picks the Meta access token for a call: the phone number's own token when it
+ * has one, otherwise the tenant-level credential.
+ *
+ * Both are stored encrypted. Phone tokens were previously written in plaintext,
+ * and decryptSecret passes non-"enc:" values through unchanged, so rows written
+ * before the backfill keep working without a special case here.
+ */
+export function resolveAccessToken(phoneToken, credentialsToken) {
+    const stored = phoneToken || credentialsToken;
+    return stored ? decryptSecret(stored) : null;
+}
 //# sourceMappingURL=credentialEncryption.js.map

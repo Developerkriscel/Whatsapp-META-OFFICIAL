@@ -22,7 +22,7 @@ import {
   setupWebhook,
   type MetaOAuthConfig,
 } from '../services/metaOAuth.js';
-import { encryptSecret, decryptSecret, decryptIfPresent } from '../services/credentialEncryption.js';
+import { encryptSecret, decryptSecret, decryptIfPresent, resolveAccessToken } from '../services/credentialEncryption.js';
 import { resolveEffectiveWabaId } from '../services/metaTemplate.js';
 
 export async function registerWhatsAppRoutes(app: FastifyInstance): Promise<void> {
@@ -797,9 +797,17 @@ export async function registerWhatsAppRoutes(app: FastifyInstance): Promise<void
       canSendAuth: z.boolean().optional(),
     }).parse(request.body);
 
+    // accessToken is encrypted at rest, so it can't ride along in the spread —
+    // writing `body` wholesale is what previously stored these in plaintext.
+    const { accessToken, ...rest } = body;
+    const data: Prisma.PhoneNumberUpdateManyMutationInput = {
+      ...rest,
+      ...(accessToken !== undefined && { accessToken: encryptSecret(accessToken) }),
+    };
+
     const phone = await app.prisma.phoneNumber.updateMany({
       where: { id, tenantId: request.authUser.tenantId },
-      data: body,
+      data,
     });
 
     if (phone.count === 0) {
@@ -904,7 +912,7 @@ export async function registerWhatsAppRoutes(app: FastifyInstance): Promise<void
 
     // Tenant-scoped credentials only - no platform-wide env fallback, so an
     // unconfigured tenant can't piggyback on the platform's own Meta identity.
-    const token = phone.accessToken || (creds?.accessToken ? decryptSecret(creds.accessToken) : null);
+    const token = resolveAccessToken(phone.accessToken, creds?.accessToken);
     const metaPhoneId = phone.metaPhoneId || null;
 
     let realQualityScore = phone.qualityScore || 'GREEN';
@@ -1672,7 +1680,7 @@ export async function registerWhatsAppRoutes(app: FastifyInstance): Promise<void
       let messagingLimitTier: string | null = null;
       let messagingLimit: number | null = null;
 
-      const token = p.accessToken || (creds?.accessToken ? decryptSecret(creds.accessToken) : null);
+      const token = resolveAccessToken(p.accessToken, creds?.accessToken);
       if (token && p.metaPhoneId) {
         try {
           const res = await axios.get(`https://graph.facebook.com/v18.0/${p.metaPhoneId}`, {
@@ -2016,7 +2024,7 @@ export async function registerWhatsAppRoutes(app: FastifyInstance): Promise<void
     }
 
     const creds = await app.prisma.whatsAppCredentials.findUnique({ where: { tenantId: request.authUser.tenantId } });
-    const token = phone.accessToken || (creds?.accessToken ? decryptSecret(creds.accessToken) : null);
+    const token = resolveAccessToken(phone.accessToken, creds?.accessToken);
     if (!token) {
       return reply.status(400).send({ success: false, error: { code: 'NO_TOKEN', message: 'No access token configured for this account' } });
     }
@@ -2064,7 +2072,7 @@ export async function registerWhatsAppRoutes(app: FastifyInstance): Promise<void
     }
 
     const creds = await app.prisma.whatsAppCredentials.findUnique({ where: { tenantId: request.authUser.tenantId } });
-    const token = phone.accessToken || (creds?.accessToken ? decryptSecret(creds.accessToken) : null);
+    const token = resolveAccessToken(phone.accessToken, creds?.accessToken);
     if (!token) {
       return reply.status(400).send({ success: false, error: { code: 'NO_TOKEN', message: 'No access token configured for this account' } });
     }

@@ -1,5 +1,5 @@
 import { FastifyInstance } from 'fastify';
-import { decryptSecret } from './credentialEncryption.js';
+import { resolveAccessToken } from './credentialEncryption.js';
 
 export interface DispatchMessageParams {
   app: FastifyInstance;
@@ -37,7 +37,7 @@ export async function dispatchOutboundMessage(params: DispatchMessageParams): Pr
     // Tenant-scoped credentials only - never fall back to the platform's own
     // META_ACCESS_TOKEN env var here, or an unconfigured tenant could send
     // messages under the platform's identity/quota.
-    const token = phoneRecord?.accessToken || (creds?.accessToken ? decryptSecret(creds.accessToken) : null);
+    const token = resolveAccessToken(phoneRecord?.accessToken, creds?.accessToken);
     const metaPhoneId = phoneRecord?.metaPhoneId || null;
 
     // Format phone number to clean E.164 without leading '+' for Meta API
