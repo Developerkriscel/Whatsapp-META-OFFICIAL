@@ -58,13 +58,13 @@ interface QualityReport {
     deliveryRate: number;
     openRate: number;
     responseRate: number;
-    blockRate: number;
-    reportRate: number;
+    // Share of our sends that failed. Previously labelled "blockRate", which
+    // Meta does not expose and this never measured.
+    failureRate: number;
+    failedCount: number;
   };
-  dailyTrend: { date: string; deliveryRate: number; openRate: number; responseRate: number; blockRate: number }[];
-  benchmark: { deliveryRate: number; openRate: number; responseRate: number };
+  dailyTrend: { date: string; deliveryRate: number; openRate: number; responseRate: number }[];
   issues: string[];
-  recommendations: string[];
 }
 
 interface BusinessVerification {
@@ -1207,22 +1207,24 @@ export default function WhatsAppSettingsPage() {
                 <div className="card-apple p-4 text-center">
                   <p className="text-3xl font-bold text-apple-green">{qualityReport.metrics.deliveryRate}%</p>
                   <p className="text-sm text-ios-muted">Delivery Rate</p>
-                  <p className="text-xs text-ios-muted mt-1">Benchmark: {qualityReport.benchmark.deliveryRate}%</p>
+                  <p className="text-xs text-ios-muted mt-1">Accepted or delivered by Meta</p>
                 </div>
                 <div className="card-apple p-4 text-center">
                   <p className="text-3xl font-bold text-apple-green">{qualityReport.metrics.openRate}%</p>
                   <p className="text-sm text-ios-muted">Open Rate</p>
-                  <p className="text-xs text-ios-muted mt-1">Benchmark: {qualityReport.benchmark.openRate}%</p>
+                  <p className="text-xs text-ios-muted mt-1">Messages marked read</p>
                 </div>
                 <div className="card-apple p-4 text-center">
                   <p className="text-3xl font-bold text-apple-orange">{qualityReport.metrics.responseRate}%</p>
                   <p className="text-sm text-ios-muted">Response Rate</p>
-                  <p className="text-xs text-ios-muted mt-1">Benchmark: {qualityReport.benchmark.responseRate}%</p>
+                  <p className="text-xs text-ios-muted mt-1">Replied to within 24h</p>
                 </div>
                 <div className="card-apple p-4 text-center">
-                  <p className="text-3xl font-bold text-apple-red">{qualityReport.metrics.blockRate}%</p>
-                  <p className="text-sm text-ios-muted">Block Rate</p>
-                  <p className="text-xs text-ios-muted mt-1">Keep below 1%</p>
+                  <p className="text-3xl font-bold text-apple-red">{qualityReport.metrics.failureRate}%</p>
+                  <p className="text-sm text-ios-muted">Failure Rate</p>
+                  <p className="text-xs text-ios-muted mt-1">
+                    {qualityReport.metrics.failedCount} message{qualityReport.metrics.failedCount === 1 ? '' : 's'} rejected
+                  </p>
                 </div>
               </div>
 
@@ -1242,17 +1244,6 @@ export default function WhatsAppSettingsPage() {
                 </div>
               )}
 
-              {/* Recommendations */}
-              <div className="card-apple p-6">
-                <h3 className="font-semibold text-ios-dark mb-3">Recommendations</h3>
-                <ul className="space-y-2">
-                  {qualityReport.recommendations.map((rec, i) => (
-                    <li key={i} className="text-sm text-ios-secondary flex items-center gap-2">
-                      <CheckCircle className="w-4 h-4 text-apple-green" />{rec}
-                    </li>
-                  ))}
-                </ul>
-              </div>
             </>
           ) : (
             <div className="card-apple p-12 text-center">

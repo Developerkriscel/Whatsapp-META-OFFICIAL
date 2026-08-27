@@ -1480,6 +1480,28 @@ export async function registerTenantRoutes(app) {
                 },
             });
         }
+        // Meta caps how many unique customers a number may message per rolling 24h
+        // (its messaging tier). Checking here means an oversized campaign is refused
+        // up front, instead of sending until the cap is hit and then collecting
+        // rejections for every remaining recipient — which is what used to happen.
+        // `force: true` lets the caller send anyway and fill the remaining headroom.
+        const { force } = z.object({ force: z.boolean().optional() }).parse(request.body ?? {});
+        const { checkTierCapacity } = await import('../services/sendQuota.js');
+        const tierCheck = await checkTierCapacity(app.prisma, campaign.phoneNumberId, campaign.totalRecipients);
+        if (!tierCheck.withinTier && !force) {
+            return reply.status(429).send({
+                success: false,
+                error: {
+                    code: 'MESSAGING_TIER_EXCEEDED',
+                    message: tierCheck.message,
+                    tier: tierCheck.usage.tier,
+                    limit: tierCheck.usage.limit,
+                    alreadyMessaged24h: tierCheck.usage.uniqueCustomers24h,
+                    remaining: tierCheck.usage.remaining,
+                    recipients: campaign.totalRecipients,
+                },
+            });
+        }
         // Mark as sending immediately
         await app.prisma.campaign.update({
             where: { id: campaignId },

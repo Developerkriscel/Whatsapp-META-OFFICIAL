@@ -746,6 +746,17 @@ model PhoneNumber {
   status       String  @default("pending_verification")
   qualityScore String?
 
+  // Meta's display-name review state for this number: APPROVED,
+  // PENDING_REVIEW, DECLINED, NONE. Distinct from business verification.
+  nameStatus String?
+
+  // Meta's messaging tier — a cap on how many unique customers this number may
+  // message per rolling 24h (TIER_50 … TIER_UNLIMITED). Cached because tiers
+  // change on the order of days and the panel was re-fetching one per phone on
+  // every page load.
+  messagingLimitTier      String?
+  messagingTierFetchedAt  DateTime?
+
   // Category permissions
   canSendSales     Boolean @default(true)
   canSendMarketing Boolean @default(true)

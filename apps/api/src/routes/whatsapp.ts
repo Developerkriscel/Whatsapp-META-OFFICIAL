@@ -915,24 +915,33 @@ export async function registerWhatsAppRoutes(app: FastifyInstance): Promise<void
     const token = resolveAccessToken(phone.accessToken, creds?.accessToken);
     const metaPhoneId = phone.metaPhoneId || null;
 
-    let realQualityScore = phone.qualityScore || 'GREEN';
+    // Starts as UNKNOWN rather than GREEN: a number we have never successfully
+    // read a rating for has unknown quality, and reporting that as the best
+    // possible score overstated every new number's standing.
+    let realQualityScore = phone.qualityScore || 'UNKNOWN';
     let metaStatus = phone.status;
+    let nameStatus: string | null = phone.nameStatus;
+    let messagingLimitTier: string | null = phone.messagingLimitTier;
 
     // 2. Try fetching real Meta Graph API quality rating & line status
     if (token && metaPhoneId) {
       try {
         const metaRes = await fetch(
-          `https://graph.facebook.com/v19.0/${metaPhoneId}?fields=display_phone_number,quality_rating,name_status,status&access_token=${token}`
+          `https://graph.facebook.com/v19.0/${metaPhoneId}?fields=display_phone_number,quality_rating,name_status,status,messaging_limit_tier&access_token=${token}`
         );
         if (metaRes.ok) {
           const metaData: any = await metaRes.json();
-          if (metaData.quality_rating) {
-            const ratingMap: Record<string, string> = { GREEN: 'GREEN', YELLOW: 'YELLOW', RED: 'RED', UNKNOWN: 'GREEN' };
-            realQualityScore = ratingMap[metaData.quality_rating?.toUpperCase()] || 'GREEN';
+          const rating = metaData.quality_rating?.toUpperCase();
+          if (rating) {
+            // Meta's own UNKNOWN is carried through as UNKNOWN. It previously
+            // mapped to GREEN, which is what a brand new number reports.
+            realQualityScore = ['GREEN', 'YELLOW', 'RED'].includes(rating) ? rating : 'UNKNOWN';
           }
           if (metaData.status) {
             metaStatus = metaData.status.toLowerCase() === 'connected' || metaData.status.toLowerCase() === 'approved' ? 'verified' : phone.status;
           }
+          if (metaData.name_status) nameStatus = String(metaData.name_status).toUpperCase();
+          if (metaData.messaging_limit_tier) messagingLimitTier = String(metaData.messaging_limit_tier).toUpperCase();
         }
       } catch (e) {
         // Fall back to database calculation below
@@ -957,7 +966,13 @@ export async function registerWhatsAppRoutes(app: FastifyInstance): Promise<void
 
     await app.prisma.phoneNumber.update({
       where: { id },
-      data: { qualityScore: realQualityScore, status: metaStatus },
+      data: {
+        qualityScore: realQualityScore,
+        status: metaStatus,
+        nameStatus,
+        messagingLimitTier,
+        ...(messagingLimitTier ? { messagingTierFetchedAt: new Date() } : {}),
+      },
     });
 
     // Record this reading so the trend is built from real observations.
@@ -1030,42 +1045,114 @@ export async function registerWhatsAppRoutes(app: FastifyInstance): Promise<void
       app.prisma.template.count({ where: { tenantId: request.authUser.tenantId, status: 'APPROVED' } }),
     ]);
 
-    // These used to be hardcoded `true` regardless of reality (displayNameApproved,
-    // domainVerified) — pull the real business_verification_status from Meta
-    // when credentials are available instead of always claiming success.
+    // Business verification, the green tick, and display-name approval are three
+    // separate things in Meta — a business can be verified without a tick, and
+    // display names are approved per phone number, not per business. All three
+    // used to be the same boolean wearing different names.
     let businessVerifiedFromMeta: boolean | null = null;
+    let officialBusinessAccount: boolean | null = null;
+
     if (creds?.accessToken) {
       const wabaId = await resolveEffectiveWabaId(app.prisma, request.authUser.tenantId, creds.wabaId);
       if (wabaId) {
         try {
           const res = await axios.get(`https://graph.facebook.com/v18.0/${wabaId}`, {
-            params: { access_token: decryptSecret(creds.accessToken), fields: 'business_verification_status' },
+            params: {
+              access_token: decryptSecret(creds.accessToken),
+              fields: 'business_verification_status,is_official_business_account',
+            },
           });
           businessVerifiedFromMeta = res.data?.business_verification_status === 'verified';
+          if (typeof res.data?.is_official_business_account === 'boolean') {
+            officialBusinessAccount = res.data.is_official_business_account;
+          }
         } catch {
-          // Leave as null — the DB-derived fallback below still applies.
+          // Leave as null — reported as "unknown" rather than assumed either way.
         }
       }
     }
 
+    // Display-name approval lives on each phone number. Report the weakest state
+    // across connected numbers, since one declined name is what the tenant needs
+    // to act on.
+    const phones = await app.prisma.phoneNumber.findMany({
+      where: { tenantId: request.authUser.tenantId },
+      select: { id: true, phoneNumber: true, displayName: true, nameStatus: true },
+    });
+    // Meta reports a usable display name as either APPROVED or
+    // AVAILABLE_WITHOUT_REVIEW (a name that needs no review at all). Treating
+    // only APPROVED as good marked perfectly valid numbers as unapproved.
+    const NAME_OK = new Set(['APPROVED', 'AVAILABLE_WITHOUT_REVIEW']);
+    const namesKnown = phones.filter(p => p.nameStatus && p.nameStatus !== 'UNKNOWN');
+    const anyNameDeclined = namesKnown.some(p => p.nameStatus === 'DECLINED' || p.nameStatus === 'EXPIRED');
+    const anyNamePending = namesKnown.some(p => p.nameStatus === 'PENDING_REVIEW');
+    const allNamesApproved = namesKnown.length > 0 && namesKnown.every(p => NAME_OK.has(p.nameStatus!));
+
     const businessVerified = businessVerifiedFromMeta ?? !!tenant?.metaBusinessId;
     const hasPhone = phoneCount > 0;
+
+    const displayNameStatus = anyNameDeclined
+      ? 'declined'
+      : anyNamePending
+        ? 'pending'
+        : allNamesApproved
+          ? 'completed'
+          : hasPhone
+            ? 'unknown'
+            : 'pending';
 
     return {
       success: true,
       data: {
         businessVerified,
-        greenTickEnabled: businessVerified,
-        displayNameApproved: businessVerified,
-        domainVerified: businessVerified,
-        taxIdVerified: false,
+        // null means "we couldn't read it from Meta", which is different from
+        // false and should be shown as such rather than as a failed check.
+        greenTickEnabled: officialBusinessAccount,
+        displayNameApproved: allNamesApproved,
+        // Domain verification isn't exposed on this API surface; claiming a
+        // value for it was pure invention.
+        domainVerified: null,
         businessName: tenant?.name || 'Your Business',
-        taxId: null,
+        phoneNameStatuses: phones.map(p => ({
+          phoneNumber: p.phoneNumber,
+          displayName: p.displayName,
+          nameStatus: p.nameStatus ?? 'UNKNOWN',
+        })),
         steps: [
-          { id: 'business', name: 'Business Verification', status: businessVerified ? 'completed' : 'pending', description: 'Verify your business with Meta' },
-          { id: 'display_name', name: 'Display Name', status: hasPhone ? 'completed' : 'pending', description: hasPhone ? 'Your display name is set' : 'Connect a phone number to set a display name' },
-          { id: 'phone', name: 'Phone Numbers', status: hasPhone ? 'completed' : 'pending', description: 'Connect at least one phone number' },
-          { id: 'template', name: 'Message Templates', status: approvedTemplateCount > 0 ? 'completed' : 'pending', description: 'Submit templates for approval' },
+          {
+            id: 'business',
+            name: 'Business Verification',
+            status: businessVerified ? 'completed' : 'pending',
+            description: businessVerified ? 'Your business is verified with Meta' : 'Verify your business with Meta',
+          },
+          {
+            id: 'phone',
+            name: 'Phone Numbers',
+            status: hasPhone ? 'completed' : 'pending',
+            description: hasPhone ? `${phoneCount} number${phoneCount === 1 ? '' : 's'} connected` : 'Connect at least one phone number',
+          },
+          {
+            id: 'display_name',
+            name: 'Display Name',
+            status: displayNameStatus,
+            description: anyNameDeclined
+              ? 'Meta declined a display name — open the number to submit a new one'
+              : anyNamePending
+                ? 'Meta is reviewing a display name'
+                : allNamesApproved
+                  ? 'Display names approved by Meta'
+                  : hasPhone
+                    ? 'Not read from Meta yet — refresh a number to check'
+                    : 'Connect a phone number to set a display name',
+          },
+          {
+            id: 'template',
+            name: 'Message Templates',
+            status: approvedTemplateCount > 0 ? 'completed' : 'pending',
+            description: approvedTemplateCount > 0
+              ? `${approvedTemplateCount} approved template${approvedTemplateCount === 1 ? '' : 's'}`
+              : 'Submit templates for approval',
+          },
         ],
       },
     };
@@ -1138,7 +1225,11 @@ export async function registerWhatsAppRoutes(app: FastifyInstance): Promise<void
     });
 
     const totalMessages = messages.length;
-    const delivered = messages.filter(m => m.status === 'DELIVERED' || m.status === 'SENT').length;
+    // READ is a terminal state past DELIVERED, so excluding it undercounted
+    // delivery — a message the recipient actually opened was scored as not
+    // delivered.
+    const DELIVERED_STATES = new Set(['SENT', 'DELIVERED', 'READ']);
+    const delivered = messages.filter(m => DELIVERED_STATES.has(m.status)).length;
     const read = messages.filter(m => m.readAt).length;
 
     // A "response" is a real inbound message in the same conversation
@@ -1169,7 +1260,7 @@ export async function registerWhatsAppRoutes(app: FastifyInstance): Promise<void
 
       const dayMsgs = messages.filter(m => m.createdAt.toISOString().split('T')[0] === dateStr);
       const dayTotal = dayMsgs.length;
-      const dayDelivered = dayMsgs.filter(m => m.status === 'DELIVERED' || m.status === 'SENT').length;
+      const dayDelivered = dayMsgs.filter(m => DELIVERED_STATES.has(m.status)).length;
       const dayRead = dayMsgs.filter(m => m.readAt).length;
       const dayOutgoing = dayMsgs.filter(m => m.direction === 'OUTGOING');
       const dayResponded = dayOutgoing.filter(gotResponse).length;
@@ -1179,7 +1270,6 @@ export async function registerWhatsAppRoutes(app: FastifyInstance): Promise<void
         deliveryRate: dayTotal > 0 ? Math.round((dayDelivered / dayTotal) * 100) : 100,
         openRate: dayTotal > 0 ? Math.round((dayRead / dayTotal) * 100) : 0,
         responseRate: dayOutgoing.length > 0 ? Math.round((dayResponded / dayOutgoing.length) * 100) : 0,
-        blockRate: 0,
       };
     });
 
@@ -1199,29 +1289,24 @@ export async function registerWhatsAppRoutes(app: FastifyInstance): Promise<void
           deliveryRate: totalMessages > 0 ? Math.round((delivered / totalMessages) * 100 * 10) / 10 : 100,
           openRate: totalMessages > 0 ? Math.round((read / totalMessages) * 100 * 10) / 10 : 0,
           responseRate,
-          blockRate: totalMessages > 0 ? Math.round((failed / totalMessages) * 100 * 10) / 10 : 0,
-          reportRate: 0,
+          // This is the share of our sends that failed. It was labelled
+          // "blockRate", which it never measured — Meta does not expose how many
+          // recipients blocked a number, and the UI told people to keep the
+          // number under 1% as though it did.
+          failureRate: totalMessages > 0 ? Math.round((failed / totalMessages) * 100 * 10) / 10 : 0,
+          failedCount: failed,
         },
         dailyTrend,
-        benchmark: {
-          deliveryRate: 95,
-          openRate: 75,
-          responseRate: 45,
-        },
-        issues: phone.qualityScore === 'RED' ? [
-          'High block rate detected in last 7 days',
-          'Consider reviewing message content',
-          'Ensure users have explicitly opted in',
-        ] : phone.qualityScore === 'YELLOW' ? [
-          'Delivery rate below average',
-          'Monitor for further degradation',
-        ] : [],
-        recommendations: [
-          'Continue monitoring message quality',
-          'Ensure users have opted in',
-          'Send relevant, timely messages',
-          'Use message templates for consistency',
-        ],
+        // Meta publishes no per-metric benchmarks, so the 95/75/45 figures shown
+        // here previously were invented. Issues and recommendations were canned
+        // strings keyed off the quality colour — identical for every tenant, in
+        // every state — and are gone for the same reason. The one real signal is
+        // Meta's own quality rating, already reported above.
+        issues: phone.qualityScore === 'RED'
+          ? ['Meta has rated this number RED. Review recent message content and confirm recipients opted in.']
+          : phone.qualityScore === 'YELLOW'
+            ? ['Meta has rated this number YELLOW. Watch for further degradation.']
+            : [],
         updatedAt: new Date().toISOString(),
       },
     };
@@ -1547,10 +1632,15 @@ export async function registerWhatsAppRoutes(app: FastifyInstance): Promise<void
       success: true,
       data: {
         fields,
-        retrySettings: {
-          maxRetries: 3,
-          retryDelay: 300,
-        },
+        // Cloud API subscribes the *app* to the whatsapp_business_account
+        // object, so every WABA connected to this app shares one subscription.
+        // A tenant cannot have its own field selection, and presenting this as a
+        // per-tenant setting is what made the old editable UI misleading.
+        managedAtPlatformLevel: true,
+        // Meta retries failed deliveries on its own schedule and does not let
+        // the receiver configure it. The retry knobs shown here previously were
+        // hardcoded constants that nothing read.
+        retryPolicy: 'Meta retries failed deliveries automatically; the schedule is not configurable.',
         logs: webhookLogs,
       },
     };
@@ -1564,29 +1654,22 @@ export async function registerWhatsAppRoutes(app: FastifyInstance): Promise<void
       return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
     }
 
-    const body = z.object({
-      fields: z.object({
-        messages: z.boolean().optional(),
-        message_deliveries: z.boolean().optional(),
-        message_reads: z.boolean().optional(),
-        message_reactions: z.boolean().optional(),
-        conversations: z.boolean().optional(),
-        phone_number_quality: z.boolean().optional(),
-      }).optional(),
-      retrySettings: z.object({
-        maxRetries: z.number().min(0).max(10).optional(),
-        retryDelay: z.number().min(60).max(3600).optional(),
-      }).optional(),
-    }).parse(request.body);
-
-    // In production, this would update Meta webhook subscription
-    return {
-      success: true,
-      data: {
-        message: 'Webhook settings updated',
-        settings: body,
+    // Webhook subscriptions belong to the Meta *app*, not to a tenant: one
+    // subscription serves every WABA connected to it. Letting one tenant change
+    // it would silently change event delivery for all of them.
+    //
+    // This used to accept the request, echo it back, and report success without
+    // persisting anything or contacting Meta — so toggles appeared to save and
+    // then reverted on reload. Refusing honestly is better than pretending.
+    return reply.status(409).send({
+      success: false,
+      error: {
+        code: 'MANAGED_AT_PLATFORM_LEVEL',
+        message:
+          'Webhook subscriptions are configured once for the whole platform and cannot be changed per workspace. ' +
+          'Contact support if you need a different set of events.',
       },
-    };
+    });
   });
 
   // ============================================
@@ -1597,15 +1680,89 @@ export async function registerWhatsAppRoutes(app: FastifyInstance): Promise<void
       return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
     }
 
-    // In production, this would trigger a test webhook to Meta
+    // Exercises the two things that actually break in a webhook setup: whether
+    // Meta can reach the URL at all, and whether the endpoint correctly rejects
+    // requests that aren't signed by Meta.
+    //
+    // Deliberately runs the verification handshake rather than delivering a fake
+    // event — a synthetic "message" would land in the tenant's inbox as though a
+    // customer had written in. This used to return success unconditionally,
+    // including when the webhook was entirely broken.
+    const base = process.env.PUBLIC_API_URL || process.env.API_URL;
+    if (!base) {
+      return reply.status(500).send({
+        success: false,
+        error: { code: 'NO_PUBLIC_URL', message: 'PUBLIC_API_URL is not configured, so the webhook URL cannot be determined.' },
+      });
+    }
+
+    const webhookUrl = `${new URL(base).origin}/webhook`;
+    const verifyToken = process.env.META_WEBHOOK_VERIFY_TOKEN;
+    const checks: Array<{ name: string; passed: boolean; detail: string }> = [];
+
+    // 1. Reachability + verify token — the exact handshake Meta performs.
+    if (!verifyToken) {
+      checks.push({ name: 'Verification handshake', passed: false, detail: 'META_WEBHOOK_VERIFY_TOKEN is not configured.' });
+    } else {
+      const challenge = `test${Date.now()}`;
+      try {
+        const res = await fetch(
+          `${webhookUrl}?hub.mode=subscribe&hub.verify_token=${encodeURIComponent(verifyToken)}&hub.challenge=${challenge}`,
+          { signal: AbortSignal.timeout(10_000) },
+        );
+        const text = (await res.text()).trim();
+        checks.push({
+          name: 'Verification handshake',
+          passed: res.ok && text === challenge,
+          detail: res.ok && text === challenge
+            ? 'Meta can reach the URL and the verify token matches.'
+            : `Expected the challenge echoed back, got HTTP ${res.status} "${text.slice(0, 60)}".`,
+        });
+      } catch (err: any) {
+        checks.push({ name: 'Verification handshake', passed: false, detail: `Could not reach the webhook URL: ${err?.message}` });
+      }
+    }
+
+    // 2. Signature enforcement — an unsigned POST must be refused.
+    try {
+      const res = await fetch(webhookUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ object: 'whatsapp_business_account', entry: [] }),
+        signal: AbortSignal.timeout(10_000),
+      });
+      checks.push({
+        name: 'Signature enforcement',
+        passed: res.status === 403,
+        detail: res.status === 403
+          ? 'Unsigned requests are rejected, as they should be.'
+          : `An unsigned request returned HTTP ${res.status} instead of 403 — the endpoint may be accepting forged events.`,
+      });
+    } catch (err: any) {
+      checks.push({ name: 'Signature enforcement', passed: false, detail: `Could not complete the check: ${err?.message}` });
+    }
+
+    // 3. Whether Meta has actually been delivering events here.
+    const lastEvent = await app.prisma.webhookLog.findFirst({
+      where: { tenantId: request.authUser.tenantId },
+      orderBy: { createdAt: 'desc' },
+      select: { createdAt: true, event: true },
+    });
+    checks.push({
+      name: 'Recent deliveries',
+      passed: !!lastEvent,
+      detail: lastEvent
+        ? `Last event received ${lastEvent.createdAt.toISOString()} (${lastEvent.event}).`
+        : 'No webhook events have been received for this workspace yet.',
+    });
+
     return {
       success: true,
       data: {
-        message: 'Webhook test initiated',
-        timestamp: new Date().toISOString(),
-        webhookUrl: process.env.APP_URL
-          ? `${new URL(process.env.APP_URL).origin}/webhook`
-          : `http://localhost:${process.env.PORT || 3001}/webhook`,
+        webhookUrl,
+        healthy: checks.every(c => c.passed),
+        checks,
+        testedAt: new Date().toISOString(),
       },
     };
   });

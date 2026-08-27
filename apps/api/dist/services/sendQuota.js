@@ -1,4 +1,73 @@
 /**
+ * Meta's messaging tiers. The number is a cap on how many *unique customers*
+ * a phone number may message in a rolling 24h window — not a message count, so
+ * ten messages to one customer consume one unit, not ten.
+ */
+export const TIER_LIMITS = {
+    TIER_50: 50,
+    TIER_250: 250,
+    TIER_1K: 1000,
+    TIER_10K: 10000,
+    TIER_100K: 100000,
+    TIER_UNLIMITED: null, // null = uncapped
+    NOT_ELIGIBLE: 0,
+};
+/**
+ * How much of Meta's 24h unique-customer allowance this number has used.
+ *
+ * Counts distinct contacts we sent to and Meta accepted — a rejected send never
+ * reached a customer and doesn't consume allowance.
+ */
+export async function getTierUsage(prisma, phoneNumberId) {
+    const phone = await prisma.phoneNumber.findUnique({
+        where: { id: phoneNumberId },
+        select: { messagingLimitTier: true },
+    });
+    const tier = phone?.messagingLimitTier ?? null;
+    const limit = tier ? TIER_LIMITS[tier] ?? null : null;
+    const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    const rows = await prisma.message.findMany({
+        where: {
+            phoneNumberId,
+            direction: 'OUTGOING',
+            createdAt: { gte: since },
+            status: { in: ['SENT', 'DELIVERED', 'READ'] },
+        },
+        select: { contactId: true },
+        distinct: ['contactId'],
+    });
+    const uniqueCustomers24h = rows.length;
+    return {
+        tier,
+        limit,
+        uniqueCustomers24h,
+        remaining: limit === null ? null : Math.max(limit - uniqueCustomers24h, 0),
+    };
+}
+/**
+ * Whether this number can still start a conversation with `newCustomers` people
+ * it hasn't messaged in the last 24h. Used to warn at campaign creation rather
+ * than letting a campaign discover the cap part-way through its recipient list.
+ */
+export async function checkTierCapacity(prisma, phoneNumberId, newCustomers) {
+    const usage = await getTierUsage(prisma, phoneNumberId);
+    // Unknown tier or an uncapped one — nothing to enforce.
+    if (usage.limit === null || usage.remaining === null) {
+        return { withinTier: true, usage };
+    }
+    if (newCustomers <= usage.remaining) {
+        return { withinTier: true, usage };
+    }
+    const tierName = usage.tier ? usage.tier.replace(/_/g, ' ') : 'current';
+    return {
+        withinTier: false,
+        usage,
+        message: `This would message ${newCustomers} people, but Meta's ${tierName} limit allows ${usage.limit} ` +
+            `unique recipients per 24 hours and ${usage.uniqueCustomers24h} have already been messaged from ` +
+            `this number. ${usage.remaining} remaining — the rest would be rejected by Meta.`,
+    };
+}
+/**
  * Per-phone daily send quota.
  *
  * `todaySentCount` used to be read in several places and written in none, so
