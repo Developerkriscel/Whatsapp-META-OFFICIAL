@@ -611,8 +611,9 @@ function UsersTab({ tenantId, users }: { tenantId: string; users: TenantUser[] }
   const [inviteName, setInviteName] = useState('');
   const [inviteResult, setInviteResult] = useState<{ user: any; tempPassword: string } | null>(null);
   const [copied, setCopied] = useState(false);
-  const [resetLink, setResetLink] = useState<{ mode: string; email: string; resetUrl?: string; expiresAt?: string } | null>(null);
+  const [resetLink, setResetLink] = useState<{ mode: string; email: string; resetUrl?: string; tempPassword?: string; expiresAt?: string } | null>(null);
   const [resetCopied, setResetCopied] = useState(false);
+  const [resetTarget, setResetTarget] = useState<{ id: string; email: string } | null>(null);
 
   const inviteMutation = useMutation({
     mutationFn: async (data: { email: string; name: string; role: string }) => {
@@ -628,19 +629,25 @@ function UsersTab({ tenantId, users }: { tenantId: string; users: TenantUser[] }
     },
   });
 
-  // Returns a reset link for the operator to relay. No email is sent — saying
-  // one was, as this used to, left the operator believing the user had been
-  // contacted when nothing had happened.
+  // No email is sent anywhere, so the operator has to relay whatever this
+  // produces. Saying "email sent", as this used to, left them believing the user
+  // had been contacted when nothing had happened.
   const resetPasswordMutation = useMutation({
-    mutationFn: async (userId: string) => {
-      const r = await api.post(`/superadmin/tenants/${tenantId}/users/${userId}/reset-password`, {});
-      return r.data.data as { mode: string; email: string; resetUrl?: string; expiresAt?: string };
+    mutationFn: async ({ userId, setTemporaryPassword }: { userId: string; setTemporaryPassword: boolean }) => {
+      const r = await api.post(
+        `/superadmin/tenants/${tenantId}/users/${userId}/reset-password`,
+        setTemporaryPassword ? { setTemporaryPassword: true } : {},
+      );
+      return r.data.data as {
+        mode: string; email: string; resetUrl?: string; tempPassword?: string; expiresAt?: string;
+      };
     },
     onSuccess: (d) => {
       setResetLink(d);
+      setResetTarget(null);
     },
     onError: (err: any) => {
-      alert(err?.response?.data?.error?.message || 'Could not generate a reset link');
+      alert(err?.response?.data?.error?.message || 'Could not reset the password');
     },
   });
 
@@ -740,14 +747,51 @@ function UsersTab({ tenantId, users }: { tenantId: string; users: TenantUser[] }
         </div>
       )}
 
+      {resetTarget && (
+        <div className="mb-4 p-4 bg-ios-gray/60 border border-black/10 rounded-apple-lg">
+          <div className="flex items-start justify-between gap-3 mb-3">
+            <div>
+              <p className="font-medium text-ios-dark text-sm">Reset password for {resetTarget.email}</p>
+              <p className="text-xs text-ios-muted mt-0.5">No email is sent — you'll relay whichever you choose.</p>
+            </div>
+            <button onClick={() => setResetTarget(null)} className="text-ios-muted hover:text-ios-dark text-sm shrink-0">
+              Cancel
+            </button>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <button
+              onClick={() => resetPasswordMutation.mutate({ userId: resetTarget.id, setTemporaryPassword: true })}
+              disabled={resetPasswordMutation.isPending}
+              className="btn-apple btn-apple-primary text-xs px-3 py-1.5"
+            >
+              Set a new password now
+            </button>
+            <button
+              onClick={() => resetPasswordMutation.mutate({ userId: resetTarget.id, setTemporaryPassword: false })}
+              disabled={resetPasswordMutation.isPending}
+              className="btn-apple btn-apple-outline text-xs px-3 py-1.5"
+            >
+              Send them a reset link instead
+            </button>
+          </div>
+          <p className="text-xs text-ios-muted mt-2">
+            Setting a password logs the user out of that account until you give them the new one. A link leaves their
+            current password working until they use it.
+          </p>
+        </div>
+      )}
+
       {resetLink && (
         <div className="mb-4 p-4 bg-apple-blue/5 border border-apple-blue/20 rounded-apple-lg">
           <div className="flex items-start justify-between gap-3 mb-2">
             <div>
-              <p className="font-medium text-ios-dark text-sm">Reset link for {resetLink.email}</p>
+              <p className="font-medium text-ios-dark text-sm">
+                {resetLink.mode === 'password' ? 'New password for ' : 'Reset link for '}{resetLink.email}
+              </p>
               <p className="text-xs text-ios-muted mt-0.5">
-                Send this to the user yourself — no email was sent. Their current password keeps working until they use it.
-                {resetLink.expiresAt && ` Expires ${new Date(resetLink.expiresAt).toLocaleString()}.`}
+                {resetLink.mode === 'password'
+                  ? 'Copy it now — it is not stored anywhere and cannot be shown again. The user cannot sign in until you send it to them.'
+                  : `Send this to the user — their current password keeps working until they use it.${resetLink.expiresAt ? ` Expires ${new Date(resetLink.expiresAt).toLocaleString()}.` : ''}`}
               </p>
             </div>
             <button
@@ -759,12 +803,13 @@ function UsersTab({ tenantId, users }: { tenantId: string; users: TenantUser[] }
           </div>
           <div className="flex items-center gap-2">
             <code className="flex-1 text-xs bg-white border border-black/10 rounded px-2 py-1.5 overflow-x-auto whitespace-nowrap">
-              {resetLink.resetUrl}
+              {resetLink.mode === 'password' ? resetLink.tempPassword : resetLink.resetUrl}
             </code>
             <button
               onClick={() => {
-                if (resetLink.resetUrl) {
-                  navigator.clipboard.writeText(resetLink.resetUrl);
+                const value = resetLink.mode === 'password' ? resetLink.tempPassword : resetLink.resetUrl;
+                if (value) {
+                  navigator.clipboard.writeText(value);
                   setResetCopied(true);
                   setTimeout(() => setResetCopied(false), 2000);
                 }
@@ -820,7 +865,7 @@ function UsersTab({ tenantId, users }: { tenantId: string; users: TenantUser[] }
                   <option value="girl">Avatar: Girl</option>
                 </select>
                 <button
-                  onClick={() => resetPasswordMutation.mutate(u.id)}
+                  onClick={() => { setResetLink(null); setResetTarget({ id: u.id, email: u.email }); }}
                   disabled={resetPasswordMutation.isPending}
                   className="px-2 py-1 text-xs border border-black/10 rounded hover:bg-white transition"
                   title="Reset password"
