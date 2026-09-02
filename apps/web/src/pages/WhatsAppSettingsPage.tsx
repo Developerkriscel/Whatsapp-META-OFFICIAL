@@ -409,7 +409,7 @@ export default function WhatsAppSettingsPage() {
       if (config?.appId && config?.configId) {
         await loadFacebookSdk(config.appId, config.graphApiVersion);
         try {
-          const result = await launchEmbeddedSignup(config.configId);
+          const result = await launchEmbeddedSignup(config.configId, config.prefill);
           const completeRes = await api.post('/whatsapp/embedded-signup/complete', result);
           return { embedded: true as const, data: completeRes.data };
         } catch (err: any) {

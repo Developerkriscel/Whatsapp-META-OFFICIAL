@@ -53,7 +53,12 @@ export interface EmbeddedSignupResult {
  * postMessage as the user completes the flow inside the popup, and FB.login's own
  * callback separately returns the authorization `code` once the popup closes.
  */
-export function launchEmbeddedSignup(configId: string): Promise<EmbeddedSignupResult> {
+export interface SignupPrefill {
+  business?: { name?: string; email?: string; website?: string; phone?: { code?: number; number?: string } };
+  phone?: { displayName?: string; category?: string; description?: string };
+}
+
+export function launchEmbeddedSignup(configId: string, prefill?: SignupPrefill): Promise<EmbeddedSignupResult> {
   return new Promise((resolve, reject) => {
     if (!window.FB) {
       reject(new Error('Facebook SDK not loaded'));
@@ -109,7 +114,16 @@ export function launchEmbeddedSignup(configId: string): Promise<EmbeddedSignupRe
         // Matches what Meta's own Embedded Signup builder generates for this
         // configuration — v4 of the flow, session info v3. Omitting the version
         // leaves Meta to pick a default that may not match the config.
-        extras: { sessionInfoVersion: '3', version: 'v4' },
+        //
+        // `setup` pre-fills the business fields inside the popup. It is omitted
+        // entirely when we have nothing to contribute — Meta treats an empty
+        // setup object as intent to prefill, which can blank out fields the
+        // customer would otherwise have had offered to them.
+        extras: {
+          sessionInfoVersion: '3',
+          version: 'v4',
+          ...(prefill && Object.keys(prefill).length > 0 ? { setup: prefill } : {}),
+        },
       }
     );
   });

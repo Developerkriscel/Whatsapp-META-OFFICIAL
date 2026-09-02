@@ -364,6 +364,40 @@ export async function registerWhatsAppRoutes(app: FastifyInstance): Promise<void
       });
     }
 
+    // Pre-fill what we already know about the tenant so the customer isn't
+    // retyping their own business details inside Meta's popup. Only fields we
+    // genuinely hold are sent — a wrong pre-filled value is worse than an empty
+    // box, because the customer may not notice it before submitting.
+    const [tenant, owner] = await Promise.all([
+      app.prisma.tenant.findUnique({
+        where: { id: request.authUser.tenantId },
+        select: { name: true, website: true },
+      }),
+      app.prisma.user.findFirst({
+        where: { tenantId: request.authUser.tenantId, role: 'OWNER' },
+        select: { email: true },
+      }),
+    ]);
+
+    const business: Record<string, string> = {};
+    if (tenant?.name?.trim()) business.name = tenant.name.trim();
+    if (owner?.email) business.email = owner.email;
+
+    // Only pass a website Meta will accept. Stored values are user-entered and
+    // not always well formed — one tenant has "https:www.kriscel.com", missing
+    // the slashes — and a malformed prefill fails validation inside the popup,
+    // which is harder for the customer to diagnose than an empty field.
+    if (tenant?.website) {
+      try {
+        const u = new URL(tenant.website.trim());
+        if (u.protocol === 'http:' || u.protocol === 'https:') business.website = u.toString();
+      } catch {
+        // Not a usable URL — leave it out.
+      }
+    }
+
+    const prefill = Object.keys(business).length > 0 ? { business } : undefined;
+
     // Meta's own hosted onboarding page for the same configuration. The popup
     // needs Advanced Access on business_management before it works for accounts
     // without a role on the app; this page runs the flow on Meta's side, so it
@@ -376,7 +410,7 @@ export async function registerWhatsAppRoutes(app: FastifyInstance): Promise<void
 
     return {
       success: true,
-      data: { appId, configId, graphApiVersion: 'v21.0', hostedSignupUrl },
+      data: { appId, configId, graphApiVersion: 'v21.0', hostedSignupUrl, prefill },
     };
   });
 
@@ -2533,30 +2567,89 @@ export async function registerWhatsAppRoutes(app: FastifyInstance): Promise<void
       return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
     }
 
+    const fields = 'id,name,currency,owner_business_info,on_behalf_of_business_info';
     const systemToken = process.env.WHATSAPP_SYSTEM_USER_TOKEN;
     const businessId = process.env.META_BUSINESS_ID;
-    if (!systemToken || !businessId) {
-      return reply.status(503).send({ success: false, error: { code: 'NOT_CONFIGURED', message: 'System user token or Business ID not configured' } });
+
+    // Platform view: every WABA this business owns plus every one a customer
+    // has shared with us. Requires a system user token, which is configured
+    // once for the platform rather than per tenant.
+    if (systemToken && businessId) {
+      try {
+        const [ownedRes, clientRes] = await Promise.all([
+          fetch(`https://graph.facebook.com/v19.0/${businessId}/owned_whatsapp_business_accounts?fields=${fields}&limit=50&access_token=${systemToken}`),
+          fetch(`https://graph.facebook.com/v19.0/${businessId}/client_whatsapp_business_accounts?fields=${fields}&limit=50&access_token=${systemToken}`),
+        ]);
+        const [ownedData, clientData]: [any, any] = await Promise.all([ownedRes.json(), clientRes.json()]);
+
+        return {
+          success: true,
+          data: {
+            scope: 'platform',
+            owned: ownedData.data || [],
+            client: clientData.data || [],
+          },
+        };
+      } catch (err: any) {
+        return reply.status(502).send({
+          success: false,
+          error: { code: 'META_UNREACHABLE', message: `Could not reach Meta: ${err.message}` },
+        });
+      }
     }
 
-    try {
-      const fields = 'id,name,currency,owner_business_info,on_behalf_of_business_info';
-      const [ownedRes, clientRes] = await Promise.all([
-        fetch(`https://graph.facebook.com/v19.0/${businessId}/owned_whatsapp_business_accounts?fields=${fields}&limit=20&access_token=${systemToken}`),
-        fetch(`https://graph.facebook.com/v19.0/${businessId}/client_whatsapp_business_accounts?fields=${fields}&limit=20&access_token=${systemToken}`),
-      ]);
+    // No system token configured. Rather than failing outright — which left this
+    // endpoint dead and made a connected tenant look unconnected — fall back to
+    // the WABA this tenant has actually connected, read with their own token.
+    // It answers the tenant-facing question; only the cross-customer view needs
+    // the platform token.
+    const creds = await app.prisma.whatsAppCredentials.findUnique({
+      where: { tenantId: request.authUser.tenantId },
+      select: { accessToken: true, wabaId: true },
+    });
+    const phone = await app.prisma.phoneNumber.findFirst({
+      where: { tenantId: request.authUser.tenantId, wabaId: { not: null } },
+      select: { accessToken: true, wabaId: true },
+    });
 
-      const [ownedData, clientData]: [any, any] = await Promise.all([ownedRes.json(), clientRes.json()]);
+    const token = resolveAccessToken(phone?.accessToken, creds?.accessToken);
+    const wabaId = creds?.wabaId || phone?.wabaId || null;
 
+    if (!token || !wabaId) {
       return {
         success: true,
         data: {
-          owned: ownedData.data || [],
-          client: clientData.data || [],
+          scope: 'tenant',
+          owned: [],
+          client: [],
+          note: 'No WhatsApp Business Account is connected for this workspace yet.',
+        },
+      };
+    }
+
+    try {
+      const res = await fetch(`https://graph.facebook.com/v19.0/${wabaId}?fields=${fields}&access_token=${token}`);
+      const data: any = await res.json();
+      if (!res.ok) {
+        return {
+          success: true,
+          data: { scope: 'tenant', owned: [], client: [], note: data?.error?.message || 'Could not read this account from Meta.' },
+        };
+      }
+      return {
+        success: true,
+        data: {
+          scope: 'tenant',
+          owned: [data],
+          client: [],
+          note: 'Showing this workspace only — a platform system user token is needed to list every connected customer.',
         },
       };
     } catch (err: any) {
-      return reply.status(500).send({ success: false, error: { code: 'INTERNAL_ERROR', message: err.message } });
+      return reply.status(502).send({
+        success: false,
+        error: { code: 'META_UNREACHABLE', message: `Could not reach Meta: ${err.message}` },
+      });
     }
   });
 
