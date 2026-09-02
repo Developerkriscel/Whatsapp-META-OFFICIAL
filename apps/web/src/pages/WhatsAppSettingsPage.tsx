@@ -69,12 +69,14 @@ interface QualityReport {
 
 interface BusinessVerification {
   businessVerified: boolean;
-  greenTickEnabled: boolean;
+  // null means Meta didn't return a value — genuinely unknown, which is not the
+  // same as false. The tax-ID fields were removed entirely; they were hardcoded
+  // literals that could never change.
+  greenTickEnabled: boolean | null;
   displayNameApproved: boolean;
-  domainVerified: boolean;
-  taxIdVerified: boolean;
+  domainVerified: boolean | null;
   businessName?: string;
-  taxId?: string;
+  phoneNameStatuses?: { phoneNumber: string; displayName: string | null; nameStatus: string }[];
   steps: { id: string; name: string; status: string; description: string }[];
 }
 
@@ -843,24 +845,35 @@ export default function WhatsAppSettingsPage() {
             </div>
           </div>
 
-          {/* Tax ID Section */}
-          <div className="card-apple p-6">
-            <h2 className="text-lg font-semibold text-ios-dark mb-4">Tax ID / Business ID</h2>
-            {verification.taxId ? (
-              <div className="flex items-center gap-3 p-4 bg-apple-green/10 rounded-apple-lg">
-                <CheckCircle className="w-5 h-5 text-apple-green" />
-                <div>
-                  <p className="font-medium text-ios-dark">Tax ID on file</p>
-                  <p className="text-sm text-ios-muted">{verification.taxId}</p>
-                </div>
+          {/* Display name status, per phone number — Meta reviews these
+              individually, so one declined name is the thing to act on. */}
+          {verification.phoneNameStatuses && verification.phoneNameStatuses.length > 0 && (
+            <div className="card-apple p-6">
+              <h2 className="text-lg font-semibold text-ios-dark mb-4">Display Names</h2>
+              <div className="space-y-3">
+                {verification.phoneNameStatuses.map((n) => {
+                  const ok = n.nameStatus === 'APPROVED' || n.nameStatus === 'AVAILABLE_WITHOUT_REVIEW';
+                  const pending = n.nameStatus === 'PENDING_REVIEW';
+                  return (
+                    <div key={n.phoneNumber} className="flex items-center gap-3 p-4 bg-ios-gray/50 rounded-apple-lg">
+                      {ok ? <CheckCircle className="w-5 h-5 text-apple-green shrink-0" />
+                          : pending ? <Clock className="w-5 h-5 text-apple-orange shrink-0" />
+                          : <AlertTriangle className="w-5 h-5 text-apple-red shrink-0" />}
+                      <div className="min-w-0">
+                        <p className="font-medium text-ios-dark">{n.displayName || n.phoneNumber}</p>
+                        <p className="text-sm text-ios-muted">
+                          {ok ? 'Approved by Meta'
+                            : pending ? 'Meta is reviewing this name'
+                            : n.nameStatus === 'DECLINED' ? 'Meta declined this name — submit a new one'
+                            : 'Not read from Meta yet — refresh this number to check'}
+                        </p>
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
-            ) : (
-              <div className="flex items-center gap-3 p-4 bg-ios-gray/50 rounded-apple-lg">
-                <AlertTriangle className="w-5 h-5 text-apple-orange" />
-                <p className="text-sm text-ios-secondary">No tax ID on file. Contact support to add.</p>
-              </div>
-            )}
-          </div>
+            </div>
+          )}
 
           {/* Verification Steps */}
           <div className="card-apple p-6">
