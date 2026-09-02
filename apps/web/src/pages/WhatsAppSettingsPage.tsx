@@ -406,15 +406,33 @@ export default function WhatsAppSettingsPage() {
 
       if (config?.appId && config?.configId) {
         await loadFacebookSdk(config.appId, config.graphApiVersion);
-        const result = await launchEmbeddedSignup(config.configId);
-        const completeRes = await api.post('/whatsapp/embedded-signup/complete', result);
-        return { embedded: true as const, data: completeRes.data };
+        try {
+          const result = await launchEmbeddedSignup(config.configId);
+          const completeRes = await api.post('/whatsapp/embedded-signup/complete', result);
+          return { embedded: true as const, data: completeRes.data };
+        } catch (err: any) {
+          // Facebook refuses the popup for accounts without a role on the app
+          // until business_management has Advanced Access, showing "Feature
+          // unavailable". Meta's hosted page runs the same flow on their side
+          // and works for anyone, so offer that rather than dead-ending.
+          if (config.hostedSignupUrl && /unavailable|not available|feature/i.test(err?.message || '')) {
+            return { hosted: true as const, url: config.hostedSignupUrl };
+          }
+          throw err;
+        }
       }
 
       const response = await api.get('/whatsapp/oauth/url');
       return { embedded: false as const, data: response.data };
     },
-    onSuccess: (result) => {
+    onSuccess: (result: any) => {
+      if (result.hosted) {
+        // Meta's hosted onboarding runs in its own tab; the customer returns here
+        // and their account appears once Meta shares it with the app.
+        window.open(result.url, '_blank', 'noopener');
+        setOauthError(null);
+        return;
+      }
       if (result.embedded) {
         queryClient.invalidateQueries({ queryKey: ['whatsapp-settings'] });
         setOauthError(null);

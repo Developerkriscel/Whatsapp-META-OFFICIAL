@@ -10,6 +10,62 @@ import { Prisma } from '@prisma/client';
 import { getMetaAuthUrl, exchangeCodeForToken, exchangeEmbeddedSignupCode, getLongLivedToken, getWhatsAppBusinessAccounts, getPhoneNumbers, verifyPhoneNumber, setupWebhook, } from '../services/metaOAuth.js';
 import { encryptSecret, decryptSecret, decryptIfPresent, resolveAccessToken } from '../services/credentialEncryption.js';
 import { resolveEffectiveWabaId } from '../services/metaTemplate.js';
+/**
+ * Registers a freshly connected number with Cloud API. Until this runs the
+ * number exists on the WABA but cannot send anything.
+ *
+ * Registration also sets the number's two-step PIN, so it fails when the number
+ * already carries one from an earlier setup. That is a state the customer can
+ * resolve, so it is reported back rather than raised as a connection failure.
+ */
+async function registerPhoneWithCloudApi(accessToken, metaPhoneId) {
+    // Random rather than fixed: this PIN guards the number against being
+    // re-registered elsewhere, so a shared constant across every tenant would
+    // be no protection at all.
+    const pin = String(crypto.randomInt(100000, 1000000));
+    try {
+        const res = await fetch(`https://graph.facebook.com/v19.0/${metaPhoneId}/register`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` },
+            body: JSON.stringify({ messaging_product: 'whatsapp', pin }),
+        });
+        const data = await res.json();
+        if (res.ok && data?.success !== false) {
+            return { registered: true, message: 'Number registered with Cloud API.', pin };
+        }
+        const msg = data?.error?.message || 'Registration failed';
+        // 133005 / "two-step verification PIN" — the number already has a PIN set.
+        if (/two.?step|pin/i.test(msg)) {
+            return {
+                registered: false,
+                message: 'The number already has a two-step verification PIN from a previous setup. ' +
+                    'Reset it in WhatsApp Manager, then register the number from its settings page.',
+            };
+        }
+        return { registered: false, message: `Could not register the number automatically: ${msg}` };
+    }
+    catch (err) {
+        return { registered: false, message: `Could not reach Meta to register the number: ${err?.message}` };
+    }
+}
+/** Reads the quality, display-name and messaging-tier fields Meta exposes for a number. */
+async function fetchPhoneMetadata(accessToken, metaPhoneId) {
+    try {
+        const res = await fetch(`https://graph.facebook.com/v19.0/${metaPhoneId}?fields=quality_rating,name_status,messaging_limit_tier&access_token=${accessToken}`);
+        if (!res.ok)
+            return null;
+        const d = await res.json();
+        const rating = d.quality_rating?.toUpperCase();
+        return {
+            qualityScore: ['GREEN', 'YELLOW', 'RED'].includes(rating) ? rating : 'UNKNOWN',
+            nameStatus: d.name_status ? String(d.name_status).toUpperCase() : undefined,
+            messagingLimitTier: d.messaging_limit_tier ? String(d.messaging_limit_tier).toUpperCase() : undefined,
+        };
+    }
+    catch {
+        return null;
+    }
+}
 export async function registerWhatsAppRoutes(app) {
     // ============================================
     // META OAUTH EMBEDDED SIGNUP FLOW
@@ -227,7 +283,18 @@ export async function registerWhatsAppRoutes(app) {
                 },
             });
         }
-        return { success: true, data: { appId, configId, graphApiVersion: 'v21.0' } };
+        // Meta's own hosted onboarding page for the same configuration. The popup
+        // needs Advanced Access on business_management before it works for accounts
+        // without a role on the app; this page runs the flow on Meta's side, so it
+        // works for anyone today. Handing both to the client lets the UI fall back
+        // instead of dead-ending on "Feature unavailable".
+        const extras = encodeURIComponent(JSON.stringify({ sessionInfoVersion: '3', version: 'v4' }));
+        const hostedSignupUrl = `https://business.facebook.com/messaging/whatsapp/onboard/` +
+            `?app_id=${appId}&config_id=${configId}&extras=${extras}`;
+        return {
+            success: true,
+            data: { appId, configId, graphApiVersion: 'v21.0', hostedSignupUrl },
+        };
     });
     /**
      * POST /whatsapp/embedded-signup/complete - Finalize Meta's Embedded Signup flow.
@@ -309,7 +376,38 @@ export async function registerWhatsAppRoutes(app) {
                     },
                 });
             await setupWebhook(accessToken, wabaId, `${process.env.PUBLIC_API_URL || process.env.API_URL || 'http://localhost:3001'}/webhook`, process.env.META_WEBHOOK_VERIFY_TOKEN || 'whatsapp_webhook_verify_token');
-            return { success: true, data: phone, message: 'WhatsApp connected successfully!' };
+            // A number that finished Embedded Signup still cannot send until it is
+            // registered with Cloud API. Doing it here means the customer is ready
+            // immediately, instead of connecting successfully and then failing on
+            // their first send with an opaque Meta error.
+            //
+            // Registration sets the two-step PIN, so it fails if the number already
+            // has one from a previous setup. That is recoverable by the customer, so
+            // it is reported rather than treated as a failed connection.
+            const registration = await registerPhoneWithCloudApi(accessToken, phoneNumberId);
+            // Capture the metadata the panel needs, so the number shows real values
+            // straight away rather than after a manual refresh.
+            const meta = await fetchPhoneMetadata(accessToken, phoneNumberId);
+            if (meta) {
+                await app.prisma.phoneNumber.update({
+                    where: { id: phone.id },
+                    data: {
+                        ...(meta.qualityScore ? { qualityScore: meta.qualityScore } : {}),
+                        ...(meta.nameStatus ? { nameStatus: meta.nameStatus } : {}),
+                        ...(meta.messagingLimitTier
+                            ? { messagingLimitTier: meta.messagingLimitTier, messagingTierFetchedAt: new Date() }
+                            : {}),
+                        ...(registration.registered ? { status: 'verified' } : {}),
+                    },
+                });
+            }
+            return {
+                success: true,
+                data: { ...phone, registration },
+                message: registration.registered
+                    ? 'WhatsApp connected and the number is ready to send.'
+                    : `WhatsApp connected. ${registration.message}`,
+            };
         }
         catch (err) {
             app.log.error('Embedded signup completion error:', err.response?.data || err.message);
@@ -1977,9 +2075,11 @@ export async function registerWhatsAppRoutes(app) {
             return reply.status(400).send({ success: false, error: { code: 'NO_TOKEN', message: 'No access token configured for this account' } });
         }
         try {
+            // The token was resolved above but never sent — Meta rejected every
+            // registration attempt as unauthenticated. /deregister below always had it.
             const res = await fetch(`https://graph.facebook.com/v19.0/${phone.metaPhoneId}/register`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
                 body: JSON.stringify({ messaging_product: 'whatsapp', pin }),
             });
             const data = await res.json();

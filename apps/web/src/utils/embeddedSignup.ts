@@ -106,7 +106,10 @@ export function launchEmbeddedSignup(configId: string): Promise<EmbeddedSignupRe
         config_id: configId,
         response_type: 'code',
         override_default_response_type: true,
-        extras: { sessionInfoVersion: '3' },
+        // Matches what Meta's own Embedded Signup builder generates for this
+        // configuration — v4 of the flow, session info v3. Omitting the version
+        // leaves Meta to pick a default that may not match the config.
+        extras: { sessionInfoVersion: '3', version: 'v4' },
       }
     );
   });
