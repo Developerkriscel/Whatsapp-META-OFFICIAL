@@ -209,6 +209,84 @@ export async function registerSuperadminRoutes(app) {
         rows.sort((a, b) => b.issues.length - a.issues.length);
         return { success: true, data: { summary, tenants: rows, generatedAt: new Date().toISOString() } };
     });
+    /**
+     * GET /superadmin/whatsapp-accounts
+     *
+     * Every WABA this platform owns, plus every one a customer has shared with us
+     * via Embedded Signup. Uses the platform system user token, so it deliberately
+     * lives behind superadmin: the tenant-facing /whatsapp/accounts must stay
+     * scoped to the caller's own workspace, or each customer would see the others'
+     * accounts.
+     *
+     * Cross-referenced against our tables so it is obvious which shared WABAs we
+     * have actually onboarded and which are sitting unclaimed.
+     */
+    app.get('/whatsapp-accounts', async (request, reply) => {
+        const systemToken = process.env.WHATSAPP_SYSTEM_USER_TOKEN;
+        const businessId = process.env.META_BUSINESS_ID;
+        if (!systemToken || !businessId) {
+            return {
+                success: true,
+                data: {
+                    configured: false,
+                    owned: [],
+                    client: [],
+                    note: 'Set WHATSAPP_SYSTEM_USER_TOKEN and META_BUSINESS_ID to list accounts across all customers.',
+                },
+            };
+        }
+        const fields = 'id,name,currency,owner_business_info,on_behalf_of_business_info';
+        try {
+            const [ownedRes, clientRes] = await Promise.all([
+                fetch(`https://graph.facebook.com/v21.0/${businessId}/owned_whatsapp_business_accounts?fields=${fields}&limit=100&access_token=${systemToken}`),
+                fetch(`https://graph.facebook.com/v21.0/${businessId}/client_whatsapp_business_accounts?fields=${fields}&limit=100&access_token=${systemToken}`),
+            ]);
+            const [ownedData, clientData] = await Promise.all([ownedRes.json(), clientRes.json()]);
+            if (!ownedRes.ok) {
+                return reply.status(502).send({
+                    success: false,
+                    error: { code: 'META_ERROR', message: ownedData?.error?.message || 'Meta refused the request' },
+                });
+            }
+            // Which of these are actually wired to a tenant on our side? A WABA Meta
+            // knows about but we don't is a customer who started onboarding and never
+            // finished — worth seeing.
+            const known = await app.prisma.phoneNumber.findMany({
+                where: { wabaId: { not: null } },
+                select: { wabaId: true, tenant: { select: { id: true, name: true } } },
+            });
+            const tenantByWaba = new Map();
+            for (const k of known)
+                if (k.wabaId && k.tenant)
+                    tenantByWaba.set(k.wabaId, k.tenant);
+            const decorate = (list) => (list ?? []).map((w) => ({
+                id: w.id,
+                name: w.name,
+                currency: w.currency ?? null,
+                ownerBusiness: w.owner_business_info?.name ?? null,
+                linkedTenant: tenantByWaba.get(w.id) ?? null,
+            }));
+            const owned = decorate(ownedData.data);
+            const client = decorate(clientData?.data);
+            return {
+                success: true,
+                data: {
+                    configured: true,
+                    businessId,
+                    owned,
+                    client,
+                    unclaimed: [...owned, ...client].filter(w => !w.linkedTenant).length,
+                    clientError: clientRes.ok ? null : clientData?.error?.message ?? null,
+                },
+            };
+        }
+        catch (err) {
+            return reply.status(502).send({
+                success: false,
+                error: { code: 'META_UNREACHABLE', message: `Could not reach Meta: ${err.message}` },
+            });
+        }
+    });
     // ============================================
     // TENANT MANAGEMENT
     // ============================================

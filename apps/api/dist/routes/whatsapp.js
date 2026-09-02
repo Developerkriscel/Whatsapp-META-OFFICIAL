@@ -2235,39 +2235,11 @@ export async function registerWhatsAppRoutes(app) {
             return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
         }
         const fields = 'id,name,currency,owner_business_info,on_behalf_of_business_info';
-        const systemToken = process.env.WHATSAPP_SYSTEM_USER_TOKEN;
-        const businessId = process.env.META_BUSINESS_ID;
-        // Platform view: every WABA this business owns plus every one a customer
-        // has shared with us. Requires a system user token, which is configured
-        // once for the platform rather than per tenant.
-        if (systemToken && businessId) {
-            try {
-                const [ownedRes, clientRes] = await Promise.all([
-                    fetch(`https://graph.facebook.com/v19.0/${businessId}/owned_whatsapp_business_accounts?fields=${fields}&limit=50&access_token=${systemToken}`),
-                    fetch(`https://graph.facebook.com/v19.0/${businessId}/client_whatsapp_business_accounts?fields=${fields}&limit=50&access_token=${systemToken}`),
-                ]);
-                const [ownedData, clientData] = await Promise.all([ownedRes.json(), clientRes.json()]);
-                return {
-                    success: true,
-                    data: {
-                        scope: 'platform',
-                        owned: ownedData.data || [],
-                        client: clientData.data || [],
-                    },
-                };
-            }
-            catch (err) {
-                return reply.status(502).send({
-                    success: false,
-                    error: { code: 'META_UNREACHABLE', message: `Could not reach Meta: ${err.message}` },
-                });
-            }
-        }
-        // No system token configured. Rather than failing outright — which left this
-        // endpoint dead and made a connected tenant look unconnected — fall back to
-        // the WABA this tenant has actually connected, read with their own token.
-        // It answers the tenant-facing question; only the cross-customer view needs
-        // the platform token.
+        // Deliberately tenant-scoped, always. This route is reachable by any signed-in
+        // tenant user, so it must never answer with the platform's system user token:
+        // that returns every WABA the platform owns plus every one a customer has
+        // shared, which would show each customer the others' accounts. The
+        // cross-customer view lives on the superadmin route instead.
         const creds = await app.prisma.whatsAppCredentials.findUnique({
             where: { tenantId: request.authUser.tenantId },
             select: { accessToken: true, wabaId: true },
@@ -2304,7 +2276,7 @@ export async function registerWhatsAppRoutes(app) {
                     scope: 'tenant',
                     owned: [data],
                     client: [],
-                    note: 'Showing this workspace only — a platform system user token is needed to list every connected customer.',
+                    note: 'Showing this workspace only.',
                 },
             };
         }
