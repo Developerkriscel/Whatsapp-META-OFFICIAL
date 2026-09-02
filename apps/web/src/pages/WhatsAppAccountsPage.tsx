@@ -200,7 +200,7 @@ export default function WhatsAppAccountsPage() {
           <strong className="text-ios-dark">Tip:</strong> This list uses your platform's System User Token to fetch all WABAs associated with your Meta Business Manager.
           To connect a WABA to a tenant, go to{' '}
           <a href="/whatsapp" className="text-wa-green hover:underline font-medium">WhatsApp Settings</a>{' '}
-          and click <strong>Connect with Facebook</strong>.
+          and click <strong>Continue with Facebook</strong>.
         </p>
       </div>
     </div>
