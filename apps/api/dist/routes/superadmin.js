@@ -14,8 +14,8 @@ const paginationSchema = z.object({
 export async function registerSuperadminRoutes(app) {
     // Apply superadmin middleware to all routes
     app.addHook('preHandler', async (request, reply) => {
-        console.log('[SUPERADMIN HOOK] request.authUser:', JSON.stringify(request.authUser));
-        console.log('[SUPERADMIN HOOK] isSuperadmin:', request.authUser?.isSuperadmin);
+        // Previously logged the whole authUser object on every superadmin request —
+        // noise in the logs, and it wrote identity details to disk on each call.
         if (!request.authUser?.isSuperadmin) {
             return reply.status(403).send({
                 success: false,
@@ -56,6 +56,158 @@ export async function registerSuperadminRoutes(app) {
                 trialTenants: totalTenants - activeTenants,
             },
         };
+    });
+    // ============================================
+    // WHATSAPP HEALTH — cross-tenant Meta status
+    // ============================================
+    /**
+     * GET /superadmin/whatsapp-health
+     *
+     * Answers "which of my customers is broken right now" in one request — the
+     * thing that stops being answerable by opening each tenant individually once
+     * there is more than a handful of them.
+     *
+     * Served entirely from our own tables. The per-phone quality, name status and
+     * messaging tier are already cached there by the refresh path, so this stays
+     * fast and keeps working when Meta is slow or refusing calls. It is a
+     * dashboard, not a source of truth: a stale field here means someone should
+     * refresh that number, not that this endpoint should start fanning out live
+     * Graph requests per tenant.
+     */
+    app.get('/whatsapp-health', async (request, reply) => {
+        const since24h = new Date(Date.now() - 24 * 60 * 60 * 1000);
+        // Six aggregate queries regardless of tenant count, rather than a per-tenant
+        // loop that would grow linearly with customers.
+        const [tenants, creds, phones, templateCounts, messageCounts, lastWebhooks] = await Promise.all([
+            app.prisma.tenant.findMany({
+                select: { id: true, name: true, status: true, createdAt: true, plan: { select: { name: true } } },
+                orderBy: { createdAt: 'desc' },
+            }),
+            app.prisma.whatsAppCredentials.findMany({
+                select: { tenantId: true, wabaId: true, accessToken: true, isConfigured: true, lastError: true, lastTestedAt: true },
+            }),
+            app.prisma.phoneNumber.findMany({
+                select: {
+                    tenantId: true, phoneNumber: true, displayName: true, status: true,
+                    qualityScore: true, nameStatus: true, messagingLimitTier: true,
+                    metaPhoneId: true, accessToken: true, todaySentCount: true, dailySentLimit: true,
+                },
+            }),
+            app.prisma.template.groupBy({ by: ['tenantId', 'status'], _count: { _all: true } }),
+            app.prisma.message.groupBy({
+                by: ['tenantId', 'status'],
+                where: { direction: 'OUTGOING', createdAt: { gte: since24h } },
+                _count: { _all: true },
+            }),
+            app.prisma.webhookLog.groupBy({ by: ['tenantId'], _max: { createdAt: true } }),
+        ]);
+        const credByTenant = new Map(creds.map(c => [c.tenantId, c]));
+        const lastWebhookByTenant = new Map(lastWebhooks.map(w => [w.tenantId, w._max.createdAt]));
+        const phonesByTenant = new Map();
+        for (const ph of phones) {
+            const arr = phonesByTenant.get(ph.tenantId) ?? [];
+            arr.push(ph);
+            phonesByTenant.set(ph.tenantId, arr);
+        }
+        const tally = (rows) => {
+            const m = new Map();
+            for (const r of rows) {
+                const t = m.get(r.tenantId) ?? {};
+                t[r.status] = (t[r.status] ?? 0) + r._count._all;
+                m.set(r.tenantId, t);
+            }
+            return m;
+        };
+        const templatesByTenant = tally(templateCounts);
+        const messagesByTenant = tally(messageCounts);
+        const rows = tenants.map(t => {
+            const cred = credByTenant.get(t.id);
+            const tPhones = phonesByTenant.get(t.id) ?? [];
+            const tpl = templatesByTenant.get(t.id) ?? {};
+            const msg = messagesByTenant.get(t.id) ?? {};
+            const livePhones = tPhones.filter(p => p.metaPhoneId);
+            const hasToken = !!cred?.accessToken || tPhones.some(p => p.accessToken);
+            const sent = (msg.SENT ?? 0) + (msg.DELIVERED ?? 0) + (msg.READ ?? 0);
+            const failed = msg.FAILED ?? 0;
+            const attempted = sent + failed;
+            // Where this tenant actually is, rather than what they were sold.
+            const stage = !hasToken || !cred?.wabaId ? 'NOT_CONNECTED'
+                : livePhones.length === 0 ? 'NO_PHONE'
+                    : (tpl.APPROVED ?? 0) === 0 ? 'NO_TEMPLATE'
+                        : attempted === 0 ? 'READY'
+                            : 'SENDING';
+            // Only things an operator would actually act on.
+            const issues = [];
+            if (cred?.lastError)
+                issues.push(`Credential error: ${cred.lastError}`);
+            if (livePhones.some(p => p.qualityScore === 'RED'))
+                issues.push('A number is rated RED by Meta');
+            if (livePhones.some(p => p.nameStatus === 'DECLINED'))
+                issues.push('A display name was declined');
+            if ((tpl.REJECTED ?? 0) > 0)
+                issues.push(`${tpl.REJECTED} template(s) rejected`);
+            if (attempted >= 10 && failed / attempted > 0.25) {
+                issues.push(`${Math.round((failed / attempted) * 100)}% of sends failed in 24h`);
+            }
+            if (livePhones.some(p => p.dailySentLimit > 0 && p.todaySentCount / p.dailySentLimit > 0.8)) {
+                issues.push('A number is near its daily send limit');
+            }
+            return {
+                tenantId: t.id,
+                name: t.name,
+                tenantStatus: t.status,
+                plan: t.plan?.name ?? null,
+                createdAt: t.createdAt,
+                stage,
+                wabaId: cred?.wabaId ?? null,
+                hasToken,
+                lastTestedAt: cred?.lastTestedAt ?? null,
+                lastWebhookAt: lastWebhookByTenant.get(t.id) ?? null,
+                phones: {
+                    total: tPhones.length,
+                    connected: livePhones.length,
+                    quality: {
+                        GREEN: livePhones.filter(p => p.qualityScore === 'GREEN').length,
+                        YELLOW: livePhones.filter(p => p.qualityScore === 'YELLOW').length,
+                        RED: livePhones.filter(p => p.qualityScore === 'RED').length,
+                        UNKNOWN: livePhones.filter(p => !p.qualityScore || p.qualityScore === 'UNKNOWN').length,
+                    },
+                    list: livePhones.map(p => ({
+                        phoneNumber: p.phoneNumber,
+                        displayName: p.displayName,
+                        status: p.status,
+                        qualityScore: p.qualityScore ?? 'UNKNOWN',
+                        nameStatus: p.nameStatus ?? 'UNKNOWN',
+                        messagingLimitTier: p.messagingLimitTier,
+                        todaySentCount: p.todaySentCount,
+                        dailySentLimit: p.dailySentLimit,
+                    })),
+                },
+                templates: {
+                    approved: tpl.APPROVED ?? 0,
+                    pending: tpl.PENDING ?? 0,
+                    rejected: tpl.REJECTED ?? 0,
+                    draft: tpl.DRAFT ?? 0,
+                },
+                messages24h: { sent, failed, attempted },
+                issues,
+            };
+        });
+        const summary = {
+            tenants: rows.length,
+            connected: rows.filter(r => r.stage !== 'NOT_CONNECTED').length,
+            sending: rows.filter(r => r.stage === 'SENDING').length,
+            withIssues: rows.filter(r => r.issues.length > 0).length,
+            phonesConnected: rows.reduce((n, r) => n + r.phones.connected, 0),
+            templatesPending: rows.reduce((n, r) => n + r.templates.pending, 0),
+            messages24h: {
+                sent: rows.reduce((n, r) => n + r.messages24h.sent, 0),
+                failed: rows.reduce((n, r) => n + r.messages24h.failed, 0),
+            },
+        };
+        // Anything needing attention first — an operator opens this to find problems.
+        rows.sort((a, b) => b.issues.length - a.issues.length);
+        return { success: true, data: { summary, tenants: rows, generatedAt: new Date().toISOString() } };
     });
     // ============================================
     // TENANT MANAGEMENT

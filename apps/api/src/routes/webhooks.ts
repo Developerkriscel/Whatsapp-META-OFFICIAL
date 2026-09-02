@@ -154,6 +154,22 @@ async function processTemplateStatusUpdate(app: FastifyInstance, value: any) {
         event: 'template_status_update',
         data: { templateId: template.id, name: template.name, status: template.status },
       });
+
+      // Record the delivery. The message and status handlers both log; this one
+      // never did, so template events left no trace at all — making "Meta is
+      // slow to approve" indistinguishable from "our webhook stopped arriving".
+      await logWebhookEvent(
+        app,
+        template.tenantId,
+        null,
+        'message_template_status_update',
+        metaTemplateId,
+        null,
+        { event: value.event, status, name: template.name },
+        'COMPLETED',
+      ).catch(() => {
+        // Logging must never break status processing.
+      });
     }
   }
 }

@@ -24,7 +24,7 @@ import {
   Loader2,
 } from 'lucide-react';
 
-const TABS = ['overview', 'services', 'webhooks', 'announcements', 'rate-markup', 'logs', 'alerts'] as const;
+const TABS = ['overview', 'whatsapp', 'services', 'webhooks', 'announcements', 'rate-markup', 'logs', 'alerts'] as const;
 type TabType = typeof TABS[number];
 
 export default function SuperAdminSystemPage() {
@@ -377,6 +377,8 @@ export default function SuperAdminSystemPage() {
       )}
 
       {/* Webhooks Queue & Meta API Rate Limit Inspector Tab */}
+      {activeTab === 'whatsapp' && <WhatsAppHealthTab />}
+
       {activeTab === 'webhooks' && <WebhooksInspectorTab />}
 
       {/* Announcements Tab */}
@@ -422,6 +424,199 @@ export default function SuperAdminSystemPage() {
               </div>
             ))
           )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+interface HealthPhone {
+  phoneNumber: string;
+  displayName: string | null;
+  status: string;
+  qualityScore: string;
+  nameStatus: string;
+  messagingLimitTier: string | null;
+  todaySentCount: number;
+  dailySentLimit: number;
+}
+
+interface HealthRow {
+  tenantId: string;
+  name: string;
+  tenantStatus: string;
+  plan: string | null;
+  stage: 'NOT_CONNECTED' | 'NO_PHONE' | 'NO_TEMPLATE' | 'READY' | 'SENDING';
+  wabaId: string | null;
+  hasToken: boolean;
+  lastWebhookAt: string | null;
+  phones: {
+    total: number;
+    connected: number;
+    quality: { GREEN: number; YELLOW: number; RED: number; UNKNOWN: number };
+    list: HealthPhone[];
+  };
+  templates: { approved: number; pending: number; rejected: number; draft: number };
+  messages24h: { sent: number; failed: number; attempted: number };
+  issues: string[];
+}
+
+const STAGE_LABEL: Record<HealthRow['stage'], { text: string; cls: string }> = {
+  NOT_CONNECTED: { text: 'Not connected', cls: 'bg-ios-gray text-ios-muted' },
+  NO_PHONE: { text: 'No number', cls: 'bg-apple-orange/15 text-apple-orange' },
+  NO_TEMPLATE: { text: 'No template', cls: 'bg-apple-orange/15 text-apple-orange' },
+  READY: { text: 'Ready', cls: 'bg-apple-blue/15 text-apple-blue' },
+  SENDING: { text: 'Sending', cls: 'bg-apple-green/15 text-apple-green' },
+};
+
+/**
+ * Cross-tenant WhatsApp health. Answers "who is broken right now" without
+ * opening each tenant one at a time. Served from our own tables, so it stays
+ * responsive regardless of what Meta's API is doing.
+ */
+function WhatsAppHealthTab() {
+  const [expanded, setExpanded] = useState<string | null>(null);
+
+  const { data, isLoading, refetch, isFetching } = useQuery({
+    queryKey: ['superadmin-whatsapp-health'],
+    queryFn: async () => {
+      const r = await api.get('/superadmin/whatsapp-health');
+      return r.data.data as { summary: any; tenants: HealthRow[]; generatedAt: string };
+    },
+    refetchInterval: 60000,
+  });
+
+  if (isLoading) {
+    return (
+      <div className="flex items-center justify-center h-40">
+        <Loader2 className="w-8 h-8 animate-spin text-wa-green" />
+      </div>
+    );
+  }
+
+  const summary = data?.summary;
+  const rows = data?.tenants ?? [];
+
+  return (
+    <div className="space-y-6">
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="text-lg font-semibold text-ios-dark">WhatsApp health across tenants</h2>
+          <p className="text-sm text-ios-muted">
+            Cached from each tenant's last refresh — a stale value means that number needs refreshing, not that this is wrong.
+          </p>
+        </div>
+        <button
+          onClick={() => refetch()}
+          className="btn-apple btn-apple-outline text-sm flex items-center gap-2"
+          disabled={isFetching}
+        >
+          <RefreshCw className={`w-4 h-4 ${isFetching ? 'animate-spin' : ''}`} />
+          Refresh
+        </button>
+      </div>
+
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
+        {[
+          { label: 'Tenants', value: summary?.tenants ?? 0, cls: 'text-ios-dark' },
+          { label: 'Connected', value: summary?.connected ?? 0, cls: 'text-apple-green' },
+          { label: 'Needs attention', value: summary?.withIssues ?? 0, cls: summary?.withIssues ? 'text-apple-red' : 'text-ios-muted' },
+          { label: 'Templates pending', value: summary?.templatesPending ?? 0, cls: 'text-apple-orange' },
+          { label: 'Failed sends 24h', value: summary?.messages24h?.failed ?? 0, cls: summary?.messages24h?.failed ? 'text-apple-red' : 'text-ios-muted' },
+        ].map((s) => (
+          <div key={s.label} className="card-apple p-4">
+            <p className={`text-2xl font-bold ${s.cls}`}>{s.value}</p>
+            <p className="text-xs text-ios-muted mt-1">{s.label}</p>
+          </div>
+        ))}
+      </div>
+
+      {rows.length === 0 ? (
+        <div className="card-apple p-12 text-center">
+          <Globe className="w-12 h-12 text-ios-muted mx-auto mb-4 opacity-50" />
+          <p className="text-ios-secondary font-medium">No tenants yet</p>
+        </div>
+      ) : (
+        <div className="card-apple divide-y divide-black/5">
+          {rows.map((t) => {
+            const stage = STAGE_LABEL[t.stage] ?? STAGE_LABEL.NOT_CONNECTED;
+            const open = expanded === t.tenantId;
+            const failRate = t.messages24h.attempted > 0
+              ? Math.round((t.messages24h.failed / t.messages24h.attempted) * 100)
+              : 0;
+
+            return (
+              <div key={t.tenantId} className="p-4">
+                <button
+                  onClick={() => setExpanded(open ? null : t.tenantId)}
+                  className="w-full text-left flex items-start justify-between gap-4"
+                >
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="font-semibold text-ios-dark">{t.name}</span>
+                      <span className={`px-2 py-0.5 text-xs font-medium rounded-full ${stage.cls}`}>{stage.text}</span>
+                      {t.plan && <span className="text-xs text-ios-muted">{t.plan}</span>}
+                      {t.issues.length > 0 && (
+                        <span className="px-2 py-0.5 text-xs font-medium rounded-full bg-apple-red/15 text-apple-red flex items-center gap-1">
+                          <AlertTriangle className="w-3 h-3" />
+                          {t.issues.length}
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex flex-wrap gap-x-4 gap-y-1 mt-1 text-xs text-ios-muted">
+                      <span>{t.phones.connected} number{t.phones.connected === 1 ? '' : 's'}</span>
+                      <span>{t.templates.approved} approved{t.templates.pending > 0 ? ` · ${t.templates.pending} pending` : ''}{t.templates.rejected > 0 ? ` · ${t.templates.rejected} rejected` : ''}</span>
+                      <span>24h: {t.messages24h.sent} sent{t.messages24h.failed > 0 ? `, ${t.messages24h.failed} failed (${failRate}%)` : ''}</span>
+                      {t.lastWebhookAt && <span>last event {new Date(t.lastWebhookAt).toLocaleString()}</span>}
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-1 shrink-0 pt-1">
+                    {t.phones.quality.GREEN > 0 && <span className="w-2.5 h-2.5 rounded-full bg-apple-green" title={`${t.phones.quality.GREEN} green`} />}
+                    {t.phones.quality.YELLOW > 0 && <span className="w-2.5 h-2.5 rounded-full bg-apple-orange" title={`${t.phones.quality.YELLOW} yellow`} />}
+                    {t.phones.quality.RED > 0 && <span className="w-2.5 h-2.5 rounded-full bg-apple-red" title={`${t.phones.quality.RED} red`} />}
+                  </div>
+                </button>
+
+                {t.issues.length > 0 && (
+                  <ul className="mt-2 space-y-1">
+                    {t.issues.map((issue, i) => (
+                      <li key={i} className="text-xs text-apple-red flex items-center gap-1.5">
+                        <AlertTriangle className="w-3 h-3 shrink-0" />
+                        {issue}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+
+                {open && (
+                  <div className="mt-3 pt-3 border-t border-black/5 space-y-2">
+                    <p className="text-xs text-ios-muted">
+                      WABA {t.wabaId ?? 'not set'} · token {t.hasToken ? 'stored' : 'missing'}
+                    </p>
+                    {t.phones.list.length === 0 ? (
+                      <p className="text-xs text-ios-muted">No connected numbers.</p>
+                    ) : (
+                      t.phones.list.map((ph) => (
+                        <div key={ph.phoneNumber} className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs bg-ios-gray/40 rounded-apple-lg p-2">
+                          <span className="font-mono text-ios-dark">{ph.phoneNumber}</span>
+                          <span className={
+                            ph.qualityScore === 'GREEN' ? 'text-apple-green'
+                            : ph.qualityScore === 'YELLOW' ? 'text-apple-orange'
+                            : ph.qualityScore === 'RED' ? 'text-apple-red' : 'text-ios-muted'
+                          }>
+                            quality {ph.qualityScore}
+                          </span>
+                          <span className="text-ios-muted">name {ph.nameStatus}</span>
+                          <span className="text-ios-muted">{ph.messagingLimitTier ?? 'tier unknown'}</span>
+                          <span className="text-ios-muted">{ph.todaySentCount}/{ph.dailySentLimit} today</span>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })}
         </div>
       )}
     </div>
