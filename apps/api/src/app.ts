@@ -123,6 +123,66 @@ export async function buildApp(): Promise<FastifyInstance> {
     return { status: 'ok', timestamp: new Date().toISOString() };
   });
 
+  // Global error handler.
+  //
+  // Must be set BEFORE the route plugins below. Fastify encapsulates on
+  // register(), so a handler installed afterwards never applies to routes
+  // already registered — which is where this used to sit, meaning it had no
+  // effect on any endpoint and every failure fell back to Fastify's default
+  // body instead of this API's { success, error } envelope.
+  app.setErrorHandler((error, request, reply) => {
+    app.log.error(error);
+
+    if (error.validation) {
+      return reply.status(400).send({
+        success: false,
+        error: {
+          code: 'VALIDATION_ERROR',
+          message: 'Validation failed',
+          details: error.validation,
+        },
+      });
+    }
+
+    // Routes validate with zod's .parse(), which throws a ZodError rather than
+    // setting Fastify's `validation` property. Matched by shape rather than
+    // instanceof, so it holds across duplicate zod copies in the dependency tree.
+    const issues = (error as any)?.issues;
+    if (Array.isArray(issues) && issues.length > 0 && issues[0]?.code) {
+      return reply.status(400).send({
+        success: false,
+        error: {
+          code: 'VALIDATION_ERROR',
+          message: issues
+            .map((i: any) => {
+              const field = Array.isArray(i.path) && i.path.length ? i.path.join('.') : 'value';
+              return `${field}: ${i.message}`;
+            })
+            .join('; '),
+          details: issues,
+        },
+      });
+    }
+
+    if (error.statusCode) {
+      return reply.status(error.statusCode).send({
+        success: false,
+        error: {
+          code: error.code || 'ERROR',
+          message: error.message,
+        },
+      });
+    }
+
+    return reply.status(500).send({
+      success: false,
+      error: {
+        code: 'INTERNAL_ERROR',
+        message: 'An unexpected error occurred',
+      },
+    });
+  });
+
   // Register routes
   await app.register(registerAuthRoutes, { prefix: '/api/v1/auth' });
   await app.register(registerTenantRoutes, { prefix: '/api/v1' });
@@ -146,40 +206,6 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(registerAIRoutes, { prefix: '/api/v1' });
   await app.register(registerKnowledgeBaseRoutes, { prefix: '/api/v1' });
   await app.register(registerUploadRoutes, { prefix: '/api/v1' });
-
-  // Global error handler
-  app.setErrorHandler((error, request, reply) => {
-    app.log.error(error);
-
-    if (error.validation) {
-      return reply.status(400).send({
-        success: false,
-        error: {
-          code: 'VALIDATION_ERROR',
-          message: 'Validation failed',
-          details: error.validation,
-        },
-      });
-    }
-
-    if (error.statusCode) {
-      return reply.status(error.statusCode).send({
-        success: false,
-        error: {
-          code: error.code || 'ERROR',
-          message: error.message,
-        },
-      });
-    }
-
-    return reply.status(500).send({
-      success: false,
-      error: {
-        code: 'INTERNAL_ERROR',
-        message: 'An unexpected error occurred',
-      },
-    });
-  });
 
   // Cleanup on shutdown
   app.addHook('onClose', async () => {

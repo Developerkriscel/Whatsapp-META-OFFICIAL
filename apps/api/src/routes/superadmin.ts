@@ -2,6 +2,7 @@
 
 import { FastifyInstance } from 'fastify';
 import { z } from 'zod';
+import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
 import { requireSuperadmin, createAuditLog } from '../middleware/auth.js';
 
@@ -606,11 +607,63 @@ export async function registerSuperadminRoutes(app: FastifyInstance): Promise<vo
       userId: z.string(),
     }).parse(request.params);
 
-    const { password } = z.object({
+    const { password, setTemporaryPassword } = z.object({
       password: z.string().min(8).optional(),
+      setTemporaryPassword: z.boolean().optional(),
     }).parse(request.body || {});
 
-    const tempPassword = password || Math.random().toString(36).slice(-8);
+    const user = await app.prisma.user.findFirst({
+      where: { id: userId, tenantId },
+      select: { id: true, email: true },
+    });
+    if (!user) {
+      return reply.status(404).send({ success: false, error: { code: 'NOT_FOUND', message: 'User not found in this tenant' } });
+    }
+
+    // Default is a reset link rather than a new password. Silently replacing
+    // someone's password locks them out of an account they were using, and the
+    // replacement then has to be transmitted to them somehow — a link they
+    // redeem themselves avoids both problems. Setting a password outright stays
+    // available for a customer who cannot receive the link at all.
+    if (!password && !setTemporaryPassword) {
+      const token = crypto.randomBytes(32).toString('hex');
+      const expiresAt = new Date(Date.now() + 60 * 60 * 1000);
+
+      await (app.prisma as any).passwordReset.create({
+        data: { userId: user.id, token, tokenHash: token.slice(0, 16), expiresAt },
+      });
+
+      const resetUrl = `${process.env.APP_URL || 'http://localhost:5173'}/reset-password?token=${token}`;
+      console.log(`[Password Reset] Superadmin issued a link for ${user.email}`);
+
+      await createAuditLog(app.prisma, {
+        actorId: request.authUser.id,
+        actorType: 'superadmin',
+        actorRole: request.authUser.role,
+        action: 'ISSUE_PASSWORD_RESET_LINK',
+        resource: 'users',
+        resourceId: user.id,
+        tenantId,
+        metadata: { email: user.email },
+        ipAddress: request.ip,
+        userAgent: request.headers['user-agent'],
+      });
+
+      return {
+        success: true,
+        data: {
+          mode: 'link',
+          email: user.email,
+          resetUrl,
+          expiresAt,
+          message: 'Reset link generated. Send it to the user — it expires in 1 hour. Their current password still works until they use it.',
+        },
+      };
+    }
+
+    // Math.random() is not a cryptographic RNG; a password minted from it is
+    // predictable. randomBytes is.
+    const tempPassword = password || crypto.randomBytes(12).toString('base64url');
     const hashedPassword = await bcrypt.hash(tempPassword, 12);
 
     await app.prisma.user.updateMany({
@@ -618,9 +671,27 @@ export async function registerSuperadminRoutes(app: FastifyInstance): Promise<vo
       data: { password: hashedPassword },
     });
 
+    await createAuditLog(app.prisma, {
+      actorId: request.authUser.id,
+      actorType: 'superadmin',
+      actorRole: request.authUser.role,
+      action: 'SET_USER_PASSWORD',
+      resource: 'users',
+      resourceId: user.id,
+      tenantId,
+      metadata: { email: user.email },
+      ipAddress: request.ip,
+      userAgent: request.headers['user-agent'],
+    });
+
     return {
       success: true,
-      data: { message: 'Password reset successfully', tempPassword },
+      data: {
+        mode: 'password',
+        email: user.email,
+        tempPassword,
+        message: 'Password changed. Copy it now — it cannot be shown again, and the user is locked out until they receive it.',
+      },
     };
   });
 

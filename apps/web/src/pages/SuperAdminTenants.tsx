@@ -611,6 +611,8 @@ function UsersTab({ tenantId, users }: { tenantId: string; users: TenantUser[] }
   const [inviteName, setInviteName] = useState('');
   const [inviteResult, setInviteResult] = useState<{ user: any; tempPassword: string } | null>(null);
   const [copied, setCopied] = useState(false);
+  const [resetLink, setResetLink] = useState<{ mode: string; email: string; resetUrl?: string; expiresAt?: string } | null>(null);
+  const [resetCopied, setResetCopied] = useState(false);
 
   const inviteMutation = useMutation({
     mutationFn: async (data: { email: string; name: string; role: string }) => {
@@ -626,12 +628,19 @@ function UsersTab({ tenantId, users }: { tenantId: string; users: TenantUser[] }
     },
   });
 
+  // Returns a reset link for the operator to relay. No email is sent — saying
+  // one was, as this used to, left the operator believing the user had been
+  // contacted when nothing had happened.
   const resetPasswordMutation = useMutation({
     mutationFn: async (userId: string) => {
-      await api.post(`/superadmin/tenants/${tenantId}/users/${userId}/reset-password`, {});
+      const r = await api.post(`/superadmin/tenants/${tenantId}/users/${userId}/reset-password`, {});
+      return r.data.data as { mode: string; email: string; resetUrl?: string; expiresAt?: string };
     },
-    onSuccess: () => {
-      alert('Password reset email sent to user');
+    onSuccess: (d) => {
+      setResetLink(d);
+    },
+    onError: (err: any) => {
+      alert(err?.response?.data?.error?.message || 'Could not generate a reset link');
     },
   });
 
@@ -727,6 +736,43 @@ function UsersTab({ tenantId, users }: { tenantId: string; users: TenantUser[] }
                 Dismiss
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {resetLink && (
+        <div className="mb-4 p-4 bg-apple-blue/5 border border-apple-blue/20 rounded-apple-lg">
+          <div className="flex items-start justify-between gap-3 mb-2">
+            <div>
+              <p className="font-medium text-ios-dark text-sm">Reset link for {resetLink.email}</p>
+              <p className="text-xs text-ios-muted mt-0.5">
+                Send this to the user yourself — no email was sent. Their current password keeps working until they use it.
+                {resetLink.expiresAt && ` Expires ${new Date(resetLink.expiresAt).toLocaleString()}.`}
+              </p>
+            </div>
+            <button
+              onClick={() => { setResetLink(null); setResetCopied(false); }}
+              className="text-ios-muted hover:text-ios-dark text-sm shrink-0"
+            >
+              Dismiss
+            </button>
+          </div>
+          <div className="flex items-center gap-2">
+            <code className="flex-1 text-xs bg-white border border-black/10 rounded px-2 py-1.5 overflow-x-auto whitespace-nowrap">
+              {resetLink.resetUrl}
+            </code>
+            <button
+              onClick={() => {
+                if (resetLink.resetUrl) {
+                  navigator.clipboard.writeText(resetLink.resetUrl);
+                  setResetCopied(true);
+                  setTimeout(() => setResetCopied(false), 2000);
+                }
+              }}
+              className="btn-apple btn-apple-outline text-xs px-3 py-1.5 shrink-0"
+            >
+              {resetCopied ? 'Copied' : 'Copy'}
+            </button>
           </div>
         </div>
       )}

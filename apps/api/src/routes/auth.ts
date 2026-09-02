@@ -473,16 +473,17 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
       data: { userId: user.id, token, tokenHash, expiresAt },
     });
 
-    // In production: send email with reset link containing the token
-    // For now log it to server console
+    // No email transport is wired up yet, so the link is written to the server
+    // log for an operator to relay. It must NOT go back in the response: this
+    // route is public and unauthenticated, so returning the token would let
+    // anyone who knows a customer's email address take over their account —
+    // which also makes the "if an account exists" wording above pointless.
     console.log(`[Password Reset] For ${email}: ${process.env.APP_URL || 'http://localhost:5173'}/reset-password?token=${token}`);
 
     return {
       success: true,
       data: {
         message: 'If an account exists with this email, a password reset link has been sent',
-        // DEV ONLY — remove in production:
-        devToken: token,
       },
     };
   });
