@@ -218,7 +218,19 @@ async function authMiddlewareInner(app: FastifyInstance): Promise<void> {
         // trial ran indefinitely. Billing and auth routes stay reachable so an
         // expired tenant can still log in and pay rather than being locked out
         // of the only screen that would fix their situation.
-        if (tenant.status === 'TRIAL' && tenant.trialEndsAt && tenant.trialEndsAt < new Date()) {
+        //
+        // A Stripe subscription overrides the trial window. Status is not
+        // reliable on its own: tenants exist on paid plans whose status was
+        // never moved off TRIAL, and gating on the stale flag alone locked a
+        // paying customer out of their own account.
+        const hasPaidSubscription = !!tenant.stripeSubId;
+
+        if (
+          tenant.status === 'TRIAL' &&
+          !hasPaidSubscription &&
+          tenant.trialEndsAt &&
+          tenant.trialEndsAt < new Date()
+        ) {
           const url = request.url.split('?')[0];
           const allowedWhileExpired =
             url.startsWith('/api/v1/billing') ||
