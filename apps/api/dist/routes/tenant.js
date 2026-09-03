@@ -470,57 +470,109 @@ export async function registerTenantRoutes(app) {
         const schema = z.object({
             contacts: z.array(z.object({
                 name: z.string().optional(),
+                // A blank cell arrives as "", which z.string().email() rejects — that
+                // failed the whole import over an empty optional column.
                 phone: z.string().min(1),
-                email: z.string().email().optional(),
+                email: z.string().email().optional().or(z.literal('')).transform((v) => v || undefined),
                 company: z.string().optional(),
                 tags: z.array(z.string()).optional(),
-            })).min(1).max(1000),
+            })).min(1).max(20000),
             duplicateHandling: z.enum(['SKIP', 'UPDATE', 'OVERWRITE']).default('SKIP'),
         });
         const { contacts, duplicateHandling } = schema.parse(request.body);
+        const tenantId = request.authUser.tenantId;
+        const tenant = await app.prisma.tenant.findUnique({
+            where: { id: tenantId },
+            select: { defaultCountry: true },
+        });
+        // Country drives the per-message rate, so getting it wrong changes what the
+        // tenant is charged. This was hardcoded to 'US': an Indian list imported
+        // that way billed at US marketing rates, more than double the correct one.
+        // Derived from the dial code where recognisable, falling back to the
+        // tenant's own default rather than a guess.
+        const DIAL_CODES = [
+            ['91', 'IN'], ['92', 'PK'], ['880', 'BD'], ['94', 'LK'], ['977', 'NP'],
+            ['62', 'ID'], ['60', 'MY'], ['63', 'PH'], ['66', 'TH'], ['84', 'VN'],
+            ['44', 'GB'], ['49', 'DE'], ['33', 'FR'], ['34', 'ES'], ['39', 'IT'],
+            ['31', 'NL'], ['351', 'PT'], ['48', 'PL'], ['7', 'RU'], ['90', 'TR'],
+            ['55', 'BR'], ['52', 'MX'], ['54', 'AR'], ['57', 'CO'], ['56', 'CL'],
+            ['20', 'EG'], ['27', 'ZA'], ['234', 'NG'], ['254', 'KE'], ['971', 'AE'],
+            ['966', 'SA'], ['972', 'IL'], ['61', 'AU'], ['64', 'NZ'], ['81', 'JP'],
+            ['82', 'KR'], ['86', 'CN'], ['1', 'US'],
+        ].sort((a, b) => b[0].length - a[0].length); // longest prefix wins
+        const countryFor = (phone) => {
+            const digits = phone.replace(/[^\d]/g, '');
+            for (const [code, iso] of DIAL_CODES) {
+                if (digits.startsWith(code))
+                    return iso;
+            }
+            return tenant?.defaultCountry || 'IN';
+        };
         const results = { created: 0, skipped: 0, updated: 0, errors: [] };
+        // One lookup for the whole import instead of a query per row — a 400-row
+        // file previously issued 400 sequential selects before writing anything.
+        const phones = contacts.map((c) => c.phone);
+        const existing = await app.prisma.contact.findMany({
+            where: { tenantId, phone: { in: phones } },
+            select: { id: true, phone: true, name: true, email: true, company: true },
+        });
+        const existingByPhone = new Map(existing.map((e) => [e.phone, e]));
+        // Duplicates inside the file itself would otherwise race each other and
+        // create the same contact twice.
+        const seenInFile = new Set();
+        const toCreate = [];
         for (const contact of contacts) {
-            try {
-                // Check for existing contact by phone
-                const existing = await app.prisma.contact.findFirst({
-                    where: { tenantId: request.authUser.tenantId, phone: contact.phone },
-                });
-                if (existing) {
-                    if (duplicateHandling === 'SKIP') {
-                        results.skipped++;
-                        continue;
-                    }
-                    else if (duplicateHandling === 'UPDATE' || duplicateHandling === 'OVERWRITE') {
-                        await app.prisma.contact.update({
-                            where: { id: existing.id },
-                            data: {
-                                name: contact.name || existing.name,
-                                email: contact.email || existing.email,
-                                company: contact.company || existing.company,
-                            },
-                        });
-                        results.updated++;
-                        continue;
-                    }
+            const prior = existingByPhone.get(contact.phone);
+            if (prior) {
+                if (duplicateHandling === 'SKIP') {
+                    results.skipped++;
+                    continue;
                 }
-                // Create new contact
-                await app.prisma.contact.create({
-                    data: {
-                        tenantId: request.authUser.tenantId,
-                        phone: contact.phone,
-                        name: contact.name || 'Unknown',
-                        email: contact.email,
-                        company: contact.company,
-                        country: 'US',
-                        isActive: true,
-                        consentStatus: 'UNKNOWN', // Imported contacts need explicit consent
-                        consentSource: 'import',
-                    },
-                });
-                results.created++;
+                try {
+                    await app.prisma.contact.update({
+                        where: { id: prior.id },
+                        data: {
+                            name: contact.name || prior.name,
+                            email: contact.email || prior.email,
+                            company: contact.company || prior.company,
+                        },
+                    });
+                    results.updated++;
+                }
+                catch (err) {
+                    results.errors.push(`Could not update ${contact.phone}: ${err.message}`);
+                }
+                continue;
+            }
+            if (seenInFile.has(contact.phone)) {
+                results.skipped++;
+                continue;
+            }
+            seenInFile.add(contact.phone);
+            toCreate.push({
+                tenantId,
+                phone: contact.phone,
+                name: contact.name || 'Unknown',
+                email: contact.email,
+                company: contact.company,
+                country: countryFor(contact.phone),
+                isActive: true,
+                consentStatus: 'UNKNOWN', // Imported contacts need explicit consent
+                consentSource: 'import',
+            });
+        }
+        // Written in chunks so one very large file doesn't build a single oversized
+        // statement, and so a failure loses one chunk rather than the whole import.
+        const CHUNK = 500;
+        for (let i = 0; i < toCreate.length; i += CHUNK) {
+            const slice = toCreate.slice(i, i + CHUNK);
+            try {
+                const res = await app.prisma.contact.createMany({ data: slice, skipDuplicates: true });
+                results.created += res.count;
+                results.skipped += slice.length - res.count;
             }
             catch (err) {
-                results.errors.push(`Failed to import ${contact.phone}: ${err.message}`);
+                results.errors.push(`Could not import ${slice.length} contact(s): ${err.message}`);
             }
         }
         return { success: true, data: results };

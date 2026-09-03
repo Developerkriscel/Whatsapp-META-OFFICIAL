@@ -207,7 +207,14 @@ export default function ContactsPage() {
       toast.success('Import complete');
     },
     onError: (err: any) => {
-      setImportError(err.response?.data?.message || 'Import failed. Please try again.');
+      // The API returns { error: { message } }; reading only data.message meant
+      // every failure showed the same generic line and hid the actual reason.
+      setImportError(
+        err.response?.data?.error?.message ||
+        err.response?.data?.message ||
+        err.message ||
+        'Import failed. Please try again.',
+      );
     },
   });
 
@@ -273,13 +280,18 @@ export default function ContactsPage() {
     tags: getMappedValue(row, 'tags'),
   }));
 
-  const canProceedFromMap = columnMappings.some(m => m.field === 'name') &&
-    columnMappings.some(m => m.field === 'phone');
+  // Phone is the only field an import genuinely needs — it is what a message is
+  // sent to. Requiring a name mapping blocked phone-only lists at this step.
+  const canProceedFromMap = columnMappings.some(m => m.field === 'phone');
 
   const handleStartImport = () => {
+    // Only a phone number is required. Requiring a name here silently discarded
+    // every row of a phone-only list — a perfectly normal WhatsApp export — and
+    // then failed with "Import failed" because the resulting array was empty.
+    // The server treats name as optional and falls back to "Unknown".
     const contactsToImport = csvRows
       .map(row => ({
-        name: getMappedValue(row, 'name'),
+        name: getMappedValue(row, 'name') || undefined,
         phone: getMappedValue(row, 'phone'),
         email: getMappedValue(row, 'email') || undefined,
         company: getMappedValue(row, 'company') || undefined,
@@ -287,7 +299,16 @@ export default function ContactsPage() {
           ? getMappedValue(row, 'tags').split(',').map(t => t.trim()).filter(Boolean)
           : [],
       }))
-      .filter(c => c.name && c.phone);
+      .filter(c => c.phone && c.phone.trim().length > 0);
+
+    if (contactsToImport.length === 0) {
+      setImportError(
+        'No rows have a phone number. Check that the phone column is mapped correctly on the previous step.',
+      );
+      return;
+    }
+
+    setImportError(null);
     bulkImportMutation.mutate(contactsToImport);
   };
 
