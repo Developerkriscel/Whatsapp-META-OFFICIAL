@@ -3320,6 +3320,26 @@ async function sendCampaignMessagesInner(app, campaignId, tenantId) {
     // Get contacts in batches
     const BATCH_SIZE = 10;
     const RATE_LIMIT_DELAY = 1100; // 1.1s between batches to respect WhatsApp rate limits
+    // How many recipients are in flight at once within a batch.
+    //
+    // Every recipient now opens a database transaction to take credits before it
+    // dispatches, and firing a whole batch at once exhausted the connection pool:
+    // a run of 11 produced seven "Unable to start a transaction in the given time"
+    // failures, and Meta rejected several of the rest with a parameter error that
+    // did not reproduce on the same payload sent on its own. Both symptoms come
+    // from the same burst.
+    const SEND_CONCURRENCY = 3;
+    /** Runs tasks with a fixed number in flight, preserving completion semantics. */
+    const runWithConcurrency = async (tasks, limit) => {
+        let cursor = 0;
+        const workers = Array.from({ length: Math.min(limit, tasks.length) }, async () => {
+            while (cursor < tasks.length) {
+                const task = tasks[cursor++];
+                await task();
+            }
+        });
+        await Promise.all(workers);
+    };
     // Seed running totals from any progress already persisted by a prior run
     const priorTotals = await app.prisma.campaign.findUnique({
         where: { id: campaignId },
@@ -3337,7 +3357,7 @@ async function sendCampaignMessagesInner(app, campaignId, tenantId) {
         const contacts = await app.prisma.contact.findMany({
             where: { id: { in: batch }, tenantId },
         });
-        const phonePromises = contacts.map(async (contact) => {
+        const phoneTasks = contacts.map((contact) => async () => {
             // Every Message row requires a conversationId — find or create the
             // (tenant, contact, phone) conversation before touching Message at all,
             // for both the success and failure logging paths below. Missing this
@@ -3369,6 +3389,11 @@ async function sendCampaignMessagesInner(app, campaignId, tenantId) {
                 return;
             }
             const messageBody = campaign.template.body?.text || '';
+            // Tracked outside the try so the catch can close the message out. An
+            // exception mid-send used to increment the failure count and leave the row
+            // PENDING for ever, which is why recipients showed a blank status and no
+            // reason — the campaign said it failed but the message never said why.
+            let createdMessageId = null;
             try {
                 if (!campaign.template || !campaign.phoneNumber?.metaPhoneId)
                     return;
@@ -3416,6 +3441,7 @@ async function sendCampaignMessagesInner(app, campaignId, tenantId) {
                         status: 'PENDING',
                     },
                 });
+                createdMessageId = message.id;
                 // Charge before dispatching. This used to run after the send and then
                 // discard its result, so once a balance hit zero the remaining
                 // recipients were still delivered and counted as sent — messages given
@@ -3464,9 +3490,24 @@ async function sendCampaignMessagesInner(app, campaignId, tenantId) {
             catch (err) {
                 console.error(`Failed to send to ${contact.phone}:`, err.message);
                 failed++;
+                // Record why on the message itself, so the campaign view shows a reason
+                // instead of a recipient stuck on PENDING with a blank detail column.
+                if (createdMessageId) {
+                    await app.prisma.message.update({
+                        where: { id: createdMessageId },
+                        data: {
+                            status: 'FAILED',
+                            errorCode: 'SEND_ERROR',
+                            errorMessage: (err?.message || 'Send failed').slice(0, 500),
+                            failedAt: new Date(),
+                        },
+                    }).catch(() => {
+                        // Already logged above; a failed status write must not mask it.
+                    });
+                }
             }
         });
-        await Promise.all(phonePromises);
+        await runWithConcurrency(phoneTasks, SEND_CONCURRENCY);
         // Persist progress after every batch so a crash/restart mid-campaign
         // leaves an accurate totalSent/totalFailed count instead of 0, and so
         // the resume-safety check above has real data to dedupe against.
