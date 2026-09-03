@@ -2,6 +2,44 @@ import { FastifyInstance } from 'fastify';
 import { resolveAccessToken } from './credentialEncryption.js';
 import { reserveSendSlot, releaseSendSlot } from './sendQuota.js';
 
+/**
+ * Meta errors that mean "try again", as opposed to "this will never work".
+ *
+ * Retrying a template or recipient problem just burns the same failure N times;
+ * retrying a rate limit or a transient outage is the difference between a
+ * recipient being delivered and being permanently marked failed over a blip.
+ * With no retries at all, a one-second wobble during a large campaign
+ * permanently lost every recipient in flight at that moment.
+ */
+const RETRYABLE_META_CODES = new Set([
+  130429, // rate limit hit
+  131056, // (business, consumer) pair rate limit hit
+  133016, // temporarily unavailable / too many requests
+  368,    // temporarily blocked for policies — clears on its own
+  1,      // unknown/transient API error
+  2,      // service temporarily unavailable
+]);
+
+/** Codes that specifically mean we are going too fast, so the caller should ease off. */
+const RATE_LIMIT_META_CODES = new Set([130429, 131056, 133016]);
+
+const MAX_SEND_ATTEMPTS = 3;
+
+function isRetryable(httpStatus: number, metaCode?: number): boolean {
+  if (httpStatus === 429) return true;
+  if (httpStatus >= 500) return true;
+  if (metaCode != null && RETRYABLE_META_CODES.has(metaCode)) return true;
+  return false;
+}
+
+/** Exponential backoff with jitter, so retries from a batch don't resynchronise. */
+function backoffMs(attempt: number): number {
+  const base = 500 * Math.pow(2, attempt - 1); // 500ms, 1s, 2s
+  return base + Math.floor(Math.random() * 250);
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
 export interface DispatchMessageParams {
   app: FastifyInstance;
   messageId: string;
@@ -92,16 +130,43 @@ export async function dispatchOutboundMessage(params: DispatchMessageParams): Pr
               text: { body },
             };
 
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(payload),
-      });
+      // Retry transient failures. Without this a momentary rate limit or a 5xx
+      // permanently failed that recipient, which during a large campaign meant
+      // losing everything in flight at that instant.
+      let response!: Response;
+      let responseData: any;
+      let rateLimited = false;
 
-      const responseData: any = await response.json();
+      for (let attempt = 1; attempt <= MAX_SEND_ATTEMPTS; attempt++) {
+        try {
+          response = await fetch(url, {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${token}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(payload),
+          });
+          responseData = await response.json();
+        } catch (netErr: any) {
+          // Never reached Meta at all. Treat like a 503 and try again.
+          if (attempt < MAX_SEND_ATTEMPTS) {
+            await sleep(backoffMs(attempt));
+            continue;
+          }
+          throw netErr;
+        }
+
+        const metaCode: number | undefined = responseData?.error?.code;
+        if (metaCode != null && RATE_LIMIT_META_CODES.has(metaCode)) rateLimited = true;
+
+        if (response.ok || !isRetryable(response.status, metaCode) || attempt === MAX_SEND_ATTEMPTS) {
+          break;
+        }
+
+        // Meta asks for a longer pause on rate limits than on a plain 5xx.
+        await sleep(rateLimited ? backoffMs(attempt) * 4 : backoffMs(attempt));
+      }
 
       if (response.ok && responseData?.messages?.[0]?.id) {
         const metaMessageId = responseData.messages[0].id;
@@ -131,7 +196,10 @@ export async function dispatchOutboundMessage(params: DispatchMessageParams): Pr
             failedAt: new Date(),
           },
         });
-        return { success: false, status: 'FAILED', error: errMessage, data: updated };
+        // rateLimited tells the campaign loop to ease off rather than keep
+        // pushing at the same rate, which is what turns one throttle into a
+        // whole batch of throttled failures.
+        return { success: false, status: 'FAILED', error: errMessage, errorCode: errCode, rateLimited, data: updated };
       }
     }
 

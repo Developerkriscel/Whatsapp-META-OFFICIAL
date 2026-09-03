@@ -3351,6 +3351,19 @@ async function sendCampaignMessagesInner(app, campaignId, tenantId) {
     // remaining recipient and failing each one individually, turning one problem
     // into hundreds of identical failures the tenant has to read through.
     let outOfCredits = false;
+    // Meta throttle responses seen in the current batch. Used to slow the next
+    // one down rather than continuing at a rate Meta has just rejected.
+    let rateLimitHits = 0;
+    // Grows when Meta throttles and decays when a batch passes cleanly, so a busy
+    // period slows the campaign instead of failing it.
+    let adaptiveDelay = RATE_LIMIT_DELAY;
+    const MAX_ADAPTIVE_DELAY = 30_000;
+    // Meta caps how many unique customers a number may message per rolling 24h.
+    // Checked as the campaign runs, not only at creation: a long campaign can
+    // cross the line partway, and every recipient after that is rejected. Stopping
+    // cleanly leaves a resumable campaign instead of thousands of failures.
+    const { checkTierCapacity } = await import('../services/sendQuota.js');
+    let tierExhausted = false;
     const { dispatchOutboundMessage } = await import('../services/whatsappService.js');
     const { reserveCreditsForBatch, releaseUnusedReservation, getRateCredits } = await import('../services/creditService.js');
     const templateCategory = campaign.template?.category || 'UTILITY';
@@ -3488,6 +3501,11 @@ async function sendCampaignMessagesInner(app, campaignId, tenantId) {
                     },
                 });
                 if (!dispatchResult.success) {
+                    // Meta throttling is a pacing signal, not a per-recipient defect —
+                    // record it so the loop slows down instead of driving the rest of the
+                    // campaign into the same wall.
+                    if (dispatchResult.rateLimited)
+                        rateLimitHits++;
                     throw new Error(dispatchResult.error || 'Dispatch failed');
                 }
                 consumed += costCredits;
@@ -3543,23 +3561,46 @@ async function sendCampaignMessagesInner(app, campaignId, tenantId) {
             console.log(`[Campaign] ${campaignId} halted: out of credits, ${remaining} recipient(s) not attempted`);
             break;
         }
-        // Rate limit delay between batches
+        // Stop at Meta's 24h unique-recipient cap rather than pushing into it.
+        const tier = await checkTierCapacity(app.prisma, campaign.phoneNumberId, 1);
+        if (!tier.withinTier) {
+            tierExhausted = true;
+            const remaining = contactIds.length - Math.min(i + BATCH_SIZE, contactIds.length);
+            console.log(`[Campaign] ${campaignId} halted: Meta ${tier.usage.tier} limit reached ` +
+                `(${tier.usage.uniqueCustomers24h}/${tier.usage.limit} in 24h), ${remaining} recipient(s) not attempted`);
+            break;
+        }
+        // Back off when Meta pushed back, recover when it didn't.
+        if (rateLimitHits > 0) {
+            adaptiveDelay = Math.min(adaptiveDelay * 2, MAX_ADAPTIVE_DELAY);
+            console.log(`[Campaign] ${campaignId}: ${rateLimitHits} throttled, slowing to ${adaptiveDelay}ms between batches`);
+            rateLimitHits = 0;
+        }
+        else if (adaptiveDelay > RATE_LIMIT_DELAY) {
+            adaptiveDelay = Math.max(RATE_LIMIT_DELAY, Math.floor(adaptiveDelay / 2));
+        }
         if (i + BATCH_SIZE < contactIds.length) {
-            await new Promise((r) => setTimeout(r, RATE_LIMIT_DELAY));
+            await new Promise((r) => setTimeout(r, adaptiveDelay));
         }
     }
-    // A campaign stopped by an empty balance is not "completed" — calling it that
-    // hides the reason it stopped short of its recipient list.
+    // A campaign stopped short is not "completed" — calling it that hides why it
+    // never reached the rest of its recipient list. A tier stop is recoverable:
+    // the resume path skips anyone already messaged, so re-running it tomorrow
+    // picks up where it left off rather than double-sending.
+    const haltedEarly = outOfCredits || tierExhausted;
     await app.prisma.campaign.update({
         where: { id: campaignId },
         data: {
-            status: outOfCredits ? 'FAILED' : 'COMPLETED',
+            status: haltedEarly ? 'FAILED' : 'COMPLETED',
             totalSent: sent,
             totalFailed: failed,
             completedAt: new Date(),
             lastSentAt: new Date(),
         },
     });
-    console.log(`[Campaign] ${campaignId} ${outOfCredits ? 'halted (out of credits)' : 'completed'}: ${sent} sent, ${failed} failed`);
+    const reason = outOfCredits ? 'halted (out of credits)'
+        : tierExhausted ? 'halted (Meta 24h limit reached — resume tomorrow)'
+            : 'completed';
+    console.log(`[Campaign] ${campaignId} ${reason}: ${sent} sent, ${failed} failed`);
 }
 //# sourceMappingURL=tenant.js.map
