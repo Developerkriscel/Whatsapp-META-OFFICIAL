@@ -475,6 +475,74 @@ export async function maybeAutoRecharge(prisma, tenantId, balanceAfter) {
 // ADD CREDITS (purchase, bonus, refund)
 // ============================================
 /**
+ * Takes credits for a whole batch of messages in one transaction.
+ *
+ * Charging per message meant one database transaction per recipient. A campaign
+ * batch dispatched in parallel then opened that many transactions at once and
+ * exhausted the pool, which capped safe concurrency at about three sends and
+ * made bulk campaigns unusably slow. One reservation per batch removes that
+ * ceiling entirely — the transaction count stops scaling with recipients.
+ *
+ * Partial reservation is deliberate: a tenant with enough credits for 800 of
+ * 1,000 recipients gets 800 messages sent and a clear shortfall, rather than the
+ * whole campaign refused or — worse — 800 sent free because each per-message
+ * check was ignored.
+ */
+export async function reserveCreditsForBatch(prisma, tenantId, unitCosts, referenceId, description) {
+    const total = unitCosts.reduce((n, c) => n + c, 0);
+    if (total === 0) {
+        return { reservedFor: unitCosts.length, reservedAmount: 0, shortfall: 0, balanceAfter: -1 };
+    }
+    return prisma.$transaction(async (tx) => {
+        const account = await tx.tenantCredit.findUnique({ where: { tenantId } });
+        if (!account) {
+            return { reservedFor: 0, reservedAmount: 0, shortfall: unitCosts.length, balanceAfter: 0 };
+        }
+        // Cover as many recipients as the balance allows, in order.
+        let affordable = 0;
+        let spend = 0;
+        for (const cost of unitCosts) {
+            if (spend + cost > account.balance)
+                break;
+            spend += cost;
+            affordable++;
+        }
+        if (affordable === 0) {
+            return { reservedFor: 0, reservedAmount: 0, shortfall: unitCosts.length, balanceAfter: account.balance };
+        }
+        const updated = await tx.tenantCredit.update({
+            where: { tenantId },
+            data: { balance: { decrement: spend }, totalUsed: { increment: spend } },
+        });
+        await tx.tenantCreditTransaction.create({
+            data: {
+                creditId: updated.id,
+                type: 'USAGE',
+                amount: -spend,
+                referenceId,
+                referenceType: 'CAMPAIGN',
+                description: description || `Reserved for ${affordable} message(s)`,
+                balanceAfter: updated.balance,
+            },
+        });
+        return {
+            reservedFor: affordable,
+            reservedAmount: spend,
+            shortfall: unitCosts.length - affordable,
+            balanceAfter: updated.balance,
+        };
+    });
+}
+/**
+ * Returns the unused part of a batch reservation — the recipients Meta refused.
+ * One transaction for the batch, matching how the credits were taken.
+ */
+export async function releaseUnusedReservation(prisma, tenantId, amount, referenceId, description) {
+    if (amount <= 0)
+        return;
+    await addCredits(prisma, tenantId, amount, 'REFUND', referenceId, description || 'Unused campaign reservation');
+}
+/**
  * Returns credits charged for a message the provider then refused. Named
  * separately from addCredits so the ledger reads honestly — a refund is not a
  * purchase, and the two should be distinguishable when reconciling.

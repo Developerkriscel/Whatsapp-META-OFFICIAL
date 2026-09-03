@@ -3318,17 +3318,17 @@ async function sendCampaignMessagesInner(app, campaignId, tenantId) {
         return;
     }
     // Get contacts in batches
-    const BATCH_SIZE = 10;
-    const RATE_LIMIT_DELAY = 1100; // 1.1s between batches to respect WhatsApp rate limits
-    // How many recipients are in flight at once within a batch.
-    //
-    // Every recipient now opens a database transaction to take credits before it
-    // dispatches, and firing a whole batch at once exhausted the connection pool:
-    // a run of 11 produced seven "Unable to start a transaction in the given time"
-    // failures, and Meta rejected several of the rest with a parameter error that
-    // did not reproduce on the same payload sent on its own. Both symptoms come
-    // from the same burst.
-    const SEND_CONCURRENCY = 3;
+    // Batching is sized for bulk. Credits are reserved once per batch rather than
+    // once per message, so the number of database transactions no longer scales
+    // with recipients — that per-message transaction was what exhausted the
+    // connection pool and forced concurrency down to three, which made a
+    // thousand-recipient campaign take the better part of an hour.
+    const BATCH_SIZE = 50;
+    // Meta's Cloud API accepts well above this; the limit here is our own database
+    // and a wish not to look like a burst to Meta's throttles.
+    const SEND_CONCURRENCY = 12;
+    // Between batches only, not between messages.
+    const RATE_LIMIT_DELAY = 400;
     /** Runs tasks with a fixed number in flight, preserving completion semantics. */
     const runWithConcurrency = async (tasks, limit) => {
         let cursor = 0;
@@ -3352,12 +3352,37 @@ async function sendCampaignMessagesInner(app, campaignId, tenantId) {
     // into hundreds of identical failures the tenant has to read through.
     let outOfCredits = false;
     const { dispatchOutboundMessage } = await import('../services/whatsappService.js');
+    const { reserveCreditsForBatch, releaseUnusedReservation, getRateCredits } = await import('../services/creditService.js');
+    const templateCategory = campaign.template?.category || 'UTILITY';
     for (let i = 0; i < contactIds.length; i += BATCH_SIZE) {
         const batch = contactIds.slice(i, i + BATCH_SIZE);
         const contacts = await app.prisma.contact.findMany({
             where: { id: { in: batch }, tenantId },
         });
-        const phoneTasks = contacts.map((contact) => async () => {
+        // Reserve the whole batch in one transaction. Rates are per-country, so the
+        // cost of each recipient is worked out first and the reservation covers as
+        // many as the balance allows — a tenant short on credits sends what they can
+        // afford instead of the campaign failing wholesale or, before this, sending
+        // the remainder free.
+        const unitCosts = contacts.map((c) => getRateCredits(c.country || 'US', templateCategory));
+        const reservation = await reserveCreditsForBatch(app.prisma, tenantId, unitCosts, campaignId, `Campaign: ${campaign.name} (batch of ${contacts.length})`);
+        if (reservation.reservedFor === 0) {
+            outOfCredits = true;
+            console.log(`[Campaign] ${campaignId} halted before batch: insufficient credits`);
+            break;
+        }
+        // Anyone the reservation could not cover is failed up front with a reason,
+        // rather than attempted and rejected one at a time.
+        const affordable = contacts.slice(0, reservation.reservedFor);
+        const unaffordable = contacts.slice(reservation.reservedFor);
+        if (unaffordable.length > 0) {
+            outOfCredits = true;
+            failed += unaffordable.length;
+        }
+        // Credits actually consumed by messages Meta accepted; the rest is returned
+        // in a single call once the batch settles.
+        let consumed = 0;
+        const phoneTasks = affordable.map((contact) => async () => {
             // Every Message row requires a conversationId — find or create the
             // (tenant, contact, phone) conversation before touching Message at all,
             // for both the success and failure logging paths below. Missing this
@@ -3442,30 +3467,12 @@ async function sendCampaignMessagesInner(app, campaignId, tenantId) {
                     },
                 });
                 createdMessageId = message.id;
-                // Charge before dispatching. This used to run after the send and then
-                // discard its result, so once a balance hit zero the remaining
-                // recipients were still delivered and counted as sent — messages given
-                // away free. Deducting first also means a refusal cannot leave a
-                // message that Meta already delivered marked as failed.
-                const { deductCredits, refundCredits, getRateCredits } = await import('../services/creditService.js');
-                const templateCategory = campaign.template?.category || 'UTILITY';
-                const countryCode = contact.country || 'US';
-                const costCredits = getRateCredits(countryCode, templateCategory);
-                const creditResult = await deductCredits(app.prisma, tenantId, costCredits, message.id, 'CAMPAIGN', `Campaign: ${campaign.name} to ${contact.phone}`);
-                if (!creditResult.success) {
-                    await app.prisma.message.update({
-                        where: { id: message.id },
-                        data: {
-                            status: 'FAILED',
-                            errorCode: creditResult.error || 'INSUFFICIENT_CREDITS',
-                            errorMessage: 'Not enough credits to send this message.',
-                            failedAt: new Date(),
-                        },
-                    }).catch(() => { });
-                    failed++;
-                    outOfCredits = true;
-                    return;
-                }
+                // Credits for this recipient were already taken as part of the batch
+                // reservation above, so there is no per-message transaction here — that
+                // is what makes bulk throughput possible. Only what Meta accepts is
+                // counted as consumed; the balance of the reservation is returned once
+                // the batch settles.
+                const costCredits = getRateCredits(contact.country || 'US', templateCategory);
                 const dispatchResult = await dispatchOutboundMessage({
                     app,
                     messageId: message.id,
@@ -3481,10 +3488,9 @@ async function sendCampaignMessagesInner(app, campaignId, tenantId) {
                     },
                 });
                 if (!dispatchResult.success) {
-                    // Meta didn't take it, so the tenant shouldn't pay for it.
-                    await refundCredits(app.prisma, tenantId, costCredits, message.id, 'CAMPAIGN', `Refund — send failed: ${campaign.name} to ${contact.phone}`).catch((e) => console.error(`[Credits] refund failed for message ${message.id}:`, e?.message));
                     throw new Error(dispatchResult.error || 'Dispatch failed');
                 }
+                consumed += costCredits;
                 sent++;
             }
             catch (err) {
@@ -3508,6 +3514,21 @@ async function sendCampaignMessagesInner(app, campaignId, tenantId) {
             }
         });
         await runWithConcurrency(phoneTasks, SEND_CONCURRENCY);
+        // Recipients the reservation could not cover are counted above but get no
+        // message row. A Message requires a conversation, and manufacturing one for
+        // a send that never happened would put a conversation in the tenant's inbox
+        // for a customer who was never contacted. They were not attempted, so there
+        // is nothing to show — the campaign is marked FAILED and the shortfall
+        // logged, which is the honest record.
+        if (unaffordable.length > 0) {
+            console.log(`[Campaign] ${campaignId}: ${unaffordable.length} recipient(s) not attempted — insufficient credits`);
+        }
+        // Settle the reservation: give back whatever Meta did not accept, in one
+        // call rather than one per failed recipient.
+        const unused = reservation.reservedAmount - consumed;
+        if (unused > 0) {
+            await releaseUnusedReservation(app.prisma, tenantId, unused, campaignId, `Unused reservation — ${campaign.name}`).catch((e) => console.error(`[Credits] could not return unused reservation:`, e?.message));
+        }
         // Persist progress after every batch so a crash/restart mid-campaign
         // leaves an accurate totalSent/totalFailed count instead of 0, and so
         // the resume-safety check above has real data to dedupe against.

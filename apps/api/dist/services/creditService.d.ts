@@ -97,6 +97,31 @@ export declare function deductCredits(prisma: PrismaClient, tenantId: string, am
 }>;
 export declare function maybeAutoRecharge(prisma: PrismaClient, tenantId: string, balanceAfter: number): Promise<void>;
 /**
+ * Takes credits for a whole batch of messages in one transaction.
+ *
+ * Charging per message meant one database transaction per recipient. A campaign
+ * batch dispatched in parallel then opened that many transactions at once and
+ * exhausted the pool, which capped safe concurrency at about three sends and
+ * made bulk campaigns unusably slow. One reservation per batch removes that
+ * ceiling entirely — the transaction count stops scaling with recipients.
+ *
+ * Partial reservation is deliberate: a tenant with enough credits for 800 of
+ * 1,000 recipients gets 800 messages sent and a clear shortfall, rather than the
+ * whole campaign refused or — worse — 800 sent free because each per-message
+ * check was ignored.
+ */
+export declare function reserveCreditsForBatch(prisma: PrismaClient, tenantId: string, unitCosts: number[], referenceId: string, description?: string): Promise<{
+    reservedFor: number;
+    reservedAmount: number;
+    shortfall: number;
+    balanceAfter: number;
+}>;
+/**
+ * Returns the unused part of a batch reservation — the recipients Meta refused.
+ * One transaction for the batch, matching how the credits were taken.
+ */
+export declare function releaseUnusedReservation(prisma: PrismaClient, tenantId: string, amount: number, referenceId: string, description?: string): Promise<void>;
+/**
  * Returns credits charged for a message the provider then refused. Named
  * separately from addCredits so the ledger reads honestly — a refund is not a
  * purchase, and the two should be distinguishable when reconciling.
