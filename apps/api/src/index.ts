@@ -38,6 +38,30 @@ async function main() {
     });
     console.log(`🚀 API server running at ${address}`);
 
+    // Billing reads prices from an in-memory cache so the per-message lookup can
+    // stay synchronous. Load it before anything can send: an empty cache falls
+    // back to Meta's list prices, which would bill at cost rather than at the
+    // configured rate. Refreshed periodically so a price set on one instance
+    // reaches the others without a restart.
+    try {
+      const { seedCreditRates, refreshRateCache } = await import('./services/creditService.js');
+      const seeded = await seedCreditRates(app.prisma);
+      const loaded = await refreshRateCache(app.prisma);
+      console.log(`[Credits] rate cache loaded: ${loaded} countries${seeded ? ` (seeded ${seeded} new)` : ''}`);
+
+      const RATE_REFRESH_MS = 5 * 60 * 1000;
+      const timer = setInterval(() => {
+        refreshRateCache(app.prisma).catch((e) =>
+          console.error('[Credits] rate cache refresh failed:', e?.message),
+        );
+      }, RATE_REFRESH_MS);
+      timer.unref();
+    } catch (e: any) {
+      // Sending still works — getRateCredits falls back to Meta's published
+      // prices — so this must not stop the server coming up.
+      console.error('[Credits] could not load rate cache, falling back to list prices:', e?.message);
+    }
+
     await resumeInterruptedCampaigns(app);
   } catch (err) {
     app.log.error(err);

@@ -1384,24 +1384,29 @@ model RefreshToken {
 // These exactly match Meta's published WhatsApp Business API rates
 // Source: https://developers.facebook.com/documentation/business-messaging/whatsapp/pricing
 
+/// What a tenant is charged per message, per country and category.
+///
+/// All values are in credits, where 10,000 credits = $1.00 — the same unit
+/// deductCredits works in. The previous columns were denominated in cents with
+/// a separate creditsPerDollar factor, which is why nothing could read them:
+/// the billing path used a hardcoded table in credits and the two never met.
 model CreditRate {
   id          String @id @default(cuid())
   countryCode String @unique // ISO 3166-1 alpha-2 (US, IN, BR, etc.)
-  countryName String // "United States", "India", etc.
+  countryName String
   currency    String @default("USD")
 
-  // Cost per message in USD cents (multiply by 0.01 for actual cost)
-  // Marketing messages (highest tier)
-  marketingCost Int @default(60) // cents per message
-  // Utility messages (service/transactional)
-  utilityCost   Int @default(10) // cents per message
-  // Authentication messages (OTP, 2FA)
-  authCost      Int @default(10) // cents per message
-  // Session/reply messages (within 24h window)
-  sessionCost   Int @default(0) // free within service window
+  // Sell price — what the tenant pays us.
+  marketingCredits Int @default(250)
+  utilityCredits   Int @default(34)
+  authCredits      Int @default(34)
+  serviceCredits   Int @default(0) // customer-initiated, free on Meta's side
 
-  // For calculating USD from credits
-  creditsPerDollar Int @default(100) // 1 credit = $0.01 USD
+  // What Meta charges us for the same message. Reference only: shown so margin
+  // is visible when setting a price, never used to bill a tenant.
+  metaMarketingCredits Int @default(0)
+  metaUtilityCredits   Int @default(0)
+  metaAuthCredits      Int @default(0)
 
   isActive  Boolean  @default(true)
   createdAt DateTime @default(now())

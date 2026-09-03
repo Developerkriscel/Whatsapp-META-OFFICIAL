@@ -43,10 +43,18 @@ export declare function getDefaultCountry(): string;
  * Get default currency for a tenant
  */
 export declare function getDefaultCurrency(): string;
+export declare function refreshRateCache(prisma: PrismaClient): Promise<number>;
+export declare function getRateCacheStatus(): {
+    countries: number;
+    loadedAt: Date | null;
+};
 /**
- * Get credit cost for a country + category
- * Returns credits (where 1 credit = $0.0001)
- * Falls back to India (IN) if country not found
+ * Credits charged for one message to `country` in `category`.
+ *
+ * Prefers the configured rate for that country, then the configured default
+ * country, then Meta's published list price. Previously read only the hardcoded
+ * META_RATES table, which meant the rates screen in the superadmin panel edited
+ * rows that nothing consulted.
  */
 export declare function getRateCredits(country: string, category: MessageCategory): number;
 /**
@@ -88,6 +96,15 @@ export declare function deductCredits(prisma: PrismaClient, tenantId: string, am
     error?: string;
 }>;
 export declare function maybeAutoRecharge(prisma: PrismaClient, tenantId: string, balanceAfter: number): Promise<void>;
+/**
+ * Returns credits charged for a message the provider then refused. Named
+ * separately from addCredits so the ledger reads honestly — a refund is not a
+ * purchase, and the two should be distinguishable when reconciling.
+ */
+export declare function refundCredits(prisma: PrismaClient, tenantId: string, amount: number, referenceId?: string, _referenceType?: string, description?: string): Promise<{
+    success: boolean;
+    balanceAfter: number;
+}>;
 export declare function addCredits(prisma: PrismaClient, tenantId: string, amount: number, type: 'PURCHASE' | 'BONUS' | 'REFUND' | 'ADJUSTMENT', referenceId?: string, description?: string): Promise<{
     success: boolean;
     balanceAfter: number;
@@ -106,7 +123,23 @@ export declare function recordMessageCredit(prisma: PrismaClient, data: {
     category: MessageCategory;
     cost: number;
 }): Promise<void>;
-export declare function seedCreditRates(prisma: PrismaClient): Promise<void>;
+/**
+ * Default markup applied when seeding a country for the first time.
+ *
+ * 1.0 would mean reselling at exactly Meta's price and earning nothing on
+ * messages. 1.30 is a starting point, not a recommendation — the whole purpose
+ * of moving rates into the database is that this becomes the operator's call,
+ * per country and category, from the panel.
+ */
+export declare const DEFAULT_MARKUP = 1.3;
+/**
+ * Populates rates from Meta's published prices, recording Meta's cost alongside
+ * the sell price so margin stays visible after the fact.
+ *
+ * Only fills in countries that are missing, so re-running never overwrites a
+ * price an operator has set by hand.
+ */
+export declare function seedCreditRates(prisma: PrismaClient, markup?: number): Promise<number>;
 /**
  * Get all available country codes
  */

@@ -3910,6 +3910,11 @@ async function sendCampaignMessagesInner(
   let sent = priorTotals?.totalSent || 0;
   let failed = priorTotals?.totalFailed || 0;
 
+  // Set when a deduction is refused. Without it the loop would keep trying every
+  // remaining recipient and failing each one individually, turning one problem
+  // into hundreds of identical failures the tenant has to read through.
+  let outOfCredits = false;
+
   const { dispatchOutboundMessage } = await import('../services/whatsappService.js');
 
   for (let i = 0; i < contactIds.length; i += BATCH_SIZE) {
@@ -4004,6 +4009,36 @@ async function sendCampaignMessagesInner(
           },
         });
 
+        // Charge before dispatching. This used to run after the send and then
+        // discard its result, so once a balance hit zero the remaining
+        // recipients were still delivered and counted as sent — messages given
+        // away free. Deducting first also means a refusal cannot leave a
+        // message that Meta already delivered marked as failed.
+        const { deductCredits, refundCredits, getRateCredits } = await import('../services/creditService.js') as any;
+        const templateCategory = campaign.template?.category || 'UTILITY';
+        const countryCode = contact.country || 'US';
+        const costCredits = getRateCredits(countryCode, templateCategory);
+
+        const creditResult = await deductCredits(
+          app.prisma, tenantId, costCredits, message.id, 'CAMPAIGN',
+          `Campaign: ${campaign.name} to ${contact.phone}`,
+        );
+
+        if (!creditResult.success) {
+          await app.prisma.message.update({
+            where: { id: message.id },
+            data: {
+              status: 'FAILED',
+              errorCode: creditResult.error || 'INSUFFICIENT_CREDITS',
+              errorMessage: 'Not enough credits to send this message.',
+              failedAt: new Date(),
+            },
+          }).catch(() => {});
+          failed++;
+          outOfCredits = true;
+          return;
+        }
+
         const dispatchResult = await dispatchOutboundMessage({
           app,
           messageId: message.id,
@@ -4020,17 +4055,14 @@ async function sendCampaignMessagesInner(
         });
 
         if (!dispatchResult.success) {
+          // Meta didn't take it, so the tenant shouldn't pay for it.
+          await refundCredits(
+            app.prisma, tenantId, costCredits, message.id, 'CAMPAIGN',
+            `Refund — send failed: ${campaign.name} to ${contact.phone}`,
+          ).catch((e: any) => console.error(`[Credits] refund failed for message ${message.id}:`, e?.message));
+
           throw new Error(dispatchResult.error || 'Dispatch failed');
         }
-
-        // Deduct credits based on template category
-        const { deductCredits, getRateCredits } = await import('../services/creditService.js') as any;
-        const templateCategory = campaign.template?.category || 'UTILITY';
-        const countryCode = contact.country || 'US';
-        const costCredits = getRateCredits(countryCode, templateCategory);
-
-        await deductCredits(app.prisma, tenantId, costCredits, message.id, 'CAMPAIGN',
-          `Campaign: ${campaign.name} to ${contact.phone}`);
 
         sent++;
       } catch (err: any) {
@@ -4049,17 +4081,26 @@ async function sendCampaignMessagesInner(
       data: { totalSent: sent, totalFailed: failed, lastSentAt: new Date() },
     });
 
+    // Stop as soon as the balance runs out. Continuing would attempt every
+    // remaining recipient and fail each one the same way.
+    if (outOfCredits) {
+      const remaining = contactIds.length - Math.min(i + BATCH_SIZE, contactIds.length);
+      console.log(`[Campaign] ${campaignId} halted: out of credits, ${remaining} recipient(s) not attempted`);
+      break;
+    }
+
     // Rate limit delay between batches
     if (i + BATCH_SIZE < contactIds.length) {
       await new Promise((r) => setTimeout(r, RATE_LIMIT_DELAY));
     }
   }
 
-  // Update campaign status with full stats
+  // A campaign stopped by an empty balance is not "completed" — calling it that
+  // hides the reason it stopped short of its recipient list.
   await (app.prisma.campaign.update as any)({
     where: { id: campaignId },
     data: {
-      status: 'COMPLETED',
+      status: outOfCredits ? 'FAILED' : 'COMPLETED',
       totalSent: sent,
       totalFailed: failed,
       completedAt: new Date(),
@@ -4067,5 +4108,7 @@ async function sendCampaignMessagesInner(
     },
   });
 
-  console.log(`[Campaign] ${campaignId} completed: ${sent} sent, ${failed} failed`);
+  console.log(
+    `[Campaign] ${campaignId} ${outOfCredits ? 'halted (out of credits)' : 'completed'}: ${sent} sent, ${failed} failed`,
+  );
 }

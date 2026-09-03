@@ -2,7 +2,7 @@
  * SuperAdmin Credit Routes — Platform-wide credit management
  */
 import { z } from 'zod';
-import { addCredits, getTenantCreditInfo, seedCreditRates, creditsToUsd } from '../services/creditService.js';
+import { addCredits, getTenantCreditInfo, seedCreditRates, creditsToUsd, refreshRateCache, getRateCacheStatus, } from '../services/creditService.js';
 import { requireSuperadmin, createAuditLog } from '../middleware/auth.js';
 export async function registerSuperadminCreditRoutes(app) {
     // Apply superadmin auth to all routes in this module
@@ -11,42 +11,132 @@ export async function registerSuperadminCreditRoutes(app) {
     // GET ALL CREDIT RATES
     // ============================================
     app.get('/credit-rates', async (request, reply) => {
-        // Seed rates if needed
+        // Fills in any country not yet configured; never overwrites a set price.
         await seedCreditRates(app.prisma);
         const rates = await app.prisma.creditRate.findMany({
             orderBy: { countryName: 'asc' },
         });
-        return {
-            success: true,
-            data: rates.map((r) => ({
+        // Margin is what actually matters when setting a price, so it is computed
+        // here rather than left for the operator to work out per row.
+        const withMargin = rates.map((r) => {
+            const margin = (sell, cost) => ({
+                sell,
+                cost,
+                marginCredits: sell - cost,
+                marginPct: cost > 0 ? Math.round(((sell - cost) / cost) * 1000) / 10 : null,
+                sellUsd: creditsToUsd(sell),
+                costUsd: creditsToUsd(cost),
+            });
+            return {
                 id: r.id,
                 countryCode: r.countryCode,
                 countryName: r.countryName,
-                marketingCost: r.marketingCost,
-                utilityCost: r.utilityCost,
-                authCost: r.authCost,
-                sessionCost: r.sessionCost,
-                marketingUsd: (r.marketingCost / 100).toFixed(4),
-                utilityUsd: (r.utilityCost / 100).toFixed(4),
-                authUsd: (r.authCost / 100).toFixed(4),
-            })),
+                currency: r.currency,
+                isActive: r.isActive,
+                marketing: margin(r.marketingCredits, r.metaMarketingCredits),
+                utility: margin(r.utilityCredits, r.metaUtilityCredits),
+                authentication: margin(r.authCredits, r.metaAuthCredits),
+                service: { sell: r.serviceCredits, sellUsd: creditsToUsd(r.serviceCredits) },
+                updatedAt: r.updatedAt,
+            };
+        });
+        const priced = withMargin.filter((r) => r.marketing.cost > 0);
+        const belowCost = withMargin.filter((r) => (r.marketing.cost > 0 && r.marketing.marginCredits < 0) ||
+            (r.utility.cost > 0 && r.utility.marginCredits < 0) ||
+            (r.authentication.cost > 0 && r.authentication.marginCredits < 0));
+        return {
+            success: true,
+            data: {
+                rates: withMargin,
+                summary: {
+                    countries: withMargin.length,
+                    creditsPerDollar: 10000,
+                    // A country priced under Meta's cost loses money on every message,
+                    // which is easy to do by hand across 100+ rows and invisible without
+                    // this call-out.
+                    belowCost: belowCost.map((r) => r.countryCode),
+                    averageMarketingMarginPct: priced.length
+                        ? Math.round((priced.reduce((n, r) => n + (r.marketing.marginPct ?? 0), 0) / priced.length) * 10) / 10
+                        : null,
+                },
+                cache: getRateCacheStatus(),
+            },
         };
     });
     // ============================================
-    // UPDATE CREDIT RATE
+    // UPDATE ONE COUNTRY'S RATES
     // ============================================
     app.patch('/credit-rates/:rateId', async (request, reply) => {
         const { rateId } = z.object({ rateId: z.string() }).parse(request.params);
         const body = z.object({
-            marketingCost: z.number().optional(),
-            utilityCost: z.number().optional(),
-            authCost: z.number().optional(),
+            marketingCredits: z.number().int().min(0).optional(),
+            utilityCredits: z.number().int().min(0).optional(),
+            authCredits: z.number().int().min(0).optional(),
+            serviceCredits: z.number().int().min(0).optional(),
+            isActive: z.boolean().optional(),
         }).parse(request.body);
-        const rate = await app.prisma.creditRate.update({
-            where: { id: rateId },
-            data: body,
+        const rate = await app.prisma.creditRate.update({ where: { id: rateId }, data: body });
+        // Billing reads a cache, so a price change is inert until it is reloaded.
+        await refreshRateCache(app.prisma);
+        await createAuditLog(app.prisma, {
+            actorId: request.authUser.id,
+            actorType: 'superadmin',
+            actorRole: request.authUser.role,
+            action: 'UPDATE_CREDIT_RATE',
+            resource: 'credit_rates',
+            resourceId: rate.id,
+            metadata: { countryCode: rate.countryCode, ...body },
+            ipAddress: request.ip,
+            userAgent: request.headers['user-agent'],
         });
         return { success: true, data: rate };
+    });
+    // ============================================
+    // BULK MARKUP — reprice every country from Meta's cost
+    // ============================================
+    app.post('/credit-rates/apply-markup', async (request, reply) => {
+        const { markup, categories, countryCodes } = z.object({
+            markup: z.number().min(1).max(10),
+            categories: z.array(z.enum(['marketing', 'utility', 'authentication'])).min(1),
+            countryCodes: z.array(z.string()).optional(),
+        }).parse(request.body);
+        const rates = await app.prisma.creditRate.findMany({
+            where: countryCodes?.length ? { countryCode: { in: countryCodes } } : undefined,
+        });
+        let updated = 0;
+        for (const r of rates) {
+            const data = {};
+            // Repricing from a recorded cost of 0 would set the price to 0 and give
+            // that country away, so those rows are skipped rather than zeroed.
+            if (categories.includes('marketing') && r.metaMarketingCredits > 0) {
+                data.marketingCredits = Math.max(1, Math.round(r.metaMarketingCredits * markup));
+            }
+            if (categories.includes('utility') && r.metaUtilityCredits > 0) {
+                data.utilityCredits = Math.max(1, Math.round(r.metaUtilityCredits * markup));
+            }
+            if (categories.includes('authentication') && r.metaAuthCredits > 0) {
+                data.authCredits = Math.max(1, Math.round(r.metaAuthCredits * markup));
+            }
+            if (Object.keys(data).length === 0)
+                continue;
+            await app.prisma.creditRate.update({ where: { id: r.id }, data });
+            updated++;
+        }
+        await refreshRateCache(app.prisma);
+        await createAuditLog(app.prisma, {
+            actorId: request.authUser.id,
+            actorType: 'superadmin',
+            actorRole: request.authUser.role,
+            action: 'BULK_APPLY_CREDIT_MARKUP',
+            resource: 'credit_rates',
+            metadata: { markup, categories, countries: updated },
+            ipAddress: request.ip,
+            userAgent: request.headers['user-agent'],
+        });
+        return {
+            success: true,
+            data: { updated, skipped: rates.length - updated, markup, message: `Repriced ${updated} country/countries at ${markup}x Meta's cost.` },
+        };
     });
     // ============================================
     // GET TENANT CREDIT DETAILS

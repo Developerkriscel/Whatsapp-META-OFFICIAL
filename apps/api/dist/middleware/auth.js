@@ -158,6 +158,27 @@ async function authMiddlewareInner(app) {
                         },
                     });
                 }
+                // trialEndsAt was set at signup and never compared to anything, so every
+                // trial ran indefinitely. Billing and auth routes stay reachable so an
+                // expired tenant can still log in and pay rather than being locked out
+                // of the only screen that would fix their situation.
+                if (tenant.status === 'TRIAL' && tenant.trialEndsAt && tenant.trialEndsAt < new Date()) {
+                    const url = request.url.split('?')[0];
+                    const allowedWhileExpired = url.startsWith('/api/v1/billing') ||
+                        url.startsWith('/api/v1/auth') ||
+                        url.startsWith('/api/v1/plans') ||
+                        url.startsWith('/api/v1/credits/rates');
+                    if (!allowedWhileExpired) {
+                        return reply.status(402).send({
+                            success: false,
+                            error: {
+                                code: 'TRIAL_EXPIRED',
+                                message: 'Your free trial has ended. Choose a plan to continue.',
+                                trialEndedAt: tenant.trialEndsAt,
+                            },
+                        });
+                    }
+                }
                 request.tenantContext = {
                     id: tenant.id,
                     name: tenant.name,

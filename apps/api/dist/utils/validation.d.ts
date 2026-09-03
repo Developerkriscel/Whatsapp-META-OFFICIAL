@@ -19,23 +19,23 @@ export declare const registerSchema: z.ZodEffects<z.ZodObject<{
     password: z.ZodString;
     confirmPassword: z.ZodString;
 }, "strip", z.ZodTypeAny, {
-    email: string;
     name: string;
+    email: string;
     password: string;
     confirmPassword: string;
 }, {
-    email: string;
     name: string;
+    email: string;
     password: string;
     confirmPassword: string;
 }>, {
-    email: string;
     name: string;
+    email: string;
     password: string;
     confirmPassword: string;
 }, {
-    email: string;
     name: string;
+    email: string;
     password: string;
     confirmPassword: string;
 }>;
@@ -66,15 +66,15 @@ export declare const createContactSchema: z.ZodObject<{
 }, "strip", z.ZodTypeAny, {
     name: string;
     phone: string;
-    email?: string | undefined;
     tags?: string[] | undefined;
+    email?: string | undefined;
     company?: string | undefined;
     attributes?: Record<string, string> | undefined;
 }, {
     name: string;
     phone: string;
-    email?: string | undefined;
     tags?: string[] | undefined;
+    email?: string | undefined;
     company?: string | undefined;
     attributes?: Record<string, string> | undefined;
 }>;
@@ -86,16 +86,16 @@ export declare const updateContactSchema: z.ZodObject<{
     tags: z.ZodOptional<z.ZodOptional<z.ZodArray<z.ZodString, "many">>>;
     attributes: z.ZodOptional<z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodString>>>;
 }, "strip", z.ZodTypeAny, {
-    email?: string | undefined;
     name?: string | undefined;
     tags?: string[] | undefined;
+    email?: string | undefined;
     phone?: string | undefined;
     company?: string | undefined;
     attributes?: Record<string, string> | undefined;
 }, {
-    email?: string | undefined;
     name?: string | undefined;
     tags?: string[] | undefined;
+    email?: string | undefined;
     phone?: string | undefined;
     company?: string | undefined;
     attributes?: Record<string, string> | undefined;
@@ -111,15 +111,15 @@ export declare const importContactsSchema: z.ZodObject<{
     }, "strip", z.ZodTypeAny, {
         name: string;
         phone: string;
-        email?: string | undefined;
         tags?: string[] | undefined;
+        email?: string | undefined;
         company?: string | undefined;
         attributes?: Record<string, string> | undefined;
     }, {
         name: string;
         phone: string;
-        email?: string | undefined;
         tags?: string[] | undefined;
+        email?: string | undefined;
         company?: string | undefined;
         attributes?: Record<string, string> | undefined;
     }>, "many">;
@@ -128,8 +128,8 @@ export declare const importContactsSchema: z.ZodObject<{
     contacts: {
         name: string;
         phone: string;
-        email?: string | undefined;
         tags?: string[] | undefined;
+        email?: string | undefined;
         company?: string | undefined;
         attributes?: Record<string, string> | undefined;
     }[];
@@ -138,8 +138,8 @@ export declare const importContactsSchema: z.ZodObject<{
     contacts: {
         name: string;
         phone: string;
-        email?: string | undefined;
         tags?: string[] | undefined;
+        email?: string | undefined;
         company?: string | undefined;
         attributes?: Record<string, string> | undefined;
     }[];
@@ -355,12 +355,12 @@ export declare const updateMemberSchema: z.ZodObject<{
     maxChats: z.ZodOptional<z.ZodNumber>;
     status: z.ZodOptional<z.ZodEnum<["active", "suspended"]>>;
 }, "strip", z.ZodTypeAny, {
-    role?: "ADMIN" | "MANAGER" | "AGENT" | "VIEWER" | undefined;
     status?: "active" | "suspended" | undefined;
+    role?: "ADMIN" | "MANAGER" | "AGENT" | "VIEWER" | undefined;
     maxChats?: number | undefined;
 }, {
-    role?: "ADMIN" | "MANAGER" | "AGENT" | "VIEWER" | undefined;
     status?: "active" | "suspended" | undefined;
+    role?: "ADMIN" | "MANAGER" | "AGENT" | "VIEWER" | undefined;
     maxChats?: number | undefined;
 }>;
 export declare const registerPhoneSchema: z.ZodObject<{

@@ -231,12 +231,57 @@ export function getDefaultCurrency() {
 // RATE LOOKUP FUNCTIONS
 // ============================================
 /**
- * Get credit cost for a country + category
- * Returns credits (where 1 credit = $0.0001)
- * Falls back to India (IN) if country not found
+ * Configured sell prices, keyed by country code.
+ *
+ * getRateCredits runs on every message, so it stays synchronous and reads this
+ * cache rather than the database. refreshRateCache() repopulates it — on boot,
+ * on a timer, and immediately after a superadmin edits a rate, so a price change
+ * takes effect without a deploy or restart.
+ *
+ * Until the first successful load the cache is empty and lookups fall through to
+ * META_RATES, so a database problem degrades to Meta's list prices instead of
+ * billing everyone zero.
+ */
+let rateCache = new Map();
+let rateCacheLoadedAt = null;
+export async function refreshRateCache(prisma) {
+    const rows = await prisma.creditRate.findMany({ where: { isActive: true } });
+    const next = new Map();
+    for (const r of rows) {
+        next.set(r.countryCode.toUpperCase(), {
+            marketing: r.marketingCredits,
+            utility: r.utilityCredits,
+            auth: r.authCredits,
+            service: r.serviceCredits,
+        });
+    }
+    rateCache = next;
+    rateCacheLoadedAt = new Date();
+    return next.size;
+}
+export function getRateCacheStatus() {
+    return { countries: rateCache.size, loadedAt: rateCacheLoadedAt };
+}
+/**
+ * Credits charged for one message to `country` in `category`.
+ *
+ * Prefers the configured rate for that country, then the configured default
+ * country, then Meta's published list price. Previously read only the hardcoded
+ * META_RATES table, which meant the rates screen in the superadmin panel edited
+ * rows that nothing consulted.
  */
 export function getRateCredits(country, category) {
     const normalized = country?.toUpperCase() || DEFAULT_COUNTRY;
+    const configured = rateCache.get(normalized) || rateCache.get(DEFAULT_COUNTRY);
+    if (configured) {
+        switch (category) {
+            case 'MARKETING': return configured.marketing;
+            case 'UTILITY': return configured.utility;
+            case 'AUTHENTICATION': return configured.auth;
+            case 'SESSION': return configured.service;
+            default: return configured.utility;
+        }
+    }
     const rates = META_RATES[normalized] || META_RATES[DEFAULT_COUNTRY];
     switch (category) {
         case 'MARKETING': return rates.marketing;
@@ -429,6 +474,16 @@ export async function maybeAutoRecharge(prisma, tenantId, balanceAfter) {
 // ============================================
 // ADD CREDITS (purchase, bonus, refund)
 // ============================================
+/**
+ * Returns credits charged for a message the provider then refused. Named
+ * separately from addCredits so the ledger reads honestly — a refund is not a
+ * purchase, and the two should be distinguishable when reconciling.
+ */
+export async function refundCredits(prisma, tenantId, amount, referenceId, _referenceType, description) {
+    if (amount <= 0)
+        return { success: true, balanceAfter: -1 };
+    return addCredits(prisma, tenantId, amount, 'REFUND', referenceId, description || 'Refund for undelivered message');
+}
 export async function addCredits(prisma, tenantId, amount, type, referenceId, description) {
     const result = await prisma.$transaction(async (tx) => {
         let creditAccount = await tx.tenantCredit.findUnique({
@@ -510,24 +565,47 @@ export async function recordMessageCredit(prisma, data) {
 // ============================================
 // SEED CREDIT RATES (DB initialization)
 // ============================================
-export async function seedCreditRates(prisma) {
-    const existing = await prisma.creditRate.count();
-    if (existing > 0)
-        return;
+/**
+ * Default markup applied when seeding a country for the first time.
+ *
+ * 1.0 would mean reselling at exactly Meta's price and earning nothing on
+ * messages. 1.30 is a starting point, not a recommendation — the whole purpose
+ * of moving rates into the database is that this becomes the operator's call,
+ * per country and category, from the panel.
+ */
+export const DEFAULT_MARKUP = 1.30;
+/**
+ * Populates rates from Meta's published prices, recording Meta's cost alongside
+ * the sell price so margin stays visible after the fact.
+ *
+ * Only fills in countries that are missing, so re-running never overwrites a
+ * price an operator has set by hand.
+ */
+export async function seedCreditRates(prisma, markup = DEFAULT_MARKUP) {
     const entries = Object.entries(META_RATES).filter(([code]) => code !== 'OTHER' && !code.startsWith('ROW_'));
+    const existing = await prisma.creditRate.findMany({ select: { countryCode: true } });
+    const have = new Set(existing.map((r) => r.countryCode.toUpperCase()));
+    let created = 0;
     for (const [code, rates] of entries) {
+        if (have.has(code.toUpperCase()))
+            continue;
         await prisma.creditRate.create({
             data: {
                 countryCode: code,
                 countryName: COUNTRY_NAMES[code] || code,
-                marketingCost: rates.marketing,
-                utilityCost: rates.utility,
-                authCost: rates.auth,
-                sessionCost: rates.session,
-                creditsPerDollar: 10000,
+                currency: rates.currency,
+                marketingCredits: Math.max(1, Math.round(rates.marketing * markup)),
+                utilityCredits: Math.max(1, Math.round(rates.utility * markup)),
+                authCredits: Math.max(1, Math.round(rates.auth * markup)),
+                serviceCredits: rates.session, // free on Meta's side; charging for it would be inventing a cost
+                metaMarketingCredits: rates.marketing,
+                metaUtilityCredits: rates.utility,
+                metaAuthCredits: rates.auth,
             },
         });
+        created++;
     }
+    return created;
 }
 // ============================================
 // COUNTRY DETECTION HELPERS
