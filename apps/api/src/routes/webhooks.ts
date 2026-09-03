@@ -352,12 +352,28 @@ async function processIncomingMessage(
     }
   }
 
-  // Mark as read
+  // Mark as read.
+  //
+  // This used to run on whatsappConfig — the module-level config built from the
+  // platform's own META_ACCESS_TOKEN env var — while addressing the *tenant's*
+  // phone number, so every inbound message failed with an OAuthException. The
+  // token has to be the one that owns the number, exactly as the send path
+  // resolves it; falling back to a platform env token would also mean acting on
+  // a tenant's number under the platform's identity.
   if (!whatsappConfig.mockMode) {
     try {
       const { WhatsAppAPIClient } = await import('@whatsapp-saas/config/guards');
-      const client = new WhatsAppAPIClient(whatsappConfig);
-      await client.markAsRead(messageId, phoneNumber.metaPhoneId);
+      const { resolveAccessToken } = await import('../services/credentialEncryption.js');
+
+      const creds = await app.prisma.whatsAppCredentials.findUnique({ where: { tenantId } });
+      const accessToken = resolveAccessToken(phoneNumber.accessToken, creds?.accessToken);
+
+      if (!accessToken) {
+        console.warn(`[Webhook] no access token for tenant ${tenantId} — skipping mark-as-read`);
+      } else {
+        const client = new WhatsAppAPIClient({ ...whatsappConfig, accessToken });
+        await client.markAsRead(messageId, phoneNumber.metaPhoneId);
+      }
     } catch (err) {
       console.error('Failed to mark message as read:', err);
     }
