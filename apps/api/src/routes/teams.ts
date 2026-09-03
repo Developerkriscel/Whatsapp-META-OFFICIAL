@@ -120,9 +120,21 @@ export async function registerTeamRoutes(app: FastifyInstance): Promise<void> {
 
     const { teamId } = z.object({ teamId: z.string() }).parse(request.params);
 
+    // Confirm the team is ours BEFORE touching any user rows. This used to
+    // clear members first, unscoped — so passing another tenant's teamId
+    // emptied their team even though the delete below then matched nothing.
+    const team = await app.prisma.team.findFirst({
+      where: { id: teamId, tenantId: request.authUser.tenantId },
+      select: { id: true },
+    });
+
+    if (!team) {
+      return reply.status(404).send({ success: false, error: { code: 'NOT_FOUND' } });
+    }
+
     // Remove members from team
     await app.prisma.user.updateMany({
-      where: { teamId },
+      where: { teamId, tenantId: request.authUser.tenantId },
       data: { teamId: null },
     });
 
