@@ -1,1 +1,1 @@
-{"version":3,"file":"superadminCredits.d.ts","sourceRoot":"","sources":["../../src/routes/superadminCredits.ts"],"names":[],"mappings":"AAAA;;GAEG;AAEH,OAAO,EAAE,eAAe,EAAE,MAAM,SAAS,CAAC;AAY1C,wBAAsB,8BAA8B,CAAC,GAAG,EAAE,eAAe,GAAG,OAAO,CAAC,IAAI,CAAC,CA8ZxF"}
+{"version":3,"file":"superadminCredits.d.ts","sourceRoot":"","sources":["../../src/routes/superadminCredits.ts"],"names":[],"mappings":"AAAA;;GAEG;AAEH,OAAO,EAAE,eAAe,EAAE,MAAM,SAAS,CAAC;AAa1C,wBAAsB,8BAA8B,CAAC,GAAG,EAAE,eAAe,GAAG,OAAO,CAAC,IAAI,CAAC,CA+hBxF"}

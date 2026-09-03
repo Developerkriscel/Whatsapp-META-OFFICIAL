@@ -5,6 +5,7 @@
 import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../api/client';
+import SuperAdminRatesTab from '../components/SuperAdminRatesTab';
 import {
   Coins,
   Search,
@@ -473,37 +474,7 @@ export default function SuperAdminCreditsPage() {
       )}
 
       {/* Rates Tab */}
-      {activeTab === 'rates' && (
-        <div className="space-y-4">
-          <div className="card-apple p-6">
-            <h2 className="text-lg font-semibold text-ios-dark mb-4 flex items-center gap-2">
-              <Globe className="w-5 h-5 text-ios-muted" />
-              Platform-Wide Rate Configuration
-            </h2>
-            <div className="bg-wa-green/10 border border-wa-green/20 rounded-apple-lg p-4 flex items-start gap-3">
-              <AlertTriangle className="w-5 h-5 text-wa-green flex-shrink-0 mt-0.5" />
-              <p className="text-sm text-ios-secondary">
-                Rate management is per-tenant based on their Meta Business API contract. Platform rates reflect Meta's official WhatsApp Business API pricing.
-              </p>
-            </div>
-          </div>
-
-          <div className="grid grid-cols-4 gap-4">
-            {[
-              { category: 'Marketing', rate: '$0.05–$0.60', color: 'red-500', note: 'Per message (varies by country)' },
-              { category: 'Utility', rate: '$0.02–$0.12', color: 'wa-green', note: 'Per message (varies by country)' },
-              { category: 'Authentication', rate: '$0.01–$0.06', color: 'wa-green', note: 'Per message (varies by country)' },
-              { category: 'Session Reply', rate: 'FREE', color: 'apple-purple', note: 'Within 24h customer window' },
-            ].map((r) => (
-              <div key={r.category} className="card-apple p-5">
-                <p className={`text-lg font-bold text-${r.color}`}>{r.category}</p>
-                <p className="text-2xl font-bold text-ios-dark mt-2">{r.rate}</p>
-                <p className="text-xs text-ios-muted mt-2">{r.note}</p>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
+      {activeTab === 'rates' && <SuperAdminRatesTab />}
 
       {/* Adjustment Modal */}
       {showAdjustModal && selectedTenant && (

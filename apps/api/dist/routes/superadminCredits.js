@@ -3,6 +3,7 @@
  */
 import { z } from 'zod';
 import { addCredits, getTenantCreditInfo, seedCreditRates, creditsToUsd, refreshRateCache, getRateCacheStatus, } from '../services/creditService.js';
+import { resolveAccessToken } from '../services/credentialEncryption.js';
 import { requireSuperadmin, createAuditLog } from '../middleware/auth.js';
 export async function registerSuperadminCreditRoutes(app) {
     // Apply superadmin auth to all routes in this module
@@ -90,6 +91,121 @@ export async function registerSuperadminCreditRoutes(app) {
             userAgent: request.headers['user-agent'],
         });
         return { success: true, data: rate };
+    });
+    // ============================================
+    // LIVE COST FROM META
+    // ============================================
+    /**
+     * GET /superadmin/credit-rates/live
+     *
+     * What Meta has actually billed, per country and category, from
+     * pricing_analytics on each connected WABA.
+     *
+     * Meta publishes no rate-card endpoint — there is no way to ask "what do you
+     * charge for Brazil marketing". What it does expose is real spend against real
+     * volume, so cost per message is derived from the two. That makes this
+     * authoritative for countries with traffic and silent about the rest, which is
+     * the honest shape of the data rather than a full price list.
+     *
+     * Costs come back in each WABA's own billing currency and are reported that
+     * way. Converting to credits would need an FX rate we do not hold, and
+     * inventing one would put a wrong number next to a real one.
+     */
+    app.get('/credit-rates/live', async (request, reply) => {
+        const { days } = z.object({
+            days: z.coerce.number().min(1).max(90).default(30),
+        }).parse(request.query);
+        const end = Math.floor(Date.now() / 1000);
+        const start = end - days * 24 * 60 * 60;
+        // One call per distinct WABA, not per phone number.
+        const phones = await app.prisma.phoneNumber.findMany({
+            where: { wabaId: { not: null } },
+            select: { wabaId: true, accessToken: true, tenantId: true },
+        });
+        const seen = new Set();
+        const targets = [];
+        for (const ph of phones) {
+            if (!ph.wabaId || seen.has(ph.wabaId))
+                continue;
+            seen.add(ph.wabaId);
+            targets.push({ wabaId: ph.wabaId, tenantId: ph.tenantId });
+        }
+        const agg = new Map();
+        const errors = [];
+        for (const t of targets) {
+            const phone = phones.find((x) => x.wabaId === t.wabaId);
+            const creds = await app.prisma.whatsAppCredentials.findUnique({ where: { tenantId: t.tenantId } });
+            const token = resolveAccessToken(phone?.accessToken, creds?.accessToken);
+            if (!token)
+                continue;
+            try {
+                const infoRes = await fetch(`https://graph.facebook.com/v21.0/${t.wabaId}?fields=currency&access_token=${token}`);
+                const info = await infoRes.json();
+                const currency = info?.currency || 'USD';
+                const dims = encodeURIComponent('["COUNTRY","PRICING_CATEGORY"]');
+                const url = `https://graph.facebook.com/v21.0/${t.wabaId}?fields=pricing_analytics` +
+                    `.start(${start}).end(${end}).granularity(MONTHLY)` +
+                    `.metric_types(["COST","VOLUME"]).dimensions(${dims})&access_token=${token}`;
+                const res = await fetch(url);
+                const body = await res.json();
+                if (!res.ok) {
+                    errors.push({ wabaId: t.wabaId, message: body?.error?.message || `HTTP ${res.status}` });
+                    continue;
+                }
+                for (const dp of body?.pricing_analytics?.data?.[0]?.data_points ?? []) {
+                    if (!dp.country || !dp.pricing_category)
+                        continue;
+                    const key = `${dp.country}::${dp.pricing_category}::${currency}`;
+                    const cur = agg.get(key) || { country: dp.country, category: dp.pricing_category, volume: 0, cost: 0, currency };
+                    cur.volume += dp.volume || 0;
+                    cur.cost += dp.cost || 0;
+                    agg.set(key, cur);
+                }
+            }
+            catch (err) {
+                errors.push({ wabaId: t.wabaId, message: err?.message || 'request failed' });
+            }
+        }
+        const configured = await app.prisma.creditRate.findMany();
+        const byCountry = new Map(configured.map((c) => [c.countryCode.toUpperCase(), c]));
+        const rows = [...agg.values()]
+            // Cost per message is only meaningful with volume behind it; a single
+            // message would present rounding noise as a rate.
+            .filter((a) => a.volume > 0)
+            .map((a) => {
+            const perMessage = a.cost / a.volume;
+            const cfg = byCountry.get(a.country.toUpperCase());
+            const sell = a.category === 'MARKETING' ? cfg?.marketingCredits
+                : a.category === 'UTILITY' ? cfg?.utilityCredits
+                    : a.category === 'AUTHENTICATION' ? cfg?.authCredits
+                        : cfg?.serviceCredits;
+            return {
+                country: a.country,
+                countryName: cfg?.countryName ?? a.country,
+                category: a.category,
+                volume: a.volume,
+                totalCost: Math.round(a.cost * 10000) / 10000,
+                costPerMessage: Math.round(perMessage * 100000) / 100000,
+                currency: a.currency,
+                // Shown side by side so the operator can judge the gap themselves —
+                // the two are in different units and we will not pretend otherwise.
+                configuredSellCredits: sell ?? null,
+                configuredSellUsd: sell != null ? creditsToUsd(sell) : null,
+            };
+        })
+            .sort((a, b) => b.volume - a.volume);
+        return {
+            success: true,
+            data: {
+                periodDays: days,
+                wabasQueried: targets.length,
+                rows,
+                errors,
+                note: rows.length === 0
+                    ? 'No billed traffic in this period, so Meta has no cost data to report yet.'
+                    : 'Cost per message is Meta\'s actual spend divided by volume, in each WABA\'s billing currency. Only countries with traffic appear.',
+            },
+        };
     });
     // ============================================
     // BULK MARKUP — reprice every country from Meta's cost
