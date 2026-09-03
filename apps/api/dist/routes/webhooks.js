@@ -174,11 +174,21 @@ async function processIncomingMessage(app, message, phoneNumber, tenantId) {
     });
     if (!contact) {
         // Contact initiated conversation - they are opted in by default
+        // Meta gives us the number in full international form, so the country is
+        // derivable. Omitting it fell through to the schema default of 'IN', which
+        // meant every customer who messaged in from anywhere else was recorded — and
+        // subsequently billed — as Indian.
+        const { detectCountryFromPhone } = await import('../services/phoneCountry.js');
+        const inboundTenant = await app.prisma.tenant.findUnique({
+            where: { id: tenantId },
+            select: { defaultCountry: true },
+        });
         contact = await app.prisma.contact.create({
             data: {
                 tenantId,
                 phone: from,
                 name: message.profile?.name || null,
+                country: detectCountryFromPhone(from, inboundTenant?.defaultCountry || 'IN'),
                 isActive: true,
                 consentStatus: 'OPTED_IN', // Initiated conversation = consent
                 consentSource: 'webhook',

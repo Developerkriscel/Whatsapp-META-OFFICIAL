@@ -5,6 +5,7 @@ import { Prisma } from '@prisma/client';
 import { z } from 'zod';
 import { syncTemplatesFromMeta, submitTemplateToMeta, fetchMetaTemplates, resolveEffectiveWabaId } from '../services/metaTemplate.js';
 import { decryptSecret } from '../services/credentialEncryption.js';
+import { detectCountryFromPhone } from '../services/phoneCountry.js';
 import { checkTemplateContent, getAISuggestion } from '../services/aiAssist.js';
 
 type SegmentCondition = { field: string; operator: string; value?: string };
@@ -470,6 +471,14 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
       }
     }
 
+    // An explicit country wins; otherwise derive it from the number. Leaving it
+    // undefined fell through to the schema default of 'IN', so a US contact
+    // added by hand was billed at Indian rates.
+    const contactTenant = await app.prisma.tenant.findUnique({
+      where: { id: request.authUser.tenantId },
+      select: { defaultCountry: true },
+    });
+
     const contact = await app.prisma.contact.create({
       data: {
         phone: normalizedPhone,
@@ -477,7 +486,7 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
         email: email || undefined,
         company: rest.company,
         city: rest.city,
-        country: rest.country,
+        country: rest.country || detectCountryFromPhone(normalizedPhone, contactTenant?.defaultCountry || 'IN'),
         tenantId: request.authUser.tenantId,
       },
     });
@@ -570,26 +579,8 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
     // Country drives the per-message rate, so getting it wrong changes what the
     // tenant is charged. This was hardcoded to 'US': an Indian list imported
     // that way billed at US marketing rates, more than double the correct one.
-    // Derived from the dial code where recognisable, falling back to the
-    // tenant's own default rather than a guess.
-    const DIAL_CODES: Array<[string, string]> = [
-      ['91', 'IN'], ['92', 'PK'], ['880', 'BD'], ['94', 'LK'], ['977', 'NP'],
-      ['62', 'ID'], ['60', 'MY'], ['63', 'PH'], ['66', 'TH'], ['84', 'VN'],
-      ['44', 'GB'], ['49', 'DE'], ['33', 'FR'], ['34', 'ES'], ['39', 'IT'],
-      ['31', 'NL'], ['351', 'PT'], ['48', 'PL'], ['7', 'RU'], ['90', 'TR'],
-      ['55', 'BR'], ['52', 'MX'], ['54', 'AR'], ['57', 'CO'], ['56', 'CL'],
-      ['20', 'EG'], ['27', 'ZA'], ['234', 'NG'], ['254', 'KE'], ['971', 'AE'],
-      ['966', 'SA'], ['972', 'IL'], ['61', 'AU'], ['64', 'NZ'], ['81', 'JP'],
-      ['82', 'KR'], ['86', 'CN'], ['1', 'US'],
-    ].sort((a, b) => b[0].length - a[0].length) as Array<[string, string]>; // longest prefix wins
-
-    const countryFor = (phone: string): string => {
-      const digits = phone.replace(/[^\d]/g, '');
-      for (const [code, iso] of DIAL_CODES) {
-        if (digits.startsWith(code)) return iso;
-      }
-      return tenant?.defaultCountry || 'IN';
-    };
+    const countryFor = (phone: string) =>
+      detectCountryFromPhone(phone, tenant?.defaultCountry || 'IN');
 
     const results = { created: 0, skipped: 0, updated: 0, errors: [] as string[] };
 
@@ -1234,7 +1225,9 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
             tenantId: request.authUser.tenantId!,
             name: parsed.phone,
             phone: parsed.phone,
-            country: 'IN',
+            // Was hardcoded 'IN', which billed every non-Indian recipient at
+            // Indian rates regardless of where they actually are.
+            country: detectCountryFromPhone(parsed.phone, 'IN'),
           },
         });
       }
@@ -4018,6 +4011,15 @@ async function sendCampaignMessagesInner(
     await import('../services/creditService.js') as any;
   const templateCategory = campaign.template?.category || 'UTILITY';
 
+  // The rate fallback used to be 'US' while the schema default was 'IN', so the
+  // two disagreed about the same contact. Both now defer to the tenant's own
+  // market, which is the only defensible guess when a contact has no country.
+  const campaignTenant = await app.prisma.tenant.findUnique({
+    where: { id: tenantId },
+    select: { defaultCountry: true },
+  });
+  const tenantDefaultCountry = campaignTenant?.defaultCountry || 'IN';
+
   for (let i = 0; i < contactIds.length; i += BATCH_SIZE) {
     const batch = contactIds.slice(i, i + BATCH_SIZE);
     const contacts = await app.prisma.contact.findMany({
@@ -4029,7 +4031,7 @@ async function sendCampaignMessagesInner(
     // many as the balance allows — a tenant short on credits sends what they can
     // afford instead of the campaign failing wholesale or, before this, sending
     // the remainder free.
-    const unitCosts = contacts.map((c) => getRateCredits(c.country || 'US', templateCategory));
+    const unitCosts = contacts.map((c) => getRateCredits(c.country || tenantDefaultCountry, templateCategory));
     const reservation = await reserveCreditsForBatch(
       app.prisma, tenantId, unitCosts, campaignId,
       `Campaign: ${campaign.name} (batch of ${contacts.length})`,
@@ -4152,7 +4154,7 @@ async function sendCampaignMessagesInner(
         // is what makes bulk throughput possible. Only what Meta accepts is
         // counted as consumed; the balance of the reservation is returned once
         // the batch settles.
-        const costCredits = getRateCredits(contact.country || 'US', templateCategory);
+        const costCredits = getRateCredits(contact.country || tenantDefaultCountry, templateCategory);
 
         const dispatchResult = await dispatchOutboundMessage({
           app,
