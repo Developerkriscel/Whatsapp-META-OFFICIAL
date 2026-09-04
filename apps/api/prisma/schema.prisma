@@ -1759,3 +1759,13 @@ enum NotificationPriority {
   HIGH
   URGENT
 }
+
+/// Platform-wide settings the superadmin controls at runtime, so things like the
+/// reporting currency and its FX rate are not baked into the build.
+model PlatformSetting {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt
+
+  @@map("platform_settings")
+}

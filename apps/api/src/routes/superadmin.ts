@@ -138,35 +138,63 @@ export async function registerSuperadminRoutes(app: FastifyInstance): Promise<vo
     const nameOf = new Map(tenants.map((t) => [t.id, t.name]));
     const metaCost = num(totals._sum.metaCostUsd);
     const charged = num(totals._sum.platformCostUsd);
-
     const totalOutgoing = await app.prisma.message.count({ where });
+
+    const { getCurrencyContext, toMoney, toUnitMoney } = await import('../services/currency.js');
+    const fx = await getCurrencyContext(app.prisma);
+
+    // Spend by recipient country. Meta prices per country, so this is the view
+    // that shows where the money actually goes.
+    const costedRows = await app.prisma.message.findMany({
+      where: { ...where, metaCostUsd: { not: null } },
+      select: { metaCostUsd: true, platformCostUsd: true, contact: { select: { country: true } } },
+    });
+    const perCountry = new Map<string, { messages: number; meta: number; charged: number }>();
+    for (const r of costedRows) {
+      const key = r.contact?.country || 'unknown';
+      const cur = perCountry.get(key) || { messages: 0, meta: 0, charged: 0 };
+      cur.messages++;
+      cur.meta += num(r.metaCostUsd);
+      cur.charged += num(r.platformCostUsd);
+      perCountry.set(key, cur);
+    }
 
     return {
       success: true,
       data: {
         windowDays: days,
-        currency: 'USD',
+        currency: {
+          code: fx.currency, symbol: fx.symbol,
+          fxRateFromUsd: fx.fxRate, fxSource: fx.fxSource, fxUpdatedAt: fx.fxUpdatedAt,
+        },
         platform: {
           messagesPriced: totals._count,
           messagesTotal: totalOutgoing,
-          // Anything Meta has not reported on yet is excluded rather than
-          // guessed, so this is a floor on spend, not an estimate.
+          // Traffic Meta has not reported on is excluded rather than guessed,
+          // so this is a floor on spend and not an estimate.
           awaitingPricing: Math.max(0, totalOutgoing - totals._count),
-          metaBilledUsd: Math.round(metaCost * 10000) / 10000,
-          tenantsChargedUsd: Math.round(charged * 10000) / 10000,
-          grossMarginUsd: Math.round((charged - metaCost) * 10000) / 10000,
+          metaBilled: toMoney(metaCost, fx),
+          tenantsCharged: toMoney(charged, fx),
+          grossMargin: toMoney(charged - metaCost, fx),
           grossMarginPct: metaCost > 0 ? Math.round(((charged - metaCost) / metaCost) * 1000) / 10 : null,
         },
-        billableSplit: byBillable.map((b) => ({
-          billable: b.metaBillable,
-          messages: b._count,
-        })),
+        billableSplit: byBillable.map((b) => ({ billable: b.metaBillable, messages: b._count })),
         byCategory: byCategory.map((c) => ({
           category: c.metaCategory,
           messages: c._count,
-          metaBilledUsd: Math.round(num(c._sum.metaCostUsd) * 10000) / 10000,
-          chargedUsd: Math.round(num(c._sum.platformCostUsd) * 10000) / 10000,
+          metaBilled: toMoney(num(c._sum.metaCostUsd), fx),
+          charged: toMoney(num(c._sum.platformCostUsd), fx),
         })),
+        byCountry: [...perCountry.entries()]
+          .map(([country, v]) => ({
+            country,
+            messages: v.messages,
+            metaBilled: toMoney(v.meta, fx),
+            charged: toMoney(v.charged, fx),
+            margin: toMoney(v.charged - v.meta, fx),
+            avgPerMessage: toUnitMoney(v.messages > 0 ? v.charged / v.messages : 0, fx),
+          }))
+          .sort((a, b) => b.charged.usd - a.charged.usd),
         byTenant: perTenant
           .map((t) => {
             const cost = num(t._sum.metaCostUsd);
@@ -175,15 +203,66 @@ export async function registerSuperadminRoutes(app: FastifyInstance): Promise<vo
               tenantId: t.tenantId,
               tenantName: nameOf.get(t.tenantId) || t.tenantId,
               messages: t._count,
-              metaBilledUsd: Math.round(cost * 10000) / 10000,
-              chargedUsd: Math.round(rev * 10000) / 10000,
-              marginUsd: Math.round((rev - cost) * 10000) / 10000,
+              metaBilled: toMoney(cost, fx),
+              charged: toMoney(rev, fx),
+              margin: toMoney(rev - cost, fx),
               marginPct: cost > 0 ? Math.round(((rev - cost) / cost) * 1000) / 10 : null,
             };
           })
-          .sort((a, b) => b.chargedUsd - a.chargedUsd),
+          .sort((a, b) => b.charged.usd - a.charged.usd),
       },
     };
+  });
+
+  /**
+   * Reporting currency and its FX rate, changeable without a deploy.
+   *
+   * Meta's own billing currency is not readable through the API — the WABA
+   * currency field needs Business Solution Provider access — so the rate is
+   * stated here rather than inferred, and every figure that uses it reports
+   * which rate it used.
+   */
+  app.get('/settings/currency', async (_request, _reply) => {
+    const { getCurrencyContext, DEFAULT_FX } = await import('../services/currency.js');
+    const fx = await getCurrencyContext(app.prisma);
+    return {
+      success: true,
+      data: { ...fx, suggested: DEFAULT_FX },
+    };
+  });
+
+  app.patch('/settings/currency', async (request, reply) => {
+    const body = z.object({
+      currency: z.string().length(3).optional(),
+      fxRateFromUsd: z.number().positive().max(100000).optional(),
+    }).parse(request.body);
+
+    if (!body.currency && body.fxRateFromUsd === undefined) {
+      return reply.status(400).send({
+        success: false,
+        error: { code: 'NOTHING_TO_UPDATE', message: 'Provide a currency, an FX rate, or both.' },
+      });
+    }
+
+    const writes = [];
+    if (body.currency) {
+      writes.push(app.prisma.platformSetting.upsert({
+        where: { key: 'display_currency' },
+        create: { key: 'display_currency', value: body.currency.toUpperCase() },
+        update: { value: body.currency.toUpperCase() },
+      }));
+    }
+    if (body.fxRateFromUsd !== undefined) {
+      writes.push(app.prisma.platformSetting.upsert({
+        where: { key: 'fx_usd_rate' },
+        create: { key: 'fx_usd_rate', value: String(body.fxRateFromUsd) },
+        update: { value: String(body.fxRateFromUsd) },
+      }));
+    }
+    await app.prisma.$transaction(writes);
+
+    const { getCurrencyContext } = await import('../services/currency.js');
+    return { success: true, data: await getCurrencyContext(app.prisma) };
   });
 
   app.get('/whatsapp-health', async (request, reply) => {

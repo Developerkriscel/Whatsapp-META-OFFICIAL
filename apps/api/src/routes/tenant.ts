@@ -281,6 +281,9 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
     const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
     const where = { tenantId, direction: 'OUTGOING' as const, createdAt: { gte: since } };
 
+    const { getCurrencyContext, toMoney, toUnitMoney } = await import('../services/currency.js');
+    const fx = await getCurrencyContext(app.prisma);
+
     const [byStatus, costed, byCategory, inbound] = await Promise.all([
       app.prisma.message.groupBy({ by: ['status'], where, _count: true }),
       app.prisma.message.aggregate({
@@ -315,12 +318,35 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
 
     const freeCount = await app.prisma.message.count({ where: { ...where, metaBillable: false } });
 
+    // Spend by recipient country. Meta's rate is per country, so this is where
+    // an expensive audience actually shows up — an identical campaign to two
+    // countries can differ several-fold in cost.
+    const costedRows = await app.prisma.message.findMany({
+      where: { ...where, metaCostUsd: { not: null } },
+      select: { metaCostUsd: true, platformCostUsd: true, contact: { select: { country: true } } },
+    });
+    const perCountry = new Map<string, { messages: number; meta: number; charged: number }>();
+    for (const r of costedRows) {
+      const key = r.contact?.country || 'unknown';
+      const cur = perCountry.get(key) || { messages: 0, meta: 0, charged: 0 };
+      cur.messages++;
+      cur.meta += num(r.metaCostUsd);
+      cur.charged += num(r.platformCostUsd);
+      perCountry.set(key, cur);
+    }
+
     const pct = (a: number, b: number) => (b > 0 ? Math.round((a / b) * 1000) / 10 : 0);
 
     return {
       success: true,
       data: {
         windowDays: days,
+        currency: {
+          code: fx.currency, symbol: fx.symbol,
+          // Amounts are held in USD and converted for display, so the rate used
+          // travels with the numbers rather than being invisible.
+          fxRateFromUsd: fx.fxRate, fxSource: fx.fxSource, fxUpdatedAt: fx.fxUpdatedAt,
+        },
         funnel: {
           total, sent, delivered, read, failed, pending, inbound,
           deliveryRate: pct(delivered, sent),
@@ -328,27 +354,32 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
           failureRate: pct(failed, total),
         },
         spend: {
-          currency: 'USD',
-          // What Meta billed us for this tenant's traffic.
-          metaCostUsd: Math.round(metaSpend * 10000) / 10000,
-          // What the tenant was charged for it.
-          chargedUsd: Math.round(charged * 10000) / 10000,
-          marginUsd: Math.round((charged - metaSpend) * 10000) / 10000,
+          metaCost: toMoney(metaSpend, fx),       // what Meta billed for this traffic
+          charged: toMoney(charged, fx),          // what the tenant paid
+          margin: toMoney(charged - metaSpend, fx),
           marginPct: metaSpend > 0 ? Math.round(((charged - metaSpend) / metaSpend) * 1000) / 10 : null,
-          avgCostPerMessageUsd: priced > 0 ? Math.round((charged / priced) * 1000000) / 1000000 : 0,
-          // Messages Meta did not bill for — free service-window traffic.
+          avgPerMessage: toUnitMoney(priced > 0 ? charged / priced : 0, fx),
           freeMessages: freeCount,
-          // Costing only covers what Meta has reported on. Saying so keeps the
-          // number honest rather than looking like under-reported spend.
+          // Costing covers only what Meta has reported on. Stating the gap keeps
+          // this a floor rather than something that looks like total spend.
           pricedMessages: priced,
           awaitingPricing: Math.max(0, total - priced),
         },
         byCategory: byCategory.map((c) => ({
           category: c.metaCategory,
           messages: c._count,
-          metaCostUsd: Math.round(num(c._sum.metaCostUsd) * 10000) / 10000,
-          chargedUsd: Math.round(num(c._sum.platformCostUsd) * 10000) / 10000,
+          metaCost: toMoney(num(c._sum.metaCostUsd), fx),
+          charged: toMoney(num(c._sum.platformCostUsd), fx),
         })),
+        byCountry: [...perCountry.entries()]
+          .map(([country, v]) => ({
+            country,
+            messages: v.messages,
+            metaCost: toMoney(v.meta, fx),
+            charged: toMoney(v.charged, fx),
+            avgPerMessage: toUnitMoney(v.messages > 0 ? v.charged / v.messages : 0, fx),
+          }))
+          .sort((a, b) => b.charged.usd - a.charged.usd),
       },
     };
   });
