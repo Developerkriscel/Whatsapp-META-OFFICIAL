@@ -222,6 +222,113 @@ export async function registerSuperadminRoutes(app: FastifyInstance): Promise<vo
    * stated here rather than inferred, and every figure that uses it reports
    * which rate it used.
    */
+  /**
+   * POST /credit-rates/calibrate — set Meta's cost from Meta's own invoice.
+   *
+   * Meta's real cost is not readable through the API without Business Solution
+   * Provider access, so the rate card's cost side has been a hand-entered
+   * figure that nothing ever checked. It drifted 21% high for India: the card
+   * said Rs 1.0443 per marketing message while WhatsApp Manager billed
+   * Rs 152.77 for 177 billable deliveries, which is Rs 0.8631. Every margin
+   * figure in the product was understated by that much.
+   *
+   * WhatsApp Manager does show the invoice, so this takes those numbers —
+   * deliveries, free deliveries, total charged — and derives the true rate.
+   * Dry run unless `apply` is true.
+   */
+  app.post('/credit-rates/calibrate', async (request, reply) => {
+    const body = z.object({
+      countryCode: z.string().length(2),
+      category: z.enum(['MARKETING', 'UTILITY', 'AUTHENTICATION']).default('MARKETING'),
+      /** "All message deliveries" from WhatsApp Manager. */
+      deliveries: z.number().int().positive(),
+      /** "Free customer service deliveries" — not billed, so excluded. */
+      freeDeliveries: z.number().int().min(0).default(0),
+      /** "Approximate charges", in the currency Meta shows them in. */
+      charges: z.number().positive(),
+      /** Currency of `charges`. Converted to the USD basis costs are stored in. */
+      currency: z.string().length(3).default('INR'),
+      apply: z.boolean().default(false),
+    }).parse(request.body);
+
+    const billable = body.deliveries - body.freeDeliveries;
+    if (billable <= 0) {
+      return reply.status(400).send({
+        success: false,
+        error: { code: 'NO_BILLABLE', message: 'Free deliveries cannot equal or exceed total deliveries.' },
+      });
+    }
+
+    const { getCurrencyContext } = await import('../services/currency.js');
+    const fx = await getCurrencyContext(app.prisma);
+    // charges are in `currency`; costs are stored in USD.
+    const rateInCurrency = body.charges / billable;
+    const rateUsd = body.currency.toUpperCase() === 'USD' ? rateInCurrency : rateInCurrency / fx.fxRate;
+    const derivedCredits = Math.round(rateUsd * 10000);
+
+    const rate = await app.prisma.creditRate.findUnique({ where: { countryCode: body.countryCode.toUpperCase() } });
+    if (!rate) {
+      return reply.status(404).send({
+        success: false,
+        error: { code: 'RATE_NOT_FOUND', message: `No rate card entry for ${body.countryCode}.` },
+      });
+    }
+
+    const costField =
+      body.category === 'MARKETING' ? 'metaMarketingCredits'
+      : body.category === 'AUTHENTICATION' ? 'metaAuthCredits'
+      : 'metaUtilityCredits';
+    const sellField =
+      body.category === 'MARKETING' ? 'marketingCredits'
+      : body.category === 'AUTHENTICATION' ? 'authCredits'
+      : 'utilityCredits';
+
+    const storedCredits = (rate as any)[costField] as number;
+    const sellCredits = (rate as any)[sellField] as number;
+    const variancePct = storedCredits > 0
+      ? Math.round(((storedCredits - derivedCredits) / derivedCredits) * 1000) / 10
+      : null;
+
+    const marginOn = (cost: number) => (cost > 0 ? Math.round(((sellCredits - cost) / cost) * 1000) / 10 : null);
+
+    if (body.apply) {
+      await app.prisma.creditRate.update({
+        where: { countryCode: body.countryCode.toUpperCase() },
+        data: { [costField]: derivedCredits } as any,
+      });
+      const { refreshRateCache } = await import('../services/creditService.js');
+      await refreshRateCache(app.prisma);
+    }
+
+    return {
+      success: true,
+      data: {
+        applied: body.apply,
+        countryCode: body.countryCode.toUpperCase(),
+        category: body.category,
+        invoice: {
+          deliveries: body.deliveries,
+          freeDeliveries: body.freeDeliveries,
+          billable,
+          charges: body.charges,
+          currency: body.currency.toUpperCase(),
+        },
+        derived: {
+          perMessage: Math.round(rateInCurrency * 10000) / 10000,
+          currency: body.currency.toUpperCase(),
+          perMessageUsd: Math.round(rateUsd * 1000000) / 1000000,
+          credits: derivedCredits,
+        },
+        previous: { credits: storedCredits, variancePct },
+        margin: {
+          reportedBefore: marginOn(storedCredits),
+          actualAfter: marginOn(derivedCredits),
+          sellCredits,
+        },
+      },
+    };
+  });
+
   app.get('/settings/currency', async (_request, _reply) => {
     const { getCurrencyContext, DEFAULT_FX } = await import('../services/currency.js');
     const fx = await getCurrencyContext(app.prisma);
