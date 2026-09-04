@@ -206,7 +206,28 @@ export default function CreditsPage() {
   const [customCredits, setCustomCredits] = useState('');
 
   // Generate packs based on selected country
-  const PACKS = generatePacks(selectedCountry, fx.fxRate);
+  // Packs, their prices and their fee breakdown come from the server, which
+  // reads the same tables that bill the credits. The generated list is only a
+  // placeholder while that request is in flight.
+  const { data: packagesData } = useQuery({
+    queryKey: ['credit-packages'],
+    queryFn: async () => (await api.get('/credit-packages')).data?.data,
+    staleTime: 5 * 60 * 1000,
+  });
+
+  const PACKS = (packagesData?.packages?.length
+    ? packagesData.packages.map((p: any) => ({
+        name: p.name,
+        credits: p.credits,
+        price: `${fx.symbol}${(p.totalMinor / 100).toLocaleString('en-IN', { minimumFractionDigits: 0, maximumFractionDigits: 2 })}`,
+        basePrice: `${fx.symbol}${(p.baseMinor / 100).toFixed(0)}`,
+        // The real figure from the rate card, not credits over a constant.
+        perMsg: `~${p.messages.toLocaleString('en-IN')} messages`,
+        fees: p.fees,
+        popular: p.isPopular,
+        id: p.id,
+      }))
+    : generatePacks(selectedCountry, fx.fxRate)) as any[];
 
   const { data: creditsData, isLoading: creditsLoading } = useQuery({
     queryKey: ['credits'],
@@ -502,7 +523,7 @@ export default function CreditsPage() {
                   </div>
                   <div className="flex justify-between">
                     <span className="text-ios-muted">Platform Fee (2%)</span>
-                    <span>+ {(parseInt(pack.price.replace(/[^0-9]/g, '')) * 0.02 / 1.02).toFixed(0)}</span>
+                    <span>{pack.fees ? pack.fees.map((f: any) => `${f.name} ${fx.symbol}${(f.amountMinor / 100).toFixed(2)}`).join(' · ') : ''}</span>
                   </div>
                 </div>
               )}
@@ -611,7 +632,7 @@ export default function CreditsPage() {
                       </div>
                       <div className="flex justify-between">
                         <span className="text-ios-secondary">Platform Fee (Payment Gateway)</span>
-                        <span>+ {getCurrencySymbol(pack.price.replace(/[^A-Z]/g, ''))}{Math.round(parseInt(pack.price.replace(/[^0-9]/g, '')) * 0.02 / 1.02)}</span>
+                        <span>{pack.fees ? pack.fees.map((f: any) => `${f.name} ${fx.symbol}${(f.amountMinor / 100).toFixed(2)}`).join(' · ') : ''}</span>
                       </div>
                       <div className="flex justify-between">
                         <span className="text-ios-secondary">GST (18% on Platform Fee)</span>

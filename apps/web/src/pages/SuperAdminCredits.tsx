@@ -6,6 +6,7 @@ import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../api/client';
 import SuperAdminRatesTab from '../components/SuperAdminRatesTab';
+import SuperAdminCommerceTab from '../components/SuperAdminCommerceTab';
 import {
   Coins,
   Search,
@@ -24,7 +25,7 @@ import {
   Download,
 } from 'lucide-react';
 
-type TabType = 'overview' | 'tenants' | 'adjustments' | 'rates';
+type TabType = 'overview' | 'tenants' | 'adjustments' | 'rates' | 'commerce';
 
 interface TenantCredit {
   id: string;
@@ -229,7 +230,7 @@ export default function SuperAdminCreditsPage() {
 
       {/* Tabs */}
       <div className="flex gap-1 bg-ios-gray p-1 rounded-apple-lg w-fit">
-        {(['overview', 'tenants', 'adjustments', 'rates'] as TabType[]).map((tab) => (
+        {(['overview', 'tenants', 'adjustments', 'rates', 'commerce'] as TabType[]).map((tab) => (
           <button
             key={tab}
             onClick={() => setActiveTab(tab)}
@@ -475,6 +476,7 @@ export default function SuperAdminCreditsPage() {
 
       {/* Rates Tab */}
       {activeTab === 'rates' && <SuperAdminRatesTab />}
+      {activeTab === 'commerce' && <SuperAdminCommerceTab />}
 
       {/* Adjustment Modal */}
       {showAdjustModal && selectedTenant && (
