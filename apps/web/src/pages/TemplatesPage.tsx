@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useRef } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../api/client';
 import { Plus, Search, X, FileText, Send, Check, Clock, AlertCircle, Copy, Edit3, SendHorizontal, CheckCircle2, Loader2, Trash2 } from 'lucide-react';
@@ -10,7 +10,7 @@ interface Template {
   category: string;
   language: string;
   body: { text: string };
-  header?: { type: string; text: string };
+  header?: { type: string; format?: string; text?: string; sampleUrl?: string; samplePath?: string };
   footer?: string;
   buttons?: { type: string; text: string }[];
   status: 'DRAFT' | 'PENDING' | 'APPROVED' | 'REJECTED';
@@ -62,7 +62,53 @@ export default function TemplatesPage() {
     language: 'en_US',
     bodyText: '',
     phoneNumberId: '',
+    // A header is optional, and is either text or one piece of media. Media
+    // needs a sample file: Meta shows it to a reviewer, and will not approve a
+    // media header without one.
+    headerFormat: 'NONE' as 'NONE' | 'TEXT' | 'IMAGE' | 'VIDEO' | 'DOCUMENT',
+    headerText: '',
+    headerSampleUrl: '',
+    headerSamplePath: '',
+    headerSampleName: '',
   });
+  const [sampleUploading, setSampleUploading] = useState(false);
+  const [sampleError, setSampleError] = useState('');
+  const sampleFileRef = useRef<HTMLInputElement>(null);
+
+  const emptyForm = {
+    name: '', category: 'MARKETING' as const, language: 'en_US', bodyText: '', phoneNumberId: '',
+    headerFormat: 'NONE' as const, headerText: '', headerSampleUrl: '', headerSamplePath: '', headerSampleName: '',
+  };
+
+  const ACCEPT_BY_FORMAT: Record<string, string> = {
+    IMAGE: 'image/jpeg,image/png',
+    VIDEO: 'video/mp4,video/3gpp',
+    DOCUMENT: 'application/pdf',
+  };
+
+  const uploadHeaderSample = async (file: File) => {
+    setSampleError('');
+    setSampleUploading(true);
+    try {
+      const body = new FormData();
+      body.append('file', file);
+      const res = await api.post('/uploads/campaign-media', body, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+      });
+      const up = res.data?.data;
+      setForm((f) => ({
+        ...f,
+        headerSampleUrl: up.url,
+        headerSamplePath: up.path,
+        headerSampleName: up.originalName || file.name,
+      }));
+    } catch (err: any) {
+      setSampleError(err?.response?.data?.error?.message || 'Upload failed. Please try again.');
+    } finally {
+      setSampleUploading(false);
+      if (sampleFileRef.current) sampleFileRef.current.value = '';
+    }
+  };
   const queryClient = useQueryClient();
 
   // Connected numbers — a tenant with numbers on more than one WABA needs to
@@ -105,13 +151,26 @@ export default function TemplatesPage() {
         language: payload.language,
         body: { text: payload.bodyText },
         phoneNumberId: payload.phoneNumberId || undefined,
+        ...(payload.headerFormat === 'NONE'
+          ? {}
+          : payload.headerFormat === 'TEXT'
+            ? { header: { type: 'TEXT', format: 'TEXT', text: payload.headerText } }
+            : {
+                header: {
+                  type: payload.headerFormat,
+                  format: payload.headerFormat,
+                  sampleUrl: payload.headerSampleUrl,
+                  samplePath: payload.headerSamplePath,
+                },
+              }),
       });
       return response.data;
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['templates'] });
       setShowCreate(false);
-      setForm({ name: '', category: 'MARKETING', language: 'en_US', bodyText: '', phoneNumberId: '' });
+      setForm(emptyForm);
+      setSampleError('');
       showNotification('success', 'Template created successfully!');
     },
     onError: (error: any) => {
@@ -406,6 +465,81 @@ export default function TemplatesPage() {
                   </select>
                 </div>
               </div>
+              {/* Header — optional, and the only way a template can ever carry
+                  an image. Without one, media attached to a campaign is
+                  rejected by Meta for every recipient. */}
+              <div>
+                <label className="block text-sm font-medium text-ios-secondary mb-1">Header (optional)</label>
+                <div className="grid grid-cols-5 gap-2">
+                  {(['NONE', 'TEXT', 'IMAGE', 'VIDEO', 'DOCUMENT'] as const).map((f) => (
+                    <button
+                      key={f}
+                      type="button"
+                      onClick={() => setForm({
+                        ...form, headerFormat: f,
+                        // Switching away from media should not leave a sample
+                        // behind that would be submitted with the wrong format.
+                        ...(f === 'TEXT' || f === 'NONE'
+                          ? { headerSampleUrl: '', headerSamplePath: '', headerSampleName: '' }
+                          : { headerText: '' }),
+                      })}
+                      className={`py-1.5 text-xs rounded-apple-lg border transition ${
+                        form.headerFormat === f
+                          ? 'border-wa-green bg-wa-green/10 text-wa-green font-medium'
+                          : 'border-black/10 text-ios-muted hover:border-wa-green/40'
+                      }`}
+                    >
+                      {f === 'NONE' ? 'None' : f.charAt(0) + f.slice(1).toLowerCase()}
+                    </button>
+                  ))}
+                </div>
+
+                {form.headerFormat === 'TEXT' && (
+                  <input
+                    type="text"
+                    placeholder="e.g. Your order is confirmed"
+                    value={form.headerText}
+                    onChange={(e) => setForm({ ...form, headerText: e.target.value })}
+                    maxLength={60}
+                    className="input-apple w-full mt-2"
+                  />
+                )}
+
+                {form.headerFormat !== 'NONE' && form.headerFormat !== 'TEXT' && (
+                  <div className="mt-2 space-y-2">
+                    <p className="text-xs text-ios-muted">
+                      Meta reviews a sample of the {form.headerFormat.toLowerCase()} before approving the
+                      template. Campaigns can then send a different file of the same type.
+                    </p>
+                    <input
+                      ref={sampleFileRef}
+                      type="file"
+                      accept={ACCEPT_BY_FORMAT[form.headerFormat]}
+                      onChange={(e) => {
+                        const f = e.target.files?.[0];
+                        if (f) uploadHeaderSample(f);
+                      }}
+                      className="block w-full text-sm text-ios-muted file:mr-3 file:py-1.5 file:px-3 file:rounded-apple-lg file:border-0 file:bg-wa-green/10 file:text-wa-green"
+                    />
+                    {sampleUploading && <p className="text-xs text-ios-muted">Uploading sample…</p>}
+                    {sampleError && <p className="text-xs text-red-600">{sampleError}</p>}
+                    {form.headerSampleUrl && (
+                      <div className="flex items-center gap-2 text-xs">
+                        <CheckCircle2 className="w-3.5 h-3.5 text-wa-green" />
+                        <span className="text-ios-dark truncate">{form.headerSampleName}</span>
+                        <button
+                          type="button"
+                          onClick={() => setForm({ ...form, headerSampleUrl: '', headerSamplePath: '', headerSampleName: '' })}
+                          className="text-ios-muted hover:text-red-600 underline"
+                        >
+                          remove
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+
               <div>
                 <label className="block text-sm font-medium text-ios-secondary mb-1">Message Body *</label>
                 <textarea
@@ -425,7 +559,16 @@ export default function TemplatesPage() {
               <div className="flex gap-2 pt-2">
                 <button
                   onClick={() => createMutation.mutate(form)}
-                  disabled={!form.name.trim() || !form.bodyText.trim() || (phoneNumbers.length > 1 && !form.phoneNumberId) || createMutation.isPending}
+                  disabled={
+                    !form.name.trim() || !form.bodyText.trim()
+                    || (phoneNumbers.length > 1 && !form.phoneNumberId)
+                    || createMutation.isPending
+                    || sampleUploading
+                    // Meta will not approve a media header without a sample, so
+                    // there is no point letting the template be created.
+                    || (['IMAGE', 'VIDEO', 'DOCUMENT'].includes(form.headerFormat) && !form.headerSamplePath)
+                    || (form.headerFormat === 'TEXT' && !form.headerText.trim())
+                  }
                   className="flex-1 btn-apple btn-wa-green disabled:opacity-50"
                 >
                   {createMutation.isPending ? 'Creating...' : 'Create Template'}
@@ -545,11 +688,15 @@ export default function TemplatesPage() {
                 onClick={() => {
                   setShowEdit(selectedTemplate);
                   setForm({
+                    ...emptyForm,
                     name: selectedTemplate.name,
                     category: selectedTemplate.category as any,
                     language: selectedTemplate.language,
                     bodyText: selectedTemplate.body?.text || '',
                     phoneNumberId: '',
+                    headerFormat: (selectedTemplate.header?.format as any)
+                      || (selectedTemplate.header ? 'TEXT' : 'NONE'),
+                    headerText: selectedTemplate.header?.text || '',
                   });
                   setSelectedTemplate(null);
                 }}

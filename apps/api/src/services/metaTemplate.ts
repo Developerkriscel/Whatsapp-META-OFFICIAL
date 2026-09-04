@@ -123,6 +123,72 @@ export async function submitTemplateToMeta(
   }
 }
 
+/** Meta's header formats that carry a file rather than text. */
+export const MEDIA_HEADER_FORMATS = ['IMAGE', 'VIDEO', 'DOCUMENT'] as const;
+export type MediaHeaderFormat = (typeof MEDIA_HEADER_FORMATS)[number];
+
+/**
+ * Uploads a sample file to Meta and returns a `header_handle`.
+ *
+ * A template with an image/video/document header cannot be created by pointing
+ * Meta at a URL. Meta wants a sample of the media so a human reviewer can see
+ * what the header will look like, and it only accepts that sample through the
+ * Resumable Upload API, which hands back an opaque handle. That handle is what
+ * goes in the HEADER component's `example.header_handle`.
+ *
+ * Two calls: open a session describing the file, then send the bytes.
+ */
+export async function uploadTemplateHeaderSample(
+  accessToken: string,
+  appId: string,
+  file: { buffer: Buffer; mimeType: string; fileName: string }
+): Promise<string> {
+  const api = 'https://graph.facebook.com/v21.0';
+
+  let sessionId: string;
+  try {
+    const session = await axios.post(
+      `${api}/${appId}/uploads`,
+      null,
+      {
+        params: {
+          file_name: file.fileName,
+          file_length: file.buffer.length,
+          file_type: file.mimeType,
+          access_token: accessToken,
+        },
+      }
+    );
+    sessionId = session.data?.id;
+    if (!sessionId) throw new Error('Meta did not return an upload session id');
+  } catch (error: any) {
+    const detail = error.response?.data?.error?.message || error.message;
+    throw new Error(`Could not start the sample upload with Meta: ${detail}`);
+  }
+
+  try {
+    const upload = await axios.post(`${api}/${sessionId}`, file.buffer, {
+      headers: {
+        // This leg authenticates with the "OAuth <token>" scheme rather than a
+        // Bearer header or an access_token param -- the resumable upload
+        // endpoint rejects the other two.
+        Authorization: `OAuth ${accessToken}`,
+        file_offset: '0',
+        'Content-Type': 'application/octet-stream',
+      },
+      maxBodyLength: Infinity,
+      maxContentLength: Infinity,
+    });
+
+    const handle = upload.data?.h;
+    if (!handle) throw new Error('Meta accepted the upload but returned no handle');
+    return handle;
+  } catch (error: any) {
+    const detail = error.response?.data?.error?.message || error.message;
+    throw new Error(`Could not upload the sample to Meta: ${detail}`);
+  }
+}
+
 /**
  * Delete template from Meta
  */

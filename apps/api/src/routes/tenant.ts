@@ -3,7 +3,7 @@
 import { FastifyInstance } from 'fastify';
 import { Prisma } from '@prisma/client';
 import { z } from 'zod';
-import { syncTemplatesFromMeta, submitTemplateToMeta, fetchMetaTemplates, resolveEffectiveWabaId } from '../services/metaTemplate.js';
+import { syncTemplatesFromMeta, submitTemplateToMeta, fetchMetaTemplates, resolveEffectiveWabaId, uploadTemplateHeaderSample } from '../services/metaTemplate.js';
 import { decryptSecret } from '../services/credentialEncryption.js';
 import { detectCountryFromPhone } from '../services/phoneCountry.js';
 import { checkTemplateContent, getAISuggestion } from '../services/aiAssist.js';
@@ -2314,7 +2314,16 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
       category: z.enum(['MARKETING', 'UTILITY', 'AUTHENTICATION']),
       language: z.string().default('en_US'),
       body: z.object({ text: z.string() }),
-      header: z.object({ type: z.string(), text: z.string().optional() }).optional(),
+      // A header is either text or a piece of media. For media, Meta needs a
+      // sample file to review, so we keep the uploaded file's path and turn it
+      // into a header_handle at submit time.
+      header: z.object({
+        type: z.string(),
+        format: z.enum(['TEXT', 'IMAGE', 'VIDEO', 'DOCUMENT']).optional(),
+        text: z.string().optional(),
+        sampleUrl: z.string().optional(),
+        samplePath: z.string().optional(),
+      }).optional(),
       footer: z.string().optional(),
       buttons: z.array(z.object({ type: z.string(), text: z.string() })).optional(),
       // Which connected number's WABA to submit this under — required to
@@ -2438,13 +2447,64 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
 
         const components: any[] = [];
         if (template.header) {
-          const headerText = (template.header as any).text || '';
-          const headerVars = variableNumbers(headerText);
-          components.push({
-            type: 'HEADER',
-            ...(template.header as any),
-            ...(headerVars.length ? { example: { header_text: headerVars.map(exampleFor) } } : {}),
-          });
+          const hdr = template.header as any;
+          const format = (hdr.format || 'TEXT').toUpperCase();
+
+          if (format === 'TEXT') {
+            const headerText = hdr.text || '';
+            const headerVars = variableNumbers(headerText);
+            components.push({
+              type: 'HEADER',
+              format: 'TEXT',
+              text: headerText,
+              ...(headerVars.length ? { example: { header_text: headerVars.map(exampleFor) } } : {}),
+            });
+          } else {
+            // Media header. Meta will not take a URL here — it wants the sample
+            // bytes through the resumable upload API and identifies them by an
+            // opaque handle. The handle is minted fresh at submit time rather
+            // than stored, because a stale one fails the submission with an
+            // error that says nothing about staleness.
+            if (!hdr.samplePath) {
+              throw new Error(`This template has a ${format} header but no sample file to show Meta. Upload one before submitting.`);
+            }
+            const appId = process.env.META_APP_ID;
+            if (!appId) {
+              throw new Error('META_APP_ID is not configured, so sample media cannot be uploaded to Meta.');
+            }
+
+            const { readFile } = await import('fs/promises');
+            const { campaignMediaDir } = await import('./uploads.js');
+            const pathMod = await import('path');
+
+            // Resolve inside the upload directory only, so a tampered
+            // samplePath cannot read arbitrary files off the server.
+            const dir = campaignMediaDir();
+            const resolved = pathMod.resolve(dir, pathMod.basename(hdr.samplePath));
+            if (pathMod.dirname(resolved) !== pathMod.resolve(dir)) {
+              throw new Error('The header sample file could not be located.');
+            }
+
+            const buffer = await readFile(resolved);
+            const ext = pathMod.extname(resolved).toLowerCase();
+            const MIME: Record<string, string> = {
+              '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png',
+              '.mp4': 'video/mp4', '.3gp': 'video/3gpp', '.pdf': 'application/pdf',
+            };
+            const mimeType = MIME[ext] || 'application/octet-stream';
+
+            const handle = await uploadTemplateHeaderSample(
+              decryptSecret(credentials.accessToken),
+              appId,
+              { buffer, mimeType, fileName: pathMod.basename(resolved) }
+            );
+
+            components.push({
+              type: 'HEADER',
+              format,
+              example: { header_handle: [handle] },
+            });
+          }
         }
         const bodyText = (template.body as any).text || '';
         const bodyVars = variableNumbers(bodyText);
