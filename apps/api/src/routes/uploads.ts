@@ -66,10 +66,12 @@ export async function registerUploadRoutes(app: FastifyInstance) {
    * POST /uploads/campaign-media
    * Accepts a single multipart file and returns the URL to hand to Meta.
    */
-  app.post(
-    '/uploads/campaign-media',
-    { preHandler: [app.requirePermission('campaigns', 'create')] },
-    async (request, reply) => {
+  /**
+   * Shared by the campaign editor and the chat composer. Same validation, same
+   * storage, same public URL — they differ only in who is allowed to call them,
+   * which is why they are separate routes rather than one with a looser guard.
+   */
+  const handleUpload = async (request: any, reply: any) => {
       const file = await (request as any).file();
 
       if (!file) {
@@ -147,7 +149,23 @@ export async function registerUploadRoutes(app: FastifyInstance) {
           originalName: file.filename,
         },
       });
-    },
+  };
+
+  app.post(
+    '/uploads/campaign-media',
+    { preHandler: [app.requirePermission('campaigns', 'create')] },
+    handleUpload,
+  );
+
+  /**
+   * POST /uploads/chat-media
+   * An attachment for a live conversation. An agent answering a customer should
+   * not need permission to create campaigns in order to send a photo.
+   */
+  app.post(
+    '/uploads/chat-media',
+    { preHandler: [app.requirePermission('messages', 'send')] },
+    handleUpload,
   );
 
   /**

@@ -1241,7 +1241,7 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
     }
 
     const query = paginationSchema.extend({
-      filter: z.enum(['all', 'open', 'closed', 'pending', 'mine', 'bot']).optional(),
+      filter: z.enum(['all', 'open', 'closed', 'pending', 'mine', 'bot', 'unread']).optional(),
       search: z.string().optional(),
     }).parse(request.query);
     const { page, limit, sort, order, filter, search } = query;
@@ -1259,6 +1259,12 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
       where.assignedToId = request.authUser.id;
     } else if (filter === 'bot') {
       where.isBotActive = true;
+    } else if (filter === 'unread') {
+      // Anything a customer has said that nobody has opened yet. Closed threads
+      // are excluded: a closed conversation with a stale unread count is not
+      // something anyone still needs to answer.
+      where.unreadCount = { gt: 0 };
+      where.status = { not: 'CLOSED' };
     }
 
     if (search) {
@@ -1521,13 +1527,35 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
       phone: z.string().optional(),
       body: z.string().optional(),
       message: z.string().optional(),
-      type: z.enum(['text', 'template']).default('text'),
+      type: z.enum(['text', 'template', 'media']).default('text'),
+      // An attachment sent inside the 24-hour service window. Meta fetches the
+      // URL itself, so it has to be publicly reachable — the upload endpoint
+      // returns exactly such a URL.
+      mediaUrl: z.string().url().optional(),
+      mediaKind: z.enum(['image', 'video', 'document', 'audio']).optional(),
+      mediaFilename: z.string().optional(),
     });
 
     const parsed = schema.parse(request.body);
     let contactId = parsed.contactId;
     let phoneNumberId = parsed.phoneNumberId;
     const messageText = parsed.body || parsed.message || '';
+    const isMedia = parsed.type === 'media';
+
+    if (isMedia && (!parsed.mediaUrl || !parsed.mediaKind)) {
+      return reply.status(400).send({
+        success: false,
+        error: { code: 'MEDIA_REQUIRED', message: 'An attachment needs both a media URL and its kind.' },
+      });
+    }
+    // A text message with no text is nothing; an attachment may legitimately
+    // carry no caption.
+    if (!isMedia && !messageText.trim()) {
+      return reply.status(400).send({
+        success: false,
+        error: { code: 'EMPTY_MESSAGE', message: 'Message text is required.' },
+      });
+    }
 
     // Auto-resolve contactId by phone if not explicitly provided
     if (!contactId && parsed.phone) {
@@ -1683,8 +1711,11 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
         senderId: request.authUser.id,
         phoneNumberId: body.phoneNumberId,
         direction: 'OUTGOING',
-        type: 'TEXT',
+        // The stored type mirrors what Meta was asked to send, so the thread
+        // renders an attachment as an attachment rather than as empty text.
+        type: isMedia ? (parsed.mediaKind!.toUpperCase() as any) : 'TEXT',
         body: body.body,
+        mediaUrl: isMedia ? parsed.mediaUrl : undefined,
         status: 'PENDING',
       },
     });
@@ -1704,7 +1735,18 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
       contactPhone: targetContact?.phone || '',
       phoneNumberId: body.phoneNumberId,
       body: body.body || '',
-      type: 'text',
+      type: isMedia ? 'media' : 'text',
+      ...(isMedia
+        ? {
+            media: {
+              kind: parsed.mediaKind!,
+              link: parsed.mediaUrl!,
+              // Text typed alongside an attachment rides as its caption.
+              caption: body.body || undefined,
+              filename: parsed.mediaFilename,
+            },
+          }
+        : {}),
     });
 
     const finalMessage = dispatchResult.data || message;

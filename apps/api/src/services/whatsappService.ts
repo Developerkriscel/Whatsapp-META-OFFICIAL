@@ -47,7 +47,16 @@ export interface DispatchMessageParams {
   contactPhone: string;
   phoneNumberId: string;
   body: string;
-  type?: 'text' | 'template';
+  type?: 'text' | 'template' | 'media';
+  // Required when type === 'media'. Meta fetches the URL from its own servers,
+  // so it has to be publicly reachable — a localhost or signed-expiring URL
+  // fails at send time rather than at upload.
+  media?: {
+    kind: 'image' | 'video' | 'document' | 'audio';
+    link: string;
+    caption?: string;
+    filename?: string;
+  };
   // Required when type === 'template'. components should already carry any
   // {{n}} variable substitutions (Meta rejects a bare "text" key on a
   // component — variables must go through a "parameters" array).
@@ -64,7 +73,7 @@ export interface DispatchMessageParams {
  * Updates message status in database to SENT or FAILED.
  */
 export async function dispatchOutboundMessage(params: DispatchMessageParams): Promise<any> {
-  const { app, messageId, tenantId, contactPhone, phoneNumberId, body, type, template } = params;
+  const { app, messageId, tenantId, contactPhone, phoneNumberId, body, type, template, media } = params;
 
   // Tracked so a throw between reserving and completing the send (a network
   // error mid-fetch, say) doesn't permanently consume quota.
@@ -110,7 +119,21 @@ export async function dispatchOutboundMessage(params: DispatchMessageParams): Pr
 
       const url = `https://graph.facebook.com/v18.0/${metaPhoneId}/messages`;
       const payload =
-        type === 'template' && template
+        type === 'media' && media
+          ? {
+              messaging_product: 'whatsapp',
+              recipient_type: 'individual',
+              to: formattedTo,
+              type: media.kind,
+              [media.kind]: {
+                link: media.link,
+                // Audio takes neither a caption nor a filename; documents are
+                // the only kind that shows a filename to the recipient.
+                ...(media.kind !== 'audio' && media.caption ? { caption: media.caption } : {}),
+                ...(media.kind === 'document' && media.filename ? { filename: media.filename } : {}),
+              },
+            }
+          : type === 'template' && template
           ? {
               messaging_product: 'whatsapp',
               recipient_type: 'individual',

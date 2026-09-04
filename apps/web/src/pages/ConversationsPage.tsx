@@ -11,7 +11,7 @@ import {
   Search, Send, X, Check, RefreshCw, ChevronDown,
   UserPlus, Bot, CircleOff, CheckCircle, StickyNote,
   MessageSquare, Phone, Mail, Tag, Calendar, User,
-  AlertCircle, Info,
+  AlertCircle, Info, Paperclip, Loader2,
 } from 'lucide-react';
 import { useToast } from '../components/Toast';
 
@@ -28,6 +28,8 @@ interface Message {
   timestamp: string;
   isNote?: boolean;
   authorName?: string;
+  mediaUrl?: string | null;
+  mediaKind?: string | null;
 }
 
 interface ConvContact {
@@ -68,7 +70,7 @@ interface Conversation {
 }
 
 type SidebarTab = 'info' | 'notes';
-type FilterType = 'open' | 'all' | 'closed' | 'pending' | 'mine' | 'bot';
+type FilterType = 'open' | 'all' | 'unread' | 'closed' | 'pending' | 'mine' | 'bot';
 
 // ─────────────────────────────────────────────────────────
 // Main Component
@@ -184,6 +186,8 @@ export default function ConversationsPage() {
   const activeMessages: Message[] = (activeConv?.messages || []).map((msg: any) => ({
     id: msg.id,
     content: msg.body || '',
+    mediaUrl: msg.mediaUrl || null,
+    mediaKind: (msg.type || '').toLowerCase(),
     direction: msg.direction === 'INCOMING' ? 'inbound' : 'outbound',
     status: msg.status?.toLowerCase() || 'sent',
     errorMessage: msg.errorMessage,
@@ -282,12 +286,39 @@ export default function ConversationsPage() {
     onError: (error: any) => toast.error(error.response?.data?.error?.message || 'Failed to add note'),
   });
 
+  // Attachment staged in the composer but not yet sent. Held separately from
+  // the text so a caption can be typed after picking the file.
+  const [attachment, setAttachment] = useState<{ url: string; kind: string; name: string } | null>(null);
+  const [attachUploading, setAttachUploading] = useState(false);
+  const attachInputRef = useRef<HTMLInputElement>(null);
+
+  const uploadAttachment = async (file: File) => {
+    setAttachUploading(true);
+    try {
+      const fd = new FormData();
+      fd.append('file', file);
+      const res = await api.post('/uploads/chat-media', fd, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+      });
+      const up = res.data?.data;
+      setAttachment({ url: up.url, kind: up.kind, name: up.originalName || file.name });
+    } catch (err: any) {
+      toast.error(err?.response?.data?.error?.message || 'Could not upload that file');
+    } finally {
+      setAttachUploading(false);
+      if (attachInputRef.current) attachInputRef.current.value = '';
+    }
+  };
+
   // ── Handlers ──────────────────────────────────────────
 
   const handleSend = () => {
-    if (!message.trim() || !selected) return;
+    // An attachment can go on its own; text cannot be empty without one.
+    if (!selected || (!message.trim() && !attachment)) return;
     const text = message.trim();
+    const media = attachment;
     setMessage('');
+    setAttachment(null);
     sendMutation.mutate({
       phone: selected.contact.phone,
       body: text,
@@ -295,6 +326,9 @@ export default function ConversationsPage() {
       contactId: selected.contactId,
       phoneNumberId: selected.phoneNumberId,
       conversationId: selected.id,
+      ...(media
+        ? { type: 'media', mediaUrl: media.url, mediaKind: media.kind, mediaFilename: media.name }
+        : {}),
     });
   };
 
@@ -403,6 +437,7 @@ export default function ConversationsPage() {
             {(
               [
                 { key: 'open', label: 'Open' },
+                { key: 'unread', label: 'Unread' },
                 { key: 'all', label: 'All' },
                 { key: 'closed', label: 'Closed' },
                 { key: 'pending', label: 'Pending' },
@@ -690,6 +725,36 @@ export default function ConversationsPage() {
                               : 'bg-white border border-black/8 text-ios-dark rounded-bl-sm shadow-sm'
                           }`}
                         >
+                          {/* An attachment renders as itself. Without this the
+                              bubble showed only the caption, or nothing at all
+                              when the message had no text. */}
+                          {msg.mediaUrl && (
+                            <div className="mb-1.5">
+                              {msg.mediaKind === 'image' ? (
+                                <a href={msg.mediaUrl} target="_blank" rel="noreferrer">
+                                  <img
+                                    src={msg.mediaUrl}
+                                    alt={msg.content || 'Attachment'}
+                                    className="max-w-full rounded-apple-lg max-h-64 object-cover"
+                                  />
+                                </a>
+                              ) : msg.mediaKind === 'video' ? (
+                                <video src={msg.mediaUrl} controls className="max-w-full rounded-apple-lg max-h-64" />
+                              ) : (
+                                <a
+                                  href={msg.mediaUrl}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className={`flex items-center gap-2 px-3 py-2 rounded-apple-lg underline ${
+                                    msg.direction === 'outbound' ? 'bg-white/15' : 'bg-ios-gray'
+                                  }`}
+                                >
+                                  <Paperclip className="w-4 h-4 shrink-0" />
+                                  <span className="truncate text-sm">Open attachment</span>
+                                </a>
+                              )}
+                            </div>
+                          )}
                           {msg.content}
                         </div>
                         {msg.status === 'failed' && (
@@ -748,27 +813,67 @@ export default function ConversationsPage() {
                     </a>
                   </div>
                 ) : (
-                  <div className="flex items-end gap-2">
-                    <textarea
-                      value={message}
-                      onChange={(e) => setMessage(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter' && !e.shiftKey) {
-                          e.preventDefault();
-                          handleSend();
-                        }
-                      }}
-                      placeholder="Type a message… (Enter to send, Shift+Enter for newline)"
-                      rows={2}
-                      className="flex-1 input-apple resize-none text-sm"
-                    />
-                    <button
-                      onClick={handleSend}
-                      disabled={!message.trim() || sendMutation.isPending}
-                      className="w-9 h-9 bg-wa-green text-white rounded-apple-lg flex items-center justify-center hover:bg-wa-green/90 transition disabled:opacity-50"
-                    >
-                      <Send className="w-4 h-4" />
-                    </button>
+                  <div>
+                    {/* Staged attachment. Shown before sending so the wrong file
+                        can be swapped out rather than discovered by the customer. */}
+                    {attachment && (
+                      <div className="flex items-center gap-2 mb-2 px-3 py-2 bg-wa-green/10 border border-wa-green/20 rounded-apple-lg text-sm">
+                        <Paperclip className="w-4 h-4 text-wa-green shrink-0" />
+                        <span className="truncate text-ios-dark">{attachment.name}</span>
+                        <span className="text-xs text-ios-muted uppercase shrink-0">{attachment.kind}</span>
+                        <button
+                          onClick={() => setAttachment(null)}
+                          className="ml-auto text-ios-muted hover:text-apple-red shrink-0"
+                          aria-label="Remove attachment"
+                        >
+                          <X className="w-4 h-4" />
+                        </button>
+                      </div>
+                    )}
+                    <div className="flex items-end gap-2">
+                      <input
+                        ref={attachInputRef}
+                        type="file"
+                        accept="image/jpeg,image/png,video/mp4,video/3gpp,application/pdf"
+                        className="hidden"
+                        onChange={(e) => {
+                          const f = e.target.files?.[0];
+                          if (f) uploadAttachment(f);
+                        }}
+                      />
+                      <button
+                        onClick={() => attachInputRef.current?.click()}
+                        disabled={attachUploading || sendMutation.isPending}
+                        title="Attach a photo, video or PDF"
+                        className="w-9 h-9 rounded-apple-lg border border-black/10 flex items-center justify-center text-ios-muted hover:text-wa-green hover:border-wa-green/50 transition disabled:opacity-50"
+                      >
+                        {attachUploading
+                          ? <Loader2 className="w-4 h-4 animate-spin" />
+                          : <Paperclip className="w-4 h-4" />}
+                      </button>
+                      <textarea
+                        value={message}
+                        onChange={(e) => setMessage(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' && !e.shiftKey) {
+                            e.preventDefault();
+                            handleSend();
+                          }
+                        }}
+                        placeholder={attachment
+                          ? 'Add a caption (optional)…'
+                          : 'Type a message… (Enter to send, Shift+Enter for newline)'}
+                        rows={2}
+                        className="flex-1 input-apple resize-none text-sm"
+                      />
+                      <button
+                        onClick={handleSend}
+                        disabled={(!message.trim() && !attachment) || sendMutation.isPending || attachUploading}
+                        className="w-9 h-9 bg-wa-green text-white rounded-apple-lg flex items-center justify-center hover:bg-wa-green/90 transition disabled:opacity-50"
+                      >
+                        <Send className="w-4 h-4" />
+                      </button>
+                    </div>
                   </div>
                 )}
                 {windowOpen && windowClosesAt && (
