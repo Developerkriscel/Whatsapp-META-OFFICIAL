@@ -119,7 +119,13 @@ export async function dispatchOutboundMessage(params: DispatchMessageParams): Pr
               template: {
                 name: template.name.toLowerCase().replace(/[^a-z0-9_]/g, '_'),
                 language: { code: template.language },
-                components: template.components,
+                // Omit `components` entirely when there are no parameters,
+                // which is the shape Meta's own docs use for a template with no
+                // variables. Meta does also accept an empty array -- verified
+                // against the live API -- so this is tidiness, not a fix.
+                ...(template.components && template.components.length > 0
+                  ? { components: template.components }
+                  : {}),
               },
             }
           : {
@@ -180,8 +186,20 @@ export async function dispatchOutboundMessage(params: DispatchMessageParams): Pr
         });
         return { success: true, status: 'SENT', metaMessageId, data: updated };
       } else {
-        const errMessage = responseData?.error?.message || responseData?.message || 'Meta API call failed';
-        const errCode = responseData?.error?.code?.toString() || 'META_API_ERROR';
+        // Meta's top-level `message` is often the generic headline -- 132018 is
+        // literally "There's an issue with the parameters in your template",
+        // which says nothing about which parameter or why. The specific reason
+        // lives in error_data.details, and dropping it is what made these
+        // failures impossible to diagnose from the campaign view.
+        const metaError = responseData?.error;
+        const details: string | undefined = metaError?.error_data?.details;
+        const headline: string = metaError?.message || responseData?.message || 'Meta API call failed';
+        const errMessage = details ? `${headline} — ${details}` : headline;
+        const errCode = metaError?.code?.toString() || 'META_API_ERROR';
+
+        if (details) {
+          console.error(`[Meta ${errCode}] ${details}`);
+        }
 
         // Meta didn't accept it, so it shouldn't count against the day's quota.
         await releaseSendSlot(app.prisma, phoneNumberId);

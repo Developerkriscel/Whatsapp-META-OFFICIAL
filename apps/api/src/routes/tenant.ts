@@ -4448,7 +4448,11 @@ async function sendCampaignMessagesInner(
           // record it so the loop slows down instead of driving the rest of the
           // campaign into the same wall.
           if ((dispatchResult as any).rateLimited) rateLimitHits++;
-          throw new Error(dispatchResult.error || 'Dispatch failed');
+          const dispatchErr: any = new Error(dispatchResult.error || 'Dispatch failed');
+          // Carry Meta's code through the throw so the catch does not have to
+          // guess, and does not flatten every failure into one generic code.
+          dispatchErr.metaErrorCode = (dispatchResult as any).errorCode;
+          throw dispatchErr;
         }
 
         consumed += costCredits;
@@ -4460,12 +4464,19 @@ async function sendCampaignMessagesInner(
 
         // Record why on the message itself, so the campaign view shows a reason
         // instead of a recipient stuck on PENDING with a blank detail column.
+        // The dispatcher has already written Meta's own error code when it was
+        // the dispatcher that failed. Overwriting it with a generic
+        // 'SEND_ERROR' threw away the one field that says what Meta actually
+        // objected to -- every recipient in a failed campaign read SEND_ERROR
+        // while the real code sat in the logs. Only fill in a code when the
+        // failure came from somewhere the dispatcher never reached.
         if (createdMessageId) {
+          const dispatchCode = (err as any)?.metaErrorCode as string | undefined;
           await app.prisma.message.update({
             where: { id: createdMessageId },
             data: {
               status: 'FAILED',
-              errorCode: 'SEND_ERROR',
+              errorCode: dispatchCode || 'SEND_ERROR',
               errorMessage: (err?.message || 'Send failed').slice(0, 500),
               failedAt: new Date(),
             },
