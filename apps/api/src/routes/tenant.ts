@@ -109,6 +109,51 @@ const paginationSchema = z.object({
   order: z.enum(['asc', 'desc']).default('desc'),
 });
 
+/** Columns the contact picker is allowed to sort by. Free-text sort would let a
+ *  caller order by any column Prisma knows about, including ones we do not
+ *  expose. */
+const CONTACT_SORT_FIELDS = ['name', 'phone', 'country', 'consentStatus', 'createdAt', 'company', 'email'] as const;
+
+const contactFilterSchema = z.object({
+  page: z.coerce.number().min(1).default(1),
+  limit: z.coerce.number().min(1).max(100).default(20),
+  sort: z.enum(CONTACT_SORT_FIELDS).default('createdAt'),
+  order: z.enum(['asc', 'desc']).default('desc'),
+  search: z.string().optional(),
+  consentStatus: z.enum(['OPTED_IN', 'OPTED_OUT', 'UNKNOWN']).optional(),
+  country: z.string().optional(),
+  tag: z.string().optional(),
+});
+
+type ContactFilter = z.infer<typeof contactFilterSchema>;
+
+/**
+ * The one place contact filtering is defined.
+ *
+ * The picker's table and its "select everything that matches" action have to
+ * agree exactly. If they each built their own where-clause, a filter handled by
+ * one and not the other would silently select a different set of people than
+ * the table is showing -- and the user would only find out after the campaign
+ * had gone out.
+ */
+function buildContactWhere(tenantId: string, f: Partial<ContactFilter>): Prisma.ContactWhereInput {
+  const where: Prisma.ContactWhereInput = { tenantId, isActive: true };
+
+  if (f.search) {
+    where.OR = [
+      { name: { contains: f.search, mode: 'insensitive' } },
+      { phone: { contains: f.search, mode: 'insensitive' } },
+      { email: { contains: f.search, mode: 'insensitive' } },
+      { company: { contains: f.search, mode: 'insensitive' } },
+    ];
+  }
+  if (f.consentStatus) where.consentStatus = f.consentStatus;
+  if (f.country) where.country = f.country;
+  if (f.tag) where.tags = { some: { tag: { name: f.tag } } };
+
+  return where;
+}
+
 /**
  * Register tenant routes
  */
@@ -392,22 +437,11 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
       return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
     }
 
-    const query = paginationSchema.extend({
-      search: z.string().optional(),
-    }).parse(request.query);
-    const { page, limit, sort, order, search } = query;
+    const query = contactFilterSchema.parse(request.query);
+    const { page, limit, sort, order } = query;
     const skip = (page - 1) * limit;
 
-    const where: any = { tenantId: request.authUser.tenantId, isActive: true };
-
-    if (search) {
-      where.OR = [
-        { name: { contains: search, mode: 'insensitive' } },
-        { phone: { contains: search, mode: 'insensitive' } },
-        { email: { contains: search, mode: 'insensitive' } },
-        { company: { contains: search, mode: 'insensitive' } },
-      ];
-    }
+    const where = buildContactWhere(request.authUser.tenantId, query);
 
     const [contacts, total] = await Promise.all([
       app.prisma.contact.findMany({
@@ -427,6 +461,93 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
         tags: c.tags.map(t => t.tag.name),
       })),
       meta: { page, limit, total, totalPages: Math.ceil(total / limit) },
+    };
+  });
+
+  /**
+   * GET /contacts/select-ids — resolve a filter into an ordered list of ids.
+   *
+   * The picker shows one page at a time, but "select all 370 matching" and
+   * "select the first 250" need the ids the user cannot see. Returning ids only
+   * keeps that cheap: the full rows stay paginated.
+   *
+   * Order matters here. "First 250" means first in the order on screen, so this
+   * takes the same sort the table is using.
+   */
+  app.get('/contacts/select-ids', async (request, reply) => {
+    if (!request.authUser.tenantId) {
+      return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
+    }
+
+    const query = contactFilterSchema.extend({
+      // How many ids to return. Distinct from the table's page size.
+      take: z.coerce.number().min(1).max(20000).optional(),
+    }).parse(request.query);
+
+    const where = buildContactWhere(request.authUser.tenantId, query);
+
+    const [ids, total] = await Promise.all([
+      app.prisma.contact.findMany({
+        where,
+        orderBy: { [query.sort]: query.order },
+        take: query.take ?? 20000,
+        select: { id: true },
+      }),
+      app.prisma.contact.count({ where }),
+    ]);
+
+    return {
+      success: true,
+      data: {
+        ids: ids.map((c) => c.id),
+        returned: ids.length,
+        total,
+        // True when the cap cut the list short, so the UI can say so rather
+        // than quietly selecting fewer people than the user asked for.
+        truncated: ids.length < total,
+      },
+    };
+  });
+
+  /**
+   * GET /contacts/filter-options — the distinct values worth filtering on.
+   * Populates the picker's country and tag dropdowns with what this tenant
+   * actually has, rather than a hardcoded list.
+   */
+  app.get('/contacts/filter-options', async (request, reply) => {
+    if (!request.authUser.tenantId) {
+      return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
+    }
+    const tenantId = request.authUser.tenantId;
+
+    const [countries, tags, consent] = await Promise.all([
+      app.prisma.contact.groupBy({
+        by: ['country'],
+        where: { tenantId, isActive: true },
+        _count: { country: true },
+        orderBy: { _count: { country: 'desc' } },
+      }),
+      app.prisma.tag.findMany({
+        where: { tenantId },
+        select: { name: true },
+        orderBy: { name: 'asc' },
+      }),
+      app.prisma.contact.groupBy({
+        by: ['consentStatus'],
+        where: { tenantId, isActive: true },
+        _count: { consentStatus: true },
+      }),
+    ]);
+
+    return {
+      success: true,
+      data: {
+        countries: countries
+          .filter((c) => c.country)
+          .map((c) => ({ value: c.country, count: c._count.country })),
+        tags: tags.map((t) => t.name),
+        consentStatus: consent.map((c) => ({ value: c.consentStatus, count: c._count.consentStatus })),
+      },
     };
   });
 
@@ -1599,6 +1720,67 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
 
     const result = await getAISuggestion({ module: 'campaign', context: body });
     return { success: true, data: result };
+  });
+
+  /**
+   * GET /campaigns/tier-capacity — how many more unique people this number may
+   * message in the current rolling 24 hours.
+   *
+   * Until now this only surfaced as a 429 *after* the user had built the whole
+   * campaign and pressed send. The picker needs it up front so "select the
+   * first N" can mean the number Meta will actually accept.
+   *
+   * phoneNumberId is optional: early in the wizard no number has been chosen
+   * yet, and if the tenant has exactly one there is nothing to choose.
+   */
+  app.get('/campaigns/tier-capacity', async (request, reply) => {
+    if (!request.authUser.tenantId) {
+      return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
+    }
+    const tenantId = request.authUser.tenantId;
+    const { phoneNumberId } = z.object({ phoneNumberId: z.string().optional() }).parse(request.query ?? {});
+
+    let phone = null;
+    if (phoneNumberId) {
+      phone = await app.prisma.phoneNumber.findFirst({
+        where: { id: phoneNumberId, tenantId },
+        select: { id: true },
+      });
+      if (!phone) {
+        return reply.status(404).send({ success: false, error: { code: 'PHONE_NOT_FOUND' } });
+      }
+    } else {
+      const phones = await app.prisma.phoneNumber.findMany({
+        where: { tenantId },
+        select: { id: true },
+        take: 2,
+      });
+      // Only auto-pick when there is no ambiguity. Guessing between several
+      // numbers would report headroom for one and send from another.
+      if (phones.length === 1) phone = phones[0];
+    }
+
+    if (!phone) {
+      return {
+        success: true,
+        data: { known: false, reason: phoneNumberId ? 'NOT_FOUND' : 'PHONE_NOT_SELECTED' },
+      };
+    }
+
+    const { getTierUsage } = await import('../services/sendQuota.js');
+    const usage = await getTierUsage(app.prisma, phone.id);
+
+    return {
+      success: true,
+      data: {
+        known: true,
+        phoneNumberId: phone.id,
+        tier: usage.tier,
+        limit: usage.limit,
+        uniqueCustomers24h: usage.uniqueCustomers24h,
+        remaining: usage.remaining,
+      },
+    };
   });
 
   app.post('/campaigns', { preHandler: [app.requirePermission('campaigns', 'create')] }, async (request, reply) => {

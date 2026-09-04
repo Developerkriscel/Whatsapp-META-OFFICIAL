@@ -38,7 +38,9 @@ import {
   Loader2,
   RefreshCw,
   AlertTriangle,
+  ListChecks,
 } from 'lucide-react';
+import ContactPicker from '../components/ContactPicker';
 
 interface Campaign {
   id: string;
@@ -152,6 +154,10 @@ export default function CampaignsPage() {
     scheduledAt: '',
     timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
   });
+  // How the audience is picked. Kept beside `form` rather than inside it
+  // because the manual set is a Set, not a form field.
+  const [audienceMode, setAudienceMode] = useState<'all' | 'segment' | 'manual'>('all');
+  const [selectedContactIds, setSelectedContactIds] = useState<Set<string>>(new Set());
   const [showMediaInput, setShowMediaInput] = useState(false);
   const [mediaUploading, setMediaUploading] = useState(false);
   const [mediaError, setMediaError] = useState('');
@@ -396,6 +402,8 @@ export default function CampaignsPage() {
       scheduledAt: '',
       timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
     });
+    setAudienceMode('all');
+    setSelectedContactIds(new Set());
     setShowMediaInput(false);
     setMediaName('');
     setMediaError('');
@@ -406,6 +414,16 @@ export default function CampaignsPage() {
   const nextStep = () => {
     if (wizardStep === 1 && !form.name) {
       return; // Name is required
+    }
+    // An empty manual selection would silently fall through to a campaign with
+    // no recipients, which the backend rejects only at send time.
+    if (wizardStep === 1 && audienceMode === 'manual' && selectedContactIds.size === 0) {
+      showNotification('error', 'Select at least one recipient, or switch to All Contacts.');
+      return;
+    }
+    if (wizardStep === 1 && audienceMode === 'segment' && (!form.segmentId || form.segmentId === 'all')) {
+      showNotification('error', 'Choose a segment, or switch to another audience option.');
+      return;
     }
     if (wizardStep === 2 && !form.message) {
       return; // Message is required
@@ -424,13 +442,14 @@ export default function CampaignsPage() {
   // Handle form submit
   const buildCampaignPayload = () => {
     // Determine audience type based on selection
-    let audienceType: 'all' | 'segment' | 'contacts' = 'segment';
+    let audienceType: 'all' | 'segment' | 'contacts' = 'all';
     let segmentIds: string[] = [];
     let contactIds: string[] = [];
 
-    if (form.segmentId === 'all') {
-      audienceType = 'all';
-    } else if (form.segmentId) {
+    if (audienceMode === 'manual') {
+      audienceType = 'contacts';
+      contactIds = Array.from(selectedContactIds);
+    } else if (audienceMode === 'segment' && form.segmentId && form.segmentId !== 'all') {
       audienceType = 'segment';
       segmentIds = [form.segmentId];
     }
@@ -889,67 +908,100 @@ export default function CampaignsPage() {
               />
             </div>
 
-            {/* Segment Selection */}
+            {/* Recipients */}
             <div>
               <label className="block text-sm font-medium text-ios-dark mb-2">Recipients</label>
-              <div className="grid grid-cols-2 gap-4">
-                {/* All Contacts Option */}
-                <button
-                  onClick={() => setForm({ ...form, segmentId: 'all' })}
-                  className={`p-4 border rounded-apple-xl text-left transition ${
-                    form.segmentId === 'all'
-                      ? 'border-wa-green bg-wa-green/5 ring-2 ring-wa-green'
-                      : 'border-black/10 hover:border-wa-green/50'
-                  }`}
-                >
-                  <div className="flex items-center gap-3">
-                    <div className={`w-10 h-10 rounded-apple-lg flex items-center justify-center ${
-                      form.segmentId === 'all' ? 'bg-wa-gradient text-white' : 'bg-ios-gray text-ios-muted'
-                    }`}>
-                      <Users className="w-5 h-5" />
-                    </div>
-                    <div>
-                      <p className="font-medium text-ios-dark">All Contacts</p>
-                      <p className="text-sm text-ios-muted">{totalContacts} contacts</p>
-                    </div>
-                  </div>
-                </button>
 
-                {/* Segment Options */}
-                {segments.map((segment) => (
+              {/* How the audience is chosen. Picking people by hand is its own
+                  mode rather than a variant of segments, because it is the only
+                  one where the exact set is pinned at build time. */}
+              <div className="grid grid-cols-3 gap-3 mb-4">
+                {([
+                  { key: 'all', title: 'All Contacts', sub: `${totalContacts} contacts`, Icon: Users },
+                  { key: 'segment', title: 'A Segment', sub: `${segments.length} available`, Icon: Filter },
+                  { key: 'manual', title: 'Choose People', sub: 'Pick individually', Icon: ListChecks },
+                ] as const).map(({ key, title, sub, Icon }) => (
                   <button
-                    key={segment.id}
-                    onClick={() => setForm({ ...form, segmentId: segment.id })}
+                    key={key}
+                    onClick={() => setAudienceMode(key)}
                     className={`p-4 border rounded-apple-xl text-left transition ${
-                      form.segmentId === segment.id
+                      audienceMode === key
                         ? 'border-wa-green bg-wa-green/5 ring-2 ring-wa-green'
                         : 'border-black/10 hover:border-wa-green/50'
                     }`}
                   >
-                    <div className="flex items-center justify-between mb-2">
-                      <p className="font-medium text-ios-dark">{segment.name}</p>
-                      <span className="text-sm bg-wa-green/20 text-wa-green px-2 py-0.5 rounded-full">
-                        {segment.contacts}
-                      </span>
+                    <div className="flex items-center gap-3">
+                      <div className={`w-10 h-10 rounded-apple-lg flex items-center justify-center shrink-0 ${
+                        audienceMode === key ? 'bg-wa-gradient text-white' : 'bg-ios-gray text-ios-muted'
+                      }`}>
+                        <Icon className="w-5 h-5" />
+                      </div>
+                      <div className="min-w-0">
+                        <p className="font-medium text-ios-dark">{title}</p>
+                        <p className="text-sm text-ios-muted truncate">{sub}</p>
+                      </div>
                     </div>
-                    <p className="text-xs text-ios-muted truncate">{segment.criteria}</p>
                   </button>
                 ))}
               </div>
+
+              {audienceMode === 'segment' && (
+                <div className="grid grid-cols-2 gap-4">
+                  {segments.length === 0 && (
+                    <p className="text-sm text-ios-muted col-span-2">
+                      No segments yet — create one on the Segments page, or choose people individually.
+                    </p>
+                  )}
+                  {segments.map((segment) => (
+                    <button
+                      key={segment.id}
+                      onClick={() => setForm({ ...form, segmentId: segment.id })}
+                      className={`p-4 border rounded-apple-xl text-left transition ${
+                        form.segmentId === segment.id
+                          ? 'border-wa-green bg-wa-green/5 ring-2 ring-wa-green'
+                          : 'border-black/10 hover:border-wa-green/50'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between mb-2">
+                        <p className="font-medium text-ios-dark">{segment.name}</p>
+                        <span className="text-sm bg-wa-green/20 text-wa-green px-2 py-0.5 rounded-full">
+                          {segment.contacts}
+                        </span>
+                      </div>
+                      <p className="text-xs text-ios-muted truncate">{segment.criteria}</p>
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              {audienceMode === 'manual' && (
+                <ContactPicker
+                  selectedIds={selectedContactIds}
+                  onChange={setSelectedContactIds}
+                  phoneNumberId={form.phoneNumberId || undefined}
+                />
+              )}
             </div>
 
             {/* Selected Summary */}
-            {form.segmentId && (
+            {audienceMode === 'all' && (
               <div className="bg-wa-green/10 border border-wa-green/20 rounded-apple-lg p-4">
                 <div className="flex items-center gap-3">
                   <CheckCircle2 className="w-5 h-5 text-wa-green" />
                   <div>
-                    <p className="font-medium text-wa-green">
-                      {form.segmentId === 'all' ? `${totalContacts} contacts` : `${selectedSegment?.contacts || 0} contacts`}
-                    </p>
-                    <p className="text-sm text-ios-muted">
-                      {form.segmentId === 'all' ? 'All contacts in your list' : `Segment: ${selectedSegment?.name}`}
-                    </p>
+                    <p className="font-medium text-wa-green">{totalContacts} contacts</p>
+                    <p className="text-sm text-ios-muted">All contacts in your list</p>
+                  </div>
+                </div>
+              </div>
+            )}
+            {audienceMode === 'segment' && form.segmentId && form.segmentId !== 'all' && (
+              <div className="bg-wa-green/10 border border-wa-green/20 rounded-apple-lg p-4">
+                <div className="flex items-center gap-3">
+                  <CheckCircle2 className="w-5 h-5 text-wa-green" />
+                  <div>
+                    <p className="font-medium text-wa-green">{selectedSegment?.contacts || 0} contacts</p>
+                    <p className="text-sm text-ios-muted">Segment: {selectedSegment?.name}</p>
                   </div>
                 </div>
               </div>
@@ -1151,7 +1203,13 @@ export default function CampaignsPage() {
               )}
               <div className="mt-3">
                 <CampaignMessageSuggest
-                  audienceDescription={form.segmentId === 'all' ? 'all contacts' : selectedSegment?.name || 'a segment'}
+                  audienceDescription={
+                    audienceMode === 'manual'
+                      ? `${selectedContactIds.size} hand-picked contacts`
+                      : audienceMode === 'all'
+                        ? 'all contacts'
+                        : selectedSegment?.name || 'a segment'
+                  }
                   existingText={form.message}
                   onApply={(message) => setForm({ ...form, message })}
                 />
@@ -1373,11 +1431,13 @@ export default function CampaignsPage() {
                   <div>
                     <p className="text-xs text-ios-muted uppercase tracking-wide mb-1">Recipients</p>
                     <p className="font-medium text-ios-dark">
-                      {form.segmentId === 'all'
-                        ? `${totalContacts} contacts (All)`
-                        : selectedSegment
-                          ? `${selectedSegment.contacts} contacts (${selectedSegment.name})`
-                          : 'No audience selected'}
+                      {audienceMode === 'manual'
+                        ? `${selectedContactIds.size} contacts (hand-picked)`
+                        : audienceMode === 'all'
+                          ? `${totalContacts} contacts (All)`
+                          : selectedSegment
+                            ? `${selectedSegment.contacts} contacts (${selectedSegment.name})`
+                            : 'No audience selected'}
                     </p>
                   </div>
                   <div>
