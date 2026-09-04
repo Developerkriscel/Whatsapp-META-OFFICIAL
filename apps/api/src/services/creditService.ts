@@ -1,5 +1,5 @@
-/**
- * Credit Service — WhatsApp Business API Cost Management
+﻿/**
+ * Credit Service â€” WhatsApp Business API Cost Management
  *
  * Rates match exact Meta WhatsApp Business Platform pricing
  * Source: https://developers.facebook.com/documentation/business-messaging/whatsapp/pricing
@@ -29,7 +29,7 @@ import { PrismaClient } from '@prisma/client';
 
 // All rates are in credits where 1 credit = $0.0001 USD
 // Formula: credits = (usd_rate / 0.0001)
-// e.g., $0.0618 → 618 credits, $0.0068 → 68 credits
+// e.g., $0.0618 â†’ 618 credits, $0.0068 â†’ 68 credits
 
 export const META_RATES: Record<string, {
   marketing: number;
@@ -274,7 +274,7 @@ export function getDefaultCurrency(): string {
  * Configured sell prices, keyed by country code.
  *
  * getRateCredits runs on every message, so it stays synchronous and reads this
- * cache rather than the database. refreshRateCache() repopulates it — on boot,
+ * cache rather than the database. refreshRateCache() repopulates it â€” on boot,
  * on a timer, and immediately after a superadmin edits a rate, so a price change
  * takes effect without a deploy or restart.
  *
@@ -378,7 +378,7 @@ export function getCostDescription(countryCode: string, category: MessageCategor
   if (credits === 0) {
     return `FREE within 24h customer service window for ${countryName}`;
   }
-  return `$${usd.toFixed(4)} (${credits} credits) — ${catLabel} to ${countryName}`;
+  return `$${usd.toFixed(4)} (${credits} credits) â€” ${catLabel} to ${countryName}`;
 }
 
 /**
@@ -495,7 +495,7 @@ export async function deductCredits(
 }
 
 // ============================================
-// AUTO-RECHARGE — server-side threshold check + off-session Stripe charge
+// AUTO-RECHARGE â€” server-side threshold check + off-session Stripe charge
 // ============================================
 
 export async function maybeAutoRecharge(
@@ -565,7 +565,7 @@ export async function maybeAutoRecharge(
     }
   } catch (err: any) {
     console.error(`[AutoRecharge] charge failed for tenant ${tenantId}:`, err.message);
-    // Failing quietly is intentional here — surfaced to the tenant via their
+    // Failing quietly is intentional here â€” surfaced to the tenant via their
     // Stripe email receipt/failure notice and visible low balance in-app,
     // not by throwing into the message-send path.
   }
@@ -582,11 +582,11 @@ export async function maybeAutoRecharge(
  * batch dispatched in parallel then opened that many transactions at once and
  * exhausted the pool, which capped safe concurrency at about three sends and
  * made bulk campaigns unusably slow. One reservation per batch removes that
- * ceiling entirely — the transaction count stops scaling with recipients.
+ * ceiling entirely â€” the transaction count stops scaling with recipients.
  *
  * Partial reservation is deliberate: a tenant with enough credits for 800 of
  * 1,000 recipients gets 800 messages sent and a clear shortfall, rather than the
- * whole campaign refused or — worse — 800 sent free because each per-message
+ * whole campaign refused or â€” worse â€” 800 sent free because each per-message
  * check was ignored.
  */
 export async function reserveCreditsForBatch(
@@ -647,7 +647,7 @@ export async function reserveCreditsForBatch(
 }
 
 /**
- * Returns the unused part of a batch reservation — the recipients Meta refused.
+ * Returns the unused part of a batch reservation â€” the recipients Meta refused.
  * One transaction for the batch, matching how the credits were taken.
  */
 export async function releaseUnusedReservation(
@@ -663,7 +663,7 @@ export async function releaseUnusedReservation(
 
 /**
  * Returns credits charged for a message the provider then refused. Named
- * separately from addCredits so the ledger reads honestly — a refund is not a
+ * separately from addCredits so the ledger reads honestly â€” a refund is not a
  * purchase, and the two should be distinguishable when reconciling.
  */
 export async function refundCredits(
@@ -800,7 +800,7 @@ export async function recordMessageCredit(
  * Default markup applied when seeding a country for the first time.
  *
  * 1.0 would mean reselling at exactly Meta's price and earning nothing on
- * messages. 1.30 is a starting point, not a recommendation — the whole purpose
+ * messages. 1.30 is a starting point, not a recommendation â€” the whole purpose
  * of moving rates into the database is that this becomes the operator's call,
  * per country and category, from the panel.
  */
@@ -854,241 +854,4 @@ export function getAvailableCountries(): string[] {
   return Object.keys(META_RATES).filter(code =>
     code !== 'OTHER' && !code.startsWith('ROW_')
   );
-}
-
-/**
- * Detect country from phone number
- * Returns country code or 'US' as fallback
- */
-export function detectCountryFromPhone(phoneNumber: string): string {
-  const cleaned = phoneNumber.replace(/\D/g, '');
-
-  // Country code prefixes
-  const prefixes: [string, string][] = [
-    ['1', 'US'],      // US/Canada
-    ['7', 'RU'],      // Russia
-    ['20', 'EG'],     // Egypt
-    ['27', 'ZA'],     // South Africa
-    ['30', 'GR'],     // Greece (not in our list)
-    ['31', 'NL'],     // Netherlands
-    ['32', 'BE'],     // Belgium (not in our list)
-    ['33', 'FR'],     // France
-    ['34', 'ES'],     // Spain
-    ['36', 'HU'],     // Hungary (not in our list)
-    ['39', 'IT'],     // Italy
-    ['40', 'RO'],     // Romania (not in our list)
-    ['41', 'CH'],     // Switzerland (not in our list)
-    ['44', 'GB'],     // UK
-    ['45', 'DK'],     // Denmark (not in our list)
-    ['46', 'SE'],     // Sweden (not in our list)
-    ['47', 'NO'],     // Norway (not in our list)
-    ['48', 'PL'],     // Poland
-    ['49', 'DE'],     // Germany
-    ['51', 'PE'],     // Peru
-    ['52', 'MX'],     // Mexico
-    ['53', 'CU'],     // Cuba (not in our list)
-    ['54', 'AR'],     // Argentina
-    ['55', 'BR'],     // Brazil
-    ['56', 'CL'],     // Chile
-    ['57', 'CO'],     // Colombia
-    ['58', 'VE'],     // Venezuela (not in our list)
-    ['60', 'MY'],     // Malaysia
-    ['62', 'ID'],     // Indonesia
-    ['63', 'PH'],     // Philippines
-    ['64', 'NZ'],     // New Zealand (not in our list)
-    ['65', 'SG'],     // Singapore
-    ['66', 'TH'],     // Thailand
-    ['81', 'JP'],     // Japan (not in our list)
-    ['82', 'KR'],     // South Korea (not in our list)
-    ['84', 'VN'],     // Vietnam
-    ['86', 'CN'],     // China (not in our list)
-    ['90', 'TR'],     // Turkey
-    ['91', 'IN'],     // India
-    ['92', 'PK'],     // Pakistan
-    ['93', 'AF'],     // Afghanistan (not in our list)
-    ['94', 'LK'],     // Sri Lanka (not in our list)
-    ['95', 'MM'],     // Myanmar (not in our list)
-    ['98', 'IR'],     // Iran (not in our list)
-    ['211', 'SS'],    // South Sudan (not in our list)
-    ['212', 'MA'],    // Morocco (not in our list)
-    ['213', 'DZ'],    // Algeria (not in our list)
-    ['216', 'TN'],    // Tunisia (not in our list)
-    ['218', 'LY'],    // Libya (not in our list)
-    ['220', 'GM'],    // Gambia (not in our list)
-    ['221', 'SN'],    // Senegal (not in our list)
-    ['222', 'MR'],    // Mauritania (not in our list)
-    ['223', 'ML'],    // Mali (not in our list)
-    ['224', 'GN'],    // Guinea (not in our list)
-    ['225', 'CI'],    // Ivory Coast (not in our list)
-    ['226', 'BF'],    // Burkina Faso (not in our list)
-    ['227', 'NE'],    // Niger (not in our list)
-    ['228', 'TG'],    // Togo (not in our list)
-    ['229', 'BJ'],    // Benin (not in our list)
-    ['230', 'MU'],    // Mauritius (not in our list)
-    ['231', 'LR'],    // Liberia (not in our list)
-    ['232', 'SL'],    // Sierra Leone (not in our list)
-    ['233', 'GH'],    // Ghana (not in our list)
-    ['234', 'NG'],    // Nigeria
-    ['235', 'TD'],    // Chad (not in our list)
-    ['236', 'CF'],    // Central African Rep (not in our list)
-    ['237', 'CM'],    // Cameroon (not in our list)
-    ['238', 'CV'],    // Cape Verde (not in our list)
-    ['239', 'ST'],    // Sao Tome (not in our list)
-    ['240', 'GQ'],    // Equatorial Guinea (not in our list)
-    ['241', 'GA'],    // Gabon (not in our list)
-    ['242', 'CG'],    // Congo (not in our list)
-    ['243', 'CD'],    // DR Congo (not in our list)
-    ['244', 'AO'],    // Angola (not in our list)
-    ['245', 'GW'],    // Guinea-Bissau (not in our list)
-    ['246', 'IO'],    // British Indian Ocean (not in our list)
-    ['247', 'AC'],    // Ascension (not in our list)
-    ['248', 'SC'],    // Seychelles (not in our list)
-    ['249', 'SD'],    // Sudan (not in our list)
-    ['250', 'RW'],    // Rwanda (not in our list)
-    ['251', 'ET'],    // Ethiopia (not in our list)
-    ['252', 'SO'],    // Somalia (not in our list)
-    ['253', 'DJ'],    // Djibouti (not in our list)
-    ['254', 'KE'],    // Kenya (not in our list)
-    ['255', 'TZ'],    // Tanzania (not in our list)
-    ['256', 'UG'],    // Uganda (not in our list)
-    ['257', 'BI'],    // Burundi (not in our list)
-    ['258', 'MZ'],    // Mozambique (not in our list)
-    ['260', 'ZM'],    // Zambia (not in our list)
-    ['261', 'MG'],    // Madagascar (not in our list)
-    ['263', 'ZW'],    // Zimbabwe (not in our list)
-    ['264', 'NA'],    // Namibia (not in our list)
-    ['265', 'MW'],    // Malawi (not in our list)
-    ['266', 'LS'],    // Lesotho (not in our list)
-    ['267', 'BW'],    // Botswana (not in our list)
-    ['268', 'SZ'],    // Eswatini (not in our list)
-    ['269', 'KM'],    // Comoros (not in our list)
-    ['291', 'ER'],    // Eritrea (not in our list)
-    ['297', 'AW'],    // Aruba (not in our list)
-    ['298', 'FO'],    // Faroe Islands (not in our list)
-    ['299', 'GL'],    // Greenland (not in our list)
-    ['350', 'GI'],    // Gibraltar (not in our list)
-    ['351', 'PT'],    // Portugal (not in our list)
-    ['352', 'LU'],    // Luxembourg (not in our list)
-    ['353', 'IE'],    // Ireland (not in our list)
-    ['354', 'IS'],    // Iceland (not in our list)
-    ['355', 'AL'],    // Albania (not in our list)
-    ['356', 'MT'],    // Malta (not in our list)
-    ['357', 'CY'],    // Cyprus (not in our list)
-    ['358', 'FI'],    // Finland (not in our list)
-    ['359', 'BG'],    // Bulgaria (not in our list)
-    ['370', 'LT'],    // Lithuania (not in our list)
-    ['371', 'LV'],    // Latvia (not in our list)
-    ['372', 'EE'],    // Estonia (not in our list)
-    ['373', 'MD'],    // Moldova (not in our list)
-    ['374', 'AM'],    // Armenia (not in our list)
-    ['375', 'BY'],    // Belarus (not in our list)
-    ['376', 'AD'],    // Andorra (not in our list)
-    ['377', 'MC'],    // Monaco (not in our list)
-    ['378', 'SM'],    // San Marino (not in our list)
-    ['380', 'UA'],    // Ukraine (not in our list)
-    ['381', 'RS'],    // Serbia (not in our list)
-    ['382', 'ME'],    // Montenegro (not in our list)
-    ['383', 'XK'],    // Kosovo (not in our list)
-    ['385', 'HR'],    // Croatia (not in our list)
-    ['386', 'SI'],    // Slovenia (not in our list)
-    ['387', 'BA'],    // Bosnia (not in our list)
-    ['389', 'MK'],    // North Macedonia (not in our list)
-    ['420', 'CZ'],    // Czech Republic (not in our list)
-    ['421', 'SK'],    // Slovakia (not in our list)
-    ['423', 'LI'],    // Liechtenstein (not in our list)
-    ['509', 'HT'],    // Haiti (not in our list)
-    ['590', 'GP'],    // Guadeloupe (not in our list)
-    ['591', 'BO'],    // Bolivia (not in our list)
-    ['592', 'GY'],    // Guyana (not in our list)
-    ['593', 'EC'],    // Ecuador (not in our list)
-    ['595', 'PY'],    // Paraguay (not in our list)
-    ['596', 'MQ'],    // Martinique (not in our list)
-    ['597', 'SR'],    // Suriname (not in our list)
-    ['598', 'UY'],    // Uruguay (not in our list)
-    ['599', 'CW'],    // Curaçao (not in our list)
-    ['670', 'TL'],    // Timor-Leste (not in our list)
-    ['672', 'NF'],    // Norfolk Island (not in our list)
-    ['673', 'BN'],    // Brunei (not in our list)
-    ['675', 'PG'],    // Papua New Guinea (not in our list)
-    ['676', 'TO'],    // Tonga (not in our list)
-    ['677', 'SB'],    // Solomon Islands (not in our list)
-    ['678', 'VU'],    // Vanuatu (not in our list)
-    ['679', 'FJ'],    // Fiji (not in our list)
-    ['680', 'PW'],    // Palau (not in our list)
-    ['685', 'WS'],    // Samoa (not in our list)
-    ['686', 'KI'],    // Kiribati (not in our list)
-    ['687', 'NC'],    // New Caledonia (not in our list)
-    ['688', 'TV'],    // Tuvalu (not in our list)
-    ['689', 'PF'],    // French Polynesia (not in our list)
-    ['690', 'TK'],    // Tokelau (not in our list)
-    ['691', 'FM'],    // Micronesia (not in our list)
-    ['692', 'MH'],    // Marshall Islands (not in our list)
-    ['850', 'KP'],    // North Korea (not in our list)
-    ['852', 'HK'],    // Hong Kong
-    ['853', 'MO'],    // Macau (not in our list)
-    ['855', 'KH'],    // Cambodia (not in our list)
-    ['856', 'LA'],    // Laos (not in our list)
-    ['880', 'BD'],    // Bangladesh
-    ['886', 'TW'],    // Taiwan (not in our list)
-    ['960', 'MV'],    // Maldives (not in our list)
-    ['961', 'LB'],    // Lebanon (not in our list)
-    ['962', 'JO'],    // Jordan (not in our list)
-    ['963', 'SY'],    // Syria (not in our list)
-    ['964', 'IQ'],    // Iraq (not in our list)
-    ['965', 'KW'],    // Kuwait (not in our list)
-    ['966', 'SA'],    // Saudi Arabia
-    ['967', 'YE'],    // Yemen (not in our list)
-    ['968', 'OM'],    // Oman (not in our list)
-    ['970', 'PS'],    // Palestine (not in our list)
-    ['971', 'AE'],    // UAE
-    ['972', 'IL'],    // Israel
-    ['973', 'BH'],    // Bahrain (not in our list)
-    ['974', 'QA'],    // Qatar (not in our list)
-    ['975', 'BT'],    // Bhutan (not in our list)
-    ['976', 'MN'],    // Mongolia (not in our list)
-    ['977', 'NP'],    // Nepal (not in our list)
-    ['992', 'TJ'],    // Tajikistan (not in our list)
-    ['993', 'TM'],    // Turkmenistan (not in our list)
-    ['994', 'AZ'],    // Azerbaijan (not in our list)
-    ['995', 'GE'],    // Georgia (not in our list)
-    ['996', 'KG'],    // Kyrgyzstan (not in our list)
-    ['997', 'KZ'],    // Kazakhstan (not in our list)
-    ['998', 'UZ'],    // Uzbekistan (not in our list),
-    ['1242', 'BS'],   // Bahamas (not in our list)
-    ['1246', 'BB'],   // Barbados (not in our list)
-    ['1264', 'AI'],   // Anguilla (not in our list)
-    ['1268', 'AG'],   // Antigua (not in our list)
-    ['1284', 'VG'],   // British Virgin Islands (not in our list)
-    ['1340', 'VI'],   // US Virgin Islands
-    ['1345', 'KY'],   // Cayman Islands (not in our list)
-    ['1441', 'BM'],   // Bermuda (not in our list)
-    ['1473', 'GD'],   // Grenada (not in our list)
-    ['1649', 'TC'],   // Turks and Caicos (not in our list)
-    ['1664', 'MS'],   // Montserrat (not in our list)
-    ['1721', 'SX'],   // Sint Maarten (not in our list)
-    ['1758', 'LC'],   // Saint Lucia (not in our list)
-    ['1767', 'DM'],   // Dominica (not in our list)
-    ['1784', 'VC'],   // Saint Vincent (not in our list)
-    ['1787', 'PR'],   // Puerto Rico
-    ['1809', 'DO'],   // Dominican Republic (not in our list)
-    ['1868', 'TT'],   // Trinidad and Tobago (not in our list)
-    ['1869', 'KN'],   // Saint Kitts (not in our list)
-    ['1876', 'JM'],   // Jamaica (not in our list)
-  ];
-
-  for (const [prefix, countryCode] of prefixes) {
-    if (cleaned.startsWith(prefix)) {
-      // Special case: 1 is shared between US, CA, and various Caribbean
-      if (prefix === '1') {
-        const areaCode = cleaned.substring(1, 4);
-        // Canadian area codes
-        const caAreaCodes = ['204', '226', '236', '249', '250', '263', '289', '306', '343', '365', '367', '403', '416', '418', '431', '437', '438', '450', '467', '478', '481', '506', '514', '519', '548', '579', '581', '587', '604', '613', '639', '647', '672', '705', '709', '742', '778', '780', '782', '807', '819', '825', '867', '873', '902', '905'];
-        if (caAreaCodes.includes(areaCode)) return 'CA';
-        return 'US'; // Default for +1
-      }
-      return countryCode;
-    }
-  }
-
-  return 'US'; // Default fallback
 }

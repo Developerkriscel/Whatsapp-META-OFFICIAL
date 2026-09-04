@@ -11,6 +11,28 @@ import { checkTemplateContent, getAISuggestion } from '../services/aiAssist.js';
 type SegmentCondition = { field: string; operator: string; value?: string };
 
 /**
+ * Confirms every id in `ids` belongs to `tenantId` for the given model.
+ *
+ * Scoping the record you fetch by id is not enough on its own: a foreign key
+ * that arrives in a request *body* is just as much a handle on someone else's
+ * row. A campaign, for instance, is created inside the caller's own tenant --
+ * but nothing stopped it from carrying another tenant's phoneNumberId, and the
+ * send path then dispatched from that tenant's WhatsApp number using their
+ * access token. Every body-supplied FK goes through here first.
+ */
+async function assertTenantOwns(
+  prisma: any,
+  model: 'template' | 'phoneNumber' | 'contact' | 'segment' | 'user' | 'team',
+  ids: Array<string | null | undefined>,
+  tenantId: string
+): Promise<boolean> {
+  const wanted = [...new Set(ids.filter((id): id is string => !!id))];
+  if (wanted.length === 0) return true;
+  const found = await prisma[model].count({ where: { id: { in: wanted }, tenantId } });
+  return found === wanted.length;
+}
+
+/**
  * Turns a segment's saved conditions + match type into a live Prisma Contact where-clause.
  * Segments are evaluated live (not materialized) so campaigns always see current data
  * without requiring an explicit sync step first.
@@ -1062,6 +1084,13 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
       isBotActive: z.boolean().optional(),
     }).parse(request.body);
 
+    if (!(await assertTenantOwns(app.prisma, 'user', [body.assignedToId], request.authUser.tenantId!))) {
+      return reply.status(404).send({
+        success: false,
+        error: { code: 'NOT_FOUND', message: 'Assignee not found' },
+      });
+    }
+
     const conversation = await app.prisma.conversation.update({
       where: { id: conversationId, tenantId: request.authUser.tenantId },
       data: body as Prisma.ConversationUncheckedUpdateInput,
@@ -1087,6 +1116,19 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
       userId: z.string().optional(),
       teamId: z.string().optional(),
     }).parse(request.body);
+
+    // An assignee from another tenant would surface that person's name through
+    // the assignedTo/assignedTeam includes below.
+    const ownsAssignees = await Promise.all([
+      assertTenantOwns(app.prisma, 'user', [userId], request.authUser.tenantId!),
+      assertTenantOwns(app.prisma, 'team', [teamId], request.authUser.tenantId!),
+    ]);
+    if (ownsAssignees.some((ok) => !ok)) {
+      return reply.status(404).send({
+        success: false,
+        error: { code: 'NOT_FOUND', message: 'Assignee not found' },
+      });
+    }
 
     const updateData: any = { status: 'OPEN' };
     if (userId) updateData.assignedToId = userId;
@@ -1588,6 +1630,23 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
       });
     }
 
+    // Every id here arrived from the client, so each one is checked against the
+    // caller's tenant before it is stored. A campaign row that references
+    // another tenant's phone number or template would otherwise send from their
+    // WhatsApp number, on their quality rating, with their access token.
+    const ownsRefs = await Promise.all([
+      assertTenantOwns(app.prisma, 'template', [body.templateId], request.authUser.tenantId!),
+      assertTenantOwns(app.prisma, 'phoneNumber', [body.phoneNumberId], request.authUser.tenantId!),
+      assertTenantOwns(app.prisma, 'segment', body.segmentIds || [], request.authUser.tenantId!),
+      assertTenantOwns(app.prisma, 'contact', body.contactIds || [], request.authUser.tenantId!),
+    ]);
+    if (ownsRefs.some((ok) => !ok)) {
+      return reply.status(404).send({
+        success: false,
+        error: { code: 'NOT_FOUND', message: 'One or more selected items could not be found' },
+      });
+    }
+
     // Calculate total recipients for tracking
     let totalRecipients = 0;
     if (body.audienceType === 'contacts' && body.contactIds) {
@@ -1883,6 +1942,19 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
 
     if (!campaign) {
       return reply.status(404).send({ success: false, error: { code: 'NOT_FOUND' } });
+    }
+
+    // Same rule as create: owning the campaign does not entitle you to point it
+    // at another tenant's template or phone number.
+    const patchOwnsRefs = await Promise.all([
+      assertTenantOwns(app.prisma, 'template', [body.templateId], request.authUser.tenantId),
+      assertTenantOwns(app.prisma, 'phoneNumber', [body.phoneNumberId], request.authUser.tenantId),
+    ]);
+    if (patchOwnsRefs.some((ok) => !ok)) {
+      return reply.status(404).send({
+        success: false,
+        error: { code: 'NOT_FOUND', message: 'One or more selected items could not be found' },
+      });
     }
 
     const updated = await app.prisma.campaign.update({
@@ -3889,7 +3961,7 @@ async function sendCampaignMessagesInner(
   tenantId: string
 ): Promise<void> {
   const campaign = await app.prisma.campaign.findUnique({
-    where: { id: campaignId },
+    where: { id: campaignId, tenantId },
     include: {
       template: true,
       phoneNumber: true,
@@ -3898,13 +3970,31 @@ async function sendCampaignMessagesInner(
 
   if (!campaign) return;
 
+  // The routes validate these ids on the way in, but this is the last gate
+  // before real messages go out on a real WhatsApp number, and campaign rows
+  // created before that validation existed may still carry foreign ids.
+  // Sending from another tenant's number is not a recoverable mistake.
+  if (
+    (campaign.template && campaign.template.tenantId !== tenantId) ||
+    (campaign.phoneNumber && campaign.phoneNumber.tenantId !== tenantId)
+  ) {
+    console.error(`[Campaign] ${campaignId} references another tenant's template or phone number — refusing to send`);
+    await app.prisma.campaign.update({
+      where: { id: campaignId },
+      data: { status: 'FAILED', completedAt: new Date() },
+    }).catch(() => {});
+    return;
+  }
+
   // Build audience contacts
   let contactIds: string[] = [];
 
   if (campaign.audienceType === 'contacts' && campaign.contactIds.length > 0) {
-    // Filter out opted-out contacts
+    // Filter out opted-out contacts. Scoped by tenant: an unscoped `id IN (...)`
+    // here would message another tenant's customers and copy their numbers into
+    // this tenant's message log.
     const contacts = await app.prisma.contact.findMany({
-      where: { id: { in: campaign.contactIds }, consentStatus: { not: 'OPTED_OUT' } },
+      where: { id: { in: campaign.contactIds }, tenantId, consentStatus: { not: 'OPTED_OUT' } },
       select: { id: true },
     });
     contactIds = contacts.map(c => c.id);
