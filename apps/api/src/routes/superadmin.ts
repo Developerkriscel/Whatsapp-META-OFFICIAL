@@ -92,6 +92,100 @@ export async function registerSuperadminRoutes(app: FastifyInstance): Promise<vo
    * refresh that number, not that this endpoint should start fanning out live
    * Graph requests per tenant.
    */
+  /**
+   * GET /billing-reality — what Meta bills the platform against what the
+   * platform bills its tenants, in money rather than credits.
+   *
+   * The rate card carries an assumed Meta cost per country that somebody has to
+   * keep current by hand. This reports what Meta actually said, per message, so
+   * the assumption can be checked instead of trusted — including the traffic
+   * Meta did not bill for at all, which is pure margin when a tenant is charged
+   * for it anyway.
+   */
+  app.get('/billing-reality', async (request, reply) => {
+    const { days } = z.object({ days: z.coerce.number().min(1).max(365).default(30) })
+      .parse(request.query ?? {});
+    const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+    const where = { direction: 'OUTGOING' as const, createdAt: { gte: since } };
+    const num = (v: any) => (v == null ? 0 : Number(v));
+
+    const [totals, perTenant, byCategory, byBillable, tenants] = await Promise.all([
+      app.prisma.message.aggregate({
+        where: { ...where, metaCostUsd: { not: null } },
+        _sum: { metaCostUsd: true, platformCostUsd: true },
+        _count: true,
+      }),
+      app.prisma.message.groupBy({
+        by: ['tenantId'],
+        where: { ...where, metaCostUsd: { not: null } },
+        _sum: { metaCostUsd: true, platformCostUsd: true },
+        _count: true,
+      }),
+      app.prisma.message.groupBy({
+        by: ['metaCategory'],
+        where: { ...where, metaCategory: { not: null } },
+        _sum: { metaCostUsd: true, platformCostUsd: true },
+        _count: true,
+      }),
+      app.prisma.message.groupBy({
+        by: ['metaBillable'],
+        where: { ...where, metaBillable: { not: null } },
+        _count: true,
+      }),
+      app.prisma.tenant.findMany({ select: { id: true, name: true } }),
+    ]);
+
+    const nameOf = new Map(tenants.map((t) => [t.id, t.name]));
+    const metaCost = num(totals._sum.metaCostUsd);
+    const charged = num(totals._sum.platformCostUsd);
+
+    const totalOutgoing = await app.prisma.message.count({ where });
+
+    return {
+      success: true,
+      data: {
+        windowDays: days,
+        currency: 'USD',
+        platform: {
+          messagesPriced: totals._count,
+          messagesTotal: totalOutgoing,
+          // Anything Meta has not reported on yet is excluded rather than
+          // guessed, so this is a floor on spend, not an estimate.
+          awaitingPricing: Math.max(0, totalOutgoing - totals._count),
+          metaBilledUsd: Math.round(metaCost * 10000) / 10000,
+          tenantsChargedUsd: Math.round(charged * 10000) / 10000,
+          grossMarginUsd: Math.round((charged - metaCost) * 10000) / 10000,
+          grossMarginPct: metaCost > 0 ? Math.round(((charged - metaCost) / metaCost) * 1000) / 10 : null,
+        },
+        billableSplit: byBillable.map((b) => ({
+          billable: b.metaBillable,
+          messages: b._count,
+        })),
+        byCategory: byCategory.map((c) => ({
+          category: c.metaCategory,
+          messages: c._count,
+          metaBilledUsd: Math.round(num(c._sum.metaCostUsd) * 10000) / 10000,
+          chargedUsd: Math.round(num(c._sum.platformCostUsd) * 10000) / 10000,
+        })),
+        byTenant: perTenant
+          .map((t) => {
+            const cost = num(t._sum.metaCostUsd);
+            const rev = num(t._sum.platformCostUsd);
+            return {
+              tenantId: t.tenantId,
+              tenantName: nameOf.get(t.tenantId) || t.tenantId,
+              messages: t._count,
+              metaBilledUsd: Math.round(cost * 10000) / 10000,
+              chargedUsd: Math.round(rev * 10000) / 10000,
+              marginUsd: Math.round((rev - cost) * 10000) / 10000,
+              marginPct: cost > 0 ? Math.round(((rev - cost) / cost) * 1000) / 10 : null,
+            };
+          })
+          .sort((a, b) => b.chargedUsd - a.chargedUsd),
+      },
+    };
+  });
+
   app.get('/whatsapp-health', async (request, reply) => {
     const since24h = new Date(Date.now() - 24 * 60 * 60 * 1000);
 

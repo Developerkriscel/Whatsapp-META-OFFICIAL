@@ -696,9 +696,27 @@ model Message {
   errorCode    String?
   errorMessage String?
 
-  // Cost tracking
+  // Cost tracking.
+  //
+  // metaCostUsd is what Meta bills us for this message; platformCostUsd is what
+  // we charged the tenant for it. Both columns existed for a long time and were
+  // never written, so no question about real spend or margin could be answered.
+  //
+  // The fields below come straight from the `pricing` block on Meta's status
+  // webhook, which is the only authoritative statement of what was billed:
+  // Meta decides the category itself, and can classify a message differently
+  // from the template's own category, or not bill it at all.
   metaCostUsd     Decimal? @db.Decimal(10, 6)
   platformCostUsd Decimal? @db.Decimal(10, 6)
+
+  /// Meta's own verdict. False for free service-window and free-entry-point messages.
+  metaBillable     Boolean?
+  /// Meta's category for billing - may differ from the template's category.
+  metaCategory     String?
+  /// "PMP" (per-message) or the legacy "CBP" (conversation-based).
+  metaPricingModel String?
+  /// e.g. "regular", "free_customer_service", "free_entry_point".
+  metaPricingType  String?
 
   isWithinBusinessHours Boolean?
   isInternalNote        Boolean  @default(false)

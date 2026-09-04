@@ -423,7 +423,11 @@ async function processStatusUpdate(
   // webhook) and its campaignId (to know which campaign to credit at all).
   const existing = await app.prisma.message.findFirst({
     where: { metaMessageId: messageId, tenantId },
-    select: { id: true, status: true, campaignId: true, conversationId: true },
+    select: {
+      id: true, status: true, campaignId: true, conversationId: true,
+      metaCostUsd: true,
+      contact: { select: { country: true } },
+    },
   });
 
   if (!existing) {
@@ -437,6 +441,17 @@ async function processStatusUpdate(
     where: { id: existing.id },
     data: updateData,
   });
+
+  // Meta states what it billed in a `pricing` block on the status webhook, and
+  // that is the only authoritative source: it decides the category itself, and
+  // marks free service-window messages non-billable. This was being discarded,
+  // so nothing in the product could say what a message, a campaign or a tenant
+  // actually cost. Recorded once — the same message reports sent, delivered and
+  // read, and all three carry the block.
+  if (status.pricing && existing.metaCostUsd == null) {
+    const { recordMessageCost } = await import('../services/messageCosting.js');
+    await recordMessageCost(app.prisma, existing.id, status.pricing, existing.contact?.country);
+  }
 
   // Campaign cards showed 0% delivered/read forever — the per-message
   // status was updated above, but nothing ever rolled that back up into

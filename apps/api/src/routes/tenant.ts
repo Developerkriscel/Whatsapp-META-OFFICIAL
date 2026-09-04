@@ -234,9 +234,16 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
       _count: true,
     });
 
+    // status is terminal, not cumulative: a message that was read is READ, not
+    // DELIVERED. Counting only DELIVERED excluded every message that had been
+    // read, which is why the dashboard could show a read rate higher than its
+    // delivery rate — impossible, since reading requires delivery.
+    const countOf = (...wanted: string[]) =>
+      messageStats.filter((m) => wanted.includes(m.status)).reduce((n, m) => n + m._count, 0);
+
     const totalSent = messageStats.reduce((sum, s) => sum + s._count, 0);
-    const delivered = messageStats.find(s => s.status === 'DELIVERED')?._count || 0;
-    const read = messageStats.find(s => s.status === 'READ')?._count || 0;
+    const delivered = countOf('DELIVERED', 'READ');
+    const read = countOf('READ');
 
     return {
       success: true,
@@ -248,6 +255,100 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
         activeAgents,
         deliveryRate: totalSent > 0 ? Math.round((delivered / totalSent) * 100) : 0,
         readRate: delivered > 0 ? Math.round((read / delivered) * 100) : 0,
+      },
+    };
+  });
+
+  /**
+   * GET /dashboard/messaging — delivery funnel and real spend, in money.
+   *
+   * The overview reports counts and percentages, which say nothing about what
+   * the messaging cost. Everything the tenant sees elsewhere is denominated in
+   * credits, an internal unit that has to be mentally divided by 10,000 to mean
+   * anything. This reports actual currency, from what Meta said it billed.
+   *
+   * Spend covers only messages Meta has reported on. A message still in flight
+   * has no cost yet, and guessing one would misstate the number.
+   */
+  app.get('/dashboard/messaging', async (request, reply) => {
+    const tenantId = request.authUser.tenantId;
+    if (!tenantId) {
+      return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
+    }
+
+    const { days } = z.object({ days: z.coerce.number().min(1).max(365).default(30) })
+      .parse(request.query ?? {});
+    const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+    const where = { tenantId, direction: 'OUTGOING' as const, createdAt: { gte: since } };
+
+    const [byStatus, costed, byCategory, inbound] = await Promise.all([
+      app.prisma.message.groupBy({ by: ['status'], where, _count: true }),
+      app.prisma.message.aggregate({
+        where: { ...where, metaCostUsd: { not: null } },
+        _sum: { metaCostUsd: true, platformCostUsd: true },
+        _count: true,
+      }),
+      app.prisma.message.groupBy({
+        by: ['metaCategory'],
+        where: { ...where, metaCategory: { not: null } },
+        _count: true,
+        _sum: { metaCostUsd: true, platformCostUsd: true },
+      }),
+      app.prisma.message.count({ where: { tenantId, direction: 'INCOMING', createdAt: { gte: since } } }),
+    ]);
+
+    const countOf = (...wanted: string[]) =>
+      byStatus.filter((m) => wanted.includes(m.status)).reduce((n, m) => n + m._count, 0);
+
+    const total = byStatus.reduce((n, m) => n + m._count, 0);
+    // Cumulative funnel: each stage implies the ones before it.
+    const sent = countOf('SENT', 'DELIVERED', 'READ');
+    const delivered = countOf('DELIVERED', 'READ');
+    const read = countOf('READ');
+    const failed = countOf('FAILED');
+    const pending = countOf('PENDING', 'QUEUED');
+
+    const num = (v: any) => (v == null ? 0 : Number(v));
+    const metaSpend = num(costed._sum.metaCostUsd);
+    const charged = num(costed._sum.platformCostUsd);
+    const priced = costed._count;
+
+    const freeCount = await app.prisma.message.count({ where: { ...where, metaBillable: false } });
+
+    const pct = (a: number, b: number) => (b > 0 ? Math.round((a / b) * 1000) / 10 : 0);
+
+    return {
+      success: true,
+      data: {
+        windowDays: days,
+        funnel: {
+          total, sent, delivered, read, failed, pending, inbound,
+          deliveryRate: pct(delivered, sent),
+          readRate: pct(read, delivered),
+          failureRate: pct(failed, total),
+        },
+        spend: {
+          currency: 'USD',
+          // What Meta billed us for this tenant's traffic.
+          metaCostUsd: Math.round(metaSpend * 10000) / 10000,
+          // What the tenant was charged for it.
+          chargedUsd: Math.round(charged * 10000) / 10000,
+          marginUsd: Math.round((charged - metaSpend) * 10000) / 10000,
+          marginPct: metaSpend > 0 ? Math.round(((charged - metaSpend) / metaSpend) * 1000) / 10 : null,
+          avgCostPerMessageUsd: priced > 0 ? Math.round((charged / priced) * 1000000) / 1000000 : 0,
+          // Messages Meta did not bill for — free service-window traffic.
+          freeMessages: freeCount,
+          // Costing only covers what Meta has reported on. Saying so keeps the
+          // number honest rather than looking like under-reported spend.
+          pricedMessages: priced,
+          awaitingPricing: Math.max(0, total - priced),
+        },
+        byCategory: byCategory.map((c) => ({
+          category: c.metaCategory,
+          messages: c._count,
+          metaCostUsd: Math.round(num(c._sum.metaCostUsd) * 10000) / 10000,
+          chargedUsd: Math.round(num(c._sum.platformCostUsd) * 10000) / 10000,
+        })),
       },
     };
   });
@@ -287,9 +388,16 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
       _count: true,
     });
 
+    // status is terminal, not cumulative: a message that was read is READ, not
+    // DELIVERED. Counting only DELIVERED excluded every message that had been
+    // read, which is why the dashboard could show a read rate higher than its
+    // delivery rate — impossible, since reading requires delivery.
+    const countOf = (...wanted: string[]) =>
+      messageStats.filter((m) => wanted.includes(m.status)).reduce((n, m) => n + m._count, 0);
+
     const totalSent = messageStats.reduce((sum, s) => sum + s._count, 0);
-    const delivered = messageStats.find(s => s.status === 'DELIVERED')?._count || 0;
-    const read = messageStats.find(s => s.status === 'READ')?._count || 0;
+    const delivered = countOf('DELIVERED', 'READ');
+    const read = countOf('READ');
 
     return {
       success: true,
