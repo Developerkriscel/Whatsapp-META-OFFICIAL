@@ -329,6 +329,57 @@ export async function registerSuperadminRoutes(app: FastifyInstance): Promise<vo
     };
   });
 
+  /**
+   * GET /meta-reconciliation — our billing against Meta's own figures.
+   *
+   * Volumes, countries, categories and delivery counts come from Meta's API and
+   * are real. Amounts do not: Meta refuses COST for accounts that bill through a
+   * partner, saying so explicitly, and that refusal is passed through here
+   * rather than hidden, so it is clear which half of this is invoice-grade.
+   *
+   * The drift line is the point. We record a message when its pricing webhook
+   * arrives; Meta bills on delivery. Charging for more messages than Meta
+   * billed is money taken from a tenant for nothing.
+   */
+  app.get('/meta-reconciliation', async (request, reply) => {
+    const { tenantId, days } = z.object({
+      tenantId: z.string().optional(),
+      days: z.coerce.number().min(1).max(90).default(30),
+    }).parse(request.query ?? {});
+
+    const to = new Date();
+    const from = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+
+    // Default to whichever tenant actually sends, so the endpoint is useful
+    // without having to look up an id first.
+    let target = tenantId;
+    if (!target) {
+      const busiest = await app.prisma.message.groupBy({
+        by: ['tenantId'],
+        where: { direction: 'OUTGOING', createdAt: { gte: from } },
+        _count: true,
+        orderBy: { _count: { tenantId: 'desc' } },
+        take: 1,
+      });
+      target = busiest[0]?.tenantId;
+    }
+    if (!target) {
+      return reply.status(404).send({
+        success: false,
+        error: { code: 'NO_TENANT', message: 'No tenant has sent messages in this window.' },
+      });
+    }
+
+    const { reconcileWithMeta } = await import('../services/metaUsage.js');
+    const result = await reconcileWithMeta(app.prisma, target, from, to);
+    if ('error' in result) {
+      return reply.status(502).send({ success: false, error: { code: 'META_UNAVAILABLE', message: result.error } });
+    }
+
+    const tenant = await app.prisma.tenant.findUnique({ where: { id: target }, select: { name: true } });
+    return { success: true, data: { tenantId: target, tenantName: tenant?.name, ...result } };
+  });
+
   app.get('/settings/currency', async (_request, _reply) => {
     const { getCurrencyContext, DEFAULT_FX } = await import('../services/currency.js');
     const fx = await getCurrencyContext(app.prisma);

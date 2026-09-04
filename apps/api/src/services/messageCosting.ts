@@ -104,7 +104,7 @@ export async function recordMessageCost(
     const { metaCostUsd: metaCost, platformCostUsd: platformCost } =
       await pricePairFor(prisma, country || 'OTHER', pricing);
 
-    await prisma.message.update({
+    const msg = await prisma.message.update({
       where: { id: messageId },
       data: {
         metaBillable: pricing.billable ?? null,
@@ -114,8 +114,65 @@ export async function recordMessageCost(
         metaCostUsd: metaCost,
         platformCostUsd: platformCost,
       },
+      select: { id: true, tenantId: true, campaignId: true, contact: { select: { country: true } } },
     });
+
+    // Meta says it is not charging for this one — free service-window or
+    // free-entry-point traffic. Credits were already taken when the message was
+    // dispatched, because at that point nobody knows: only this webhook, which
+    // arrives afterwards, says whether it was billable. Give them back.
+    if (pricing.billable === false) {
+      await refundForFreeMessage(prisma, msg.tenantId, messageId, country || 'OTHER', pricing);
+    }
   } catch (err: any) {
     console.error(`[costing] could not record cost for ${messageId}:`, err?.message);
   }
+}
+
+/**
+ * Returns the credits taken for a message Meta then declined to bill for.
+ *
+ * The charge happens at dispatch and the verdict arrives later, so an
+ * overcharge here is structural rather than a mistake — but it is still an
+ * overcharge, and on this account it was roughly 8% of traffic. Refunds are
+ * keyed on the message id so a webhook Meta retries cannot refund twice.
+ */
+async function refundForFreeMessage(
+  prisma: PrismaClient,
+  tenantId: string,
+  messageId: string,
+  country: string,
+  pricing: MetaPricing
+): Promise<void> {
+  const reference = `free-message-refund-${messageId}`;
+
+  const already = await prisma.tenantCreditTransaction.findFirst({
+    where: { referenceId: reference },
+    select: { id: true },
+  });
+  if (already) return;
+
+  // Refund what this message would have cost at the rate it was charged.
+  const category = normaliseCategory(pricing.category);
+  const rate = await prisma.creditRate.findUnique({ where: { countryCode: country } })
+    ?? await prisma.creditRate.findUnique({ where: { countryCode: 'OTHER' } });
+  if (!rate) return;
+
+  const credits =
+    category === 'MARKETING' ? rate.marketingCredits
+    : category === 'AUTHENTICATION' ? rate.authCredits
+    : category === 'SERVICE' ? rate.serviceCredits
+    : rate.utilityCredits;
+
+  if (credits <= 0) return;
+
+  const { refundCredits } = await import('./creditService.js');
+  await refundCredits(
+    prisma,
+    tenantId,
+    credits,
+    reference,
+    'MESSAGE',
+    `Refund — Meta did not bill this message (${pricing.type || 'free'})`,
+  );
 }
