@@ -27,6 +27,7 @@ import { useState } from 'react';
 import clsx from 'clsx';
 import { useQuery } from '@tanstack/react-query';
 import { api } from '../api/client';
+import { useCurrency, creditsToMoney, formatCredits } from '../lib/money';
 import HeaderAvatar, { AvatarKind } from './HeaderAvatar';
 
 interface LayoutProps {
@@ -257,6 +258,7 @@ export default function Layout({ children, variant }: LayoutProps) {
 
 // Credits Bar Component - Displayed in top header for client
 function CreditsBar() {
+  const fx = useCurrency();
   const navigate = useNavigate();
 
   const { data: creditsData, isLoading } = useQuery({
@@ -280,7 +282,8 @@ function CreditsBar() {
           <span className="text-sm font-medium text-primary-apple">Credits:</span>
         </div>
         <div className="flex items-center gap-2">
-          <span className="text-sm font-bold text-wa-green">{balance.toLocaleString()}</span>
+          <span className="text-sm font-bold text-wa-green">{formatCredits(balance)}</span>
+          <span className="text-xs text-ios-muted">({creditsToMoney(balance, fx)})</span>
           {credits.total > 0 && (
             <div className="w-20 h-1.5 bg-black/10 rounded-full overflow-hidden">
               <div

@@ -4,6 +4,7 @@
 
 import { useQuery } from '@tanstack/react-query';
 import { api } from '../api/client';
+import { useCurrency, formatMoney } from '../lib/money';
 import {
   TrendingUp,
   DollarSign,
@@ -32,6 +33,7 @@ interface RevenueData {
 }
 
 export default function BillingAnalyticsPage() {
+  const fx = useCurrency();
   const { data: billingData } = useQuery({
     queryKey: ['superadmin', 'billing'],
     queryFn: async () => {
@@ -70,14 +72,14 @@ export default function BillingAnalyticsPage() {
   const cards = [
     {
       label: 'Monthly Recurring Revenue',
-      value: `$${(stats?.totalMRR || 0).toLocaleString()}`,
+      value: formatMoney(Number(stats?.totalMRR || 0), fx, { decimals: 0 }),
       change: null,
       icon: DollarSign,
       color: 'green',
     },
     {
       label: 'Annual Recurring Revenue',
-      value: `$${(stats?.totalARR || 0).toLocaleString()}`,
+      value: formatMoney(Number(stats?.totalARR || 0), fx, { decimals: 0 }),
       change: null,
       icon: TrendingUp,
       color: 'blue',
@@ -106,7 +108,7 @@ export default function BillingAnalyticsPage() {
     },
     {
       label: 'Customer LTV',
-      value: `$${(stats?.ltv || 0).toLocaleString()}`,
+      value: formatMoney(Number(stats?.ltv || 0), fx, { decimals: 0 }),
       change: null,
       icon: CreditCard,
       color: 'indigo',

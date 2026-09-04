@@ -1,5 +1,6 @@
 import { useQuery } from '@tanstack/react-query';
 import { api } from '../api/client';
+import { useCurrency, formatMoney } from '../lib/money';
 import {
   Building2,
   CreditCard,
@@ -36,6 +37,7 @@ function formatCount(n: number): string {
 }
 
 export default function SuperAdminDashboard() {
+  const fx = useCurrency();
   const { data, isLoading } = useQuery<{ data: SuperAdminDashboard }>({
     queryKey: ['superadmin', 'dashboard'],
     queryFn: async () => {
@@ -65,7 +67,7 @@ export default function SuperAdminDashboard() {
     },
     {
       label: 'Monthly Revenue',
-      value: `$${(metrics?.mrr || 0).toLocaleString()}`,
+      value: formatMoney(Number(metrics?.mrr || 0), fx, { decimals: 0 }),
       icon: CreditCard,
       color: 'green',
       subtext: 'MRR',

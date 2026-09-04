@@ -12,6 +12,7 @@
 import { useState, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../api/client';
+import { useCurrency, creditsToMoney, formatCredits } from '../lib/money';
 import {
   Coins, ArrowDown, ArrowUp, CreditCard, TrendingDown, Zap,
   Info, Globe, ChevronDown, Search, X, Check, AlertTriangle, Minus, RefreshCw
@@ -84,14 +85,10 @@ const META_RATES_USD: Record<string, { marketing: number; utility: number; auth:
   VN: { marketing: 411, utility: 250, auth: 250 },  // Vietnam
 };
 
-// Currency exchange rates (1 USD = X)
-const USD_TO_CURRENCY: Record<string, number> = {
-  INR: 83.85, USD: 1, GBP: 0.79, EUR: 0.92,
-  AED: 3.67, SGD: 1.34, MYR: 4.72, IDR: 15850,
-  BRL: 5.05, AUD: 1.53, PHP: 56.50, THB: 35.50,
-  VND: 24500, PKR: 278, SAR: 3.75, NGN: 775,
-  ZAR: 18.50, MXN: 17.15,
-};
+// Rates used to live here as a second, private copy of the FX table — it drifted
+// to 83.85 while the rate card ran on 88.5, so the same spend read differently
+// depending on which page you opened. There is now one rate, from the platform
+// setting, and this file reads it like everything else.
 
 // Payment Gateway Fees (Razorpay India)
 const PLATFORM_FEE_RATE = 0.02; // 2% transaction fee
@@ -100,12 +97,11 @@ const GST_RATE = 0.18; // 18% GST on platform fee
 // Helper to calculate price from credits
 // Base price: 1000 credits = ₹99 for India (ALL-INCLUSIVE price)
 // Platform fee and GST are calculated on top
-const calculatePrice = (credits: number, countryCode: string): { baseLocal: number; platformFee: number; gst: number; total: number; currency: string } => {
-  const currency = countryCode === 'IN' ? 'INR' : countryCode === 'US' ? 'USD' :
-                   countryCode === 'GB' ? 'GBP' : countryCode === 'EU' ? 'EUR' :
-                   countryCode === 'AE' ? 'AED' : countryCode === 'SG' ? 'SGD' :
-                   countryCode === 'MY' ? 'MYR' : countryCode === 'ID' ? 'IDR' :
-                   countryCode === 'BR' ? 'BRL' : 'USD';
+const calculatePrice = (credits: number, countryCode: string, usdRate = 88.5): { baseLocal: number; platformFee: number; gst: number; total: number; currency: string } => {
+  // Credit packs are priced in INR and every other currency is derived from it,
+  // so INR — not USD — is the default for anything unmapped.
+  const currency = countryCode === 'US' ? 'USD' :
+                   countryCode === 'GB' ? 'GBP' : countryCode === 'EU' ? 'EUR' : 'INR';
 
   // Base price calculation (INCLUSIVE of fees)
   // 1000 credits = ₹99 inclusive
@@ -115,17 +111,12 @@ const calculatePrice = (credits: number, countryCode: string): { baseLocal: numb
   const inrRate = 99 / 1000; // ₹0.099 per credit in India
   let totalLocal: number;
 
-  if (countryCode === 'IN') {
-    totalLocal = credits * inrRate;
-  } else if (currency === 'USD') {
-    totalLocal = credits * inrRate / 83.85;
-  } else if (currency === 'GBP') {
-    totalLocal = credits * inrRate / 83.85 * 0.79;
-  } else if (currency === 'EUR') {
-    totalLocal = credits * inrRate / 83.85 * 0.92;
-  } else {
-    totalLocal = credits * inrRate / 83.85;
-  }
+  const inr = credits * inrRate;
+  totalLocal =
+    currency === 'USD' ? inr / usdRate
+    : currency === 'GBP' ? (inr / usdRate) * 0.79
+    : currency === 'EUR' ? (inr / usdRate) * 0.92
+    : inr;
 
   // Calculate base amount and fees from total
   // total = base * 1.0236 => base = total / 1.0236
@@ -143,7 +134,7 @@ const calculatePrice = (credits: number, countryCode: string): { baseLocal: numb
 };
 
 // Credit packs with real Meta-based pricing - Minimum 500 credits
-const generatePacks = (countryCode: string) => {
+const generatePacks = (countryCode: string, usdRate = 88.5) => {
   const packs = [
     { name: 'Starter', credits: 1000 },
     { name: 'Growth', credits: 5000 },
@@ -152,9 +143,9 @@ const generatePacks = (countryCode: string) => {
   ];
 
   return packs.map((pack, index) => {
-    const pricing = calculatePrice(pack.credits, countryCode);
-    const currencySymbol = pricing.currency === 'INR' ? '₹' : pricing.currency === 'USD' ? '$' :
-                           pricing.currency === 'GBP' ? '£' : pricing.currency === 'EUR' ? '€' : '$';
+    const pricing = calculatePrice(pack.credits, countryCode, usdRate);
+    const currencySymbol = pricing.currency === 'USD' ? '$' :
+                           pricing.currency === 'GBP' ? '£' : pricing.currency === 'EUR' ? '€' : '₹';
 
     return {
       ...pack,
@@ -205,6 +196,8 @@ const getCurrencySymbol = (currency: string): string => {
 };
 
 export default function CreditsPage() {
+  // One rate for the whole app, so pack pricing and spend reporting agree.
+  const fx = useCurrency();
   const [selectedCountry, setSelectedCountry] = useState('IN');
   const [displayCurrency, setDisplayCurrency] = useState('INR');
   const [countryDropdownOpen, setCountryDropdownOpen] = useState(false);
@@ -213,7 +206,7 @@ export default function CreditsPage() {
   const [customCredits, setCustomCredits] = useState('');
 
   // Generate packs based on selected country
-  const PACKS = generatePacks(selectedCountry);
+  const PACKS = generatePacks(selectedCountry, fx.fxRate);
 
   const { data: creditsData, isLoading: creditsLoading } = useQuery({
     queryKey: ['credits'],
@@ -312,7 +305,7 @@ export default function CreditsPage() {
   const messagesRemaining = balance > 0 ? Math.round(balance / 200) : 0;
 
   // Calculate pricing for custom amount
-  const customPricing = customCredits ? calculatePrice(parseInt(customCredits), selectedCountry) : null;
+  const customPricing = customCredits ? calculatePrice(parseInt(customCredits), selectedCountry, fx.fxRate) : null;
 
   return (
     <div className="space-y-6">
@@ -341,7 +334,8 @@ export default function CreditsPage() {
             </div>
             <div>
               <p className="text-sm text-ios-muted">Current Balance</p>
-              <p className="text-2xl font-bold text-wa-green">{balance.toLocaleString()}</p>
+              <p className="text-2xl font-bold text-wa-green">{formatCredits(balance)}</p>
+              <p className="text-xs text-ios-muted">{creditsToMoney(balance, fx)} of messaging</p>
             </div>
           </div>
           {isLowBalance && (
@@ -385,7 +379,7 @@ export default function CreditsPage() {
           <Info className="w-5 h-5 text-wa-green mt-0.5" />
           <div className="text-sm text-ios-secondary">
             <p className="font-medium text-ios-dark mb-2">How credits work</p>
-            <p>Credits are used based on message category and recipient country. One credit ≈ $0.0001 USD. Each message costs between 14-1365 credits depending on type and destination.</p>
+            <p>Credits are charged by message category and recipient country. One credit is worth {creditsToMoney(1, fx, true)}, so a message costs roughly {creditsToMoney(14, fx, true)} to {creditsToMoney(1365, fx, true)} depending on where it goes and what kind it is.</p>
             <p className="mt-2 text-xs">Messages remaining estimate: ~{messagesRemaining.toLocaleString()} messages (based on average usage)</p>
           </div>
         </div>

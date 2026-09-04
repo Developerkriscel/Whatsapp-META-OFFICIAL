@@ -5,6 +5,7 @@
 import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../api/client';
+import { useCurrency, formatMoney } from '../lib/money';
 import {
   CreditCard, Check, Download, ExternalLink, Loader2, AlertCircle,
   TrendingUp, TrendingDown, AlertTriangle, CheckCircle2, Info,
@@ -95,6 +96,7 @@ interface UsageAlert {
 }
 
 export default function BillingPage() {
+  const fx = useCurrency();
   const queryClient = useQueryClient();
   const [interval, setBillingInterval] = useState<'monthly' | 'annual'>('monthly');
   const [showUpgradeModal, setShowUpgradeModal] = useState<Plan | null>(null);
@@ -291,8 +293,8 @@ export default function BillingPage() {
                   {Number(billing.plan?.monthlyPrice) < 0
                     ? 'Custom pricing'
                     : interval === 'monthly'
-                    ? `$${billing.plan?.monthlyPrice}/month`
-                    : `$${(billing.plan?.annualPrice / 12)?.toFixed(0)}/month`}
+                    ? `${formatMoney(Number(billing.plan?.monthlyPrice), fx, { decimals: 0 })}/month`
+                    : `${formatMoney(Number(billing.plan?.annualPrice) / 12, fx, { decimals: 0 })}/month`}
                 </p>
               </div>
             </div>

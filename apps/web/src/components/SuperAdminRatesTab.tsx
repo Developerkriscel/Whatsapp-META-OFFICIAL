@@ -12,6 +12,7 @@ import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../api/client';
 import { Globe, Search, Loader2, AlertTriangle, RefreshCw } from 'lucide-react';
+import { useCurrency, creditsToMoney, formatUnitMoney } from '../lib/money';
 
 interface RateCategory {
   sell: number;
@@ -45,11 +46,12 @@ interface LiveRow {
   configuredSellUsd: number | null;
 }
 
-const CREDITS_PER_USD = 10000;
-const usd = (credits: number) => `$${(credits / CREDITS_PER_USD).toFixed(4)}`;
-
 export default function SuperAdminRatesTab() {
   const queryClient = useQueryClient();
+  const fx = useCurrency();
+  // Per-message rates need more than two decimals: at roughly a rupee a
+  // message, two would round most countries to the same number.
+  const money = (credits: number) => creditsToMoney(credits, fx, true);
   const [search, setSearch] = useState('');
   const [editing, setEditing] = useState<Record<string, Record<string, number>>>({});
   const [markup, setMarkup] = useState(1.3);
@@ -146,7 +148,7 @@ export default function SuperAdminRatesTab() {
               Message rates
             </h2>
             <p className="text-sm text-ios-muted mt-1 max-w-2xl">
-              What a tenant is charged per message. Values are credits — 10,000 credits = $1.00. A saved price applies to
+              What a tenant is charged per message. Values are credits — 10,000 credits = $1.00, shown below in {fx.currency}. A saved price applies to
               the next message sent; nothing needs redeploying.
             </p>
           </div>
@@ -271,7 +273,7 @@ export default function SuperAdminRatesTab() {
                           {r.costPerMessage} {r.currency}
                         </td>
                         <td className="py-2 text-right tabular-nums text-ios-muted">
-                          {r.configuredSellUsd != null ? `$${r.configuredSellUsd.toFixed(4)}` : '—'}
+                          {r.configuredSellUsd != null ? formatUnitMoney(r.configuredSellUsd, fx) : '—'}
                         </td>
                       </tr>
                     ))}
@@ -331,16 +333,16 @@ export default function SuperAdminRatesTab() {
                     <td className="py-2 px-2">
                       {field(r, 'marketingCredits', r.marketing.sell)}
                       <p className="text-xs text-ios-muted mt-0.5">
-                        {usd(r.marketing.sell)} · cost {usd(r.marketing.cost)}
+                        {money(r.marketing.sell)} · cost {money(r.marketing.cost)}
                       </p>
                     </td>
                     <td className="py-2 px-2">
                       {field(r, 'utilityCredits', r.utility.sell)}
-                      <p className="text-xs text-ios-muted mt-0.5">{usd(r.utility.sell)}</p>
+                      <p className="text-xs text-ios-muted mt-0.5">{money(r.utility.sell)}</p>
                     </td>
                     <td className="py-2 px-2">
                       {field(r, 'authCredits', r.authentication.sell)}
-                      <p className="text-xs text-ios-muted mt-0.5">{usd(r.authentication.sell)}</p>
+                      <p className="text-xs text-ios-muted mt-0.5">{money(r.authentication.sell)}</p>
                     </td>
                     <td className="py-2 px-2 text-right tabular-nums">
                       <span className={below ? 'text-apple-red font-medium' : 'text-ios-dark'}>

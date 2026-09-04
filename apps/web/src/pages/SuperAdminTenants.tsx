@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../api/client';
+import { useCurrency, formatMoney, creditsToMoney, formatCredits } from '../lib/money';
 import {
   Building2, Search, Plus, X, Ban, CheckCircle, Users, CreditCard,
   Settings, ChevronDown, Shield, Coins, Copy, Check, Phone,
@@ -966,6 +967,7 @@ function UsersTab({ tenantId, users }: { tenantId: string; users: TenantUser[] }
 // ============================================
 
 function CreditsTab({ tenantId, tenantName }: { tenantId: string; tenantName: string }) {
+  const fxCredits = useCurrency();
   const queryClient = useQueryClient();
   const [mode, setMode] = useState<'add' | 'deduct'>('add');
   const [amount, setAmount] = useState('');
@@ -1055,8 +1057,10 @@ function CreditsTab({ tenantId, tenantName }: { tenantId: string; tenantName: st
             </div>
             <div>
               <p className="text-sm text-ios-muted">Current Balance</p>
-              <p className="text-2xl font-bold text-ios-dark">{credits.balance.toLocaleString()}</p>
-              <p className="text-xs text-ios-muted">${(credits.balance / 100).toFixed(2)} USD</p>
+              <p className="text-2xl font-bold text-ios-dark">{formatCredits(credits.balance)}</p>
+              {/* Was dividing by 100 rather than 10,000, so every balance read
+                  a hundred times its real worth. */}
+              <p className="text-xs text-ios-muted">{creditsToMoney(credits.balance, fxCredits)} value</p>
             </div>
           </div>
         </div>
@@ -1186,6 +1190,7 @@ function CreditsTab({ tenantId, tenantName }: { tenantId: string; tenantName: st
 // ============================================
 
 function BillingTab({ tenantId, tenant }: { tenantId: string; tenant: any }) {
+  const fx = useCurrency();
   const queryClient = useQueryClient();
   const [selectedPlanId, setSelectedPlanId] = useState('');
 
@@ -1229,7 +1234,7 @@ function BillingTab({ tenantId, tenant }: { tenantId: string; tenant: any }) {
           <p className="text-xs font-medium text-wa-green uppercase tracking-wider mb-2">Current Plan</p>
           <p className="text-2xl font-bold text-ios-dark">{tenant.plan?.name || tenant.planName || '—'}</p>
           <p className="text-sm text-ios-secondary mt-1">
-            {tenant.plan?.monthlyPrice ? `$${tenant.plan.monthlyPrice}/month` : '—'}
+            {tenant.plan?.monthlyPrice ? `${formatMoney(Number(tenant.plan.monthlyPrice), fx, { decimals: 0 })}/month` : '—'}
           </p>
         </div>
         <div className="bg-gradient-to-br from-apple-purple/10 to-apple-purple/20 border border-apple-purple/20 rounded-apple-xl p-6">

@@ -199,6 +199,20 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
   // ============================================
 
   // Main dashboard overview endpoint (alias)
+  /**
+   * GET /settings/currency — the platform's reporting currency and FX rate.
+   *
+   * Readable by any signed-in user because every page that shows money needs
+   * it. Previously each page carried its own conversion table, which is how
+   * CreditsPage ended up converting at 83.85 while the rate card used 88.5:
+   * the same spend rendered differently depending on which screen you were on.
+   */
+  app.get('/settings/currency', async (_request, _reply) => {
+    const { getCurrencyContext } = await import('../services/currency.js');
+    const fx = await getCurrencyContext(app.prisma);
+    return { success: true, data: { ...fx, creditsPerUsd: 10000 } };
+  });
+
   app.get('/dashboard/overview', async (request, reply) => {
     const tenantId = request.authUser.tenantId;
 
