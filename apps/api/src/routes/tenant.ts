@@ -207,6 +207,53 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
    * CreditsPage ended up converting at 83.85 while the rate card used 88.5:
    * the same spend rendered differently depending on which screen you were on.
    */
+  /**
+   * GET /credit-packages — what a tenant can actually buy, priced from the
+   * database with the fee breakdown itemised.
+   *
+   * The Credits page used to carry its own pack list and its own fee formula,
+   * both hardcoded, and priced credits at 11x the rate the billing engine
+   * consumes them at. Packs, fees and the messages-per-pack figure now all come
+   * from the same tables that do the billing.
+   */
+  app.get('/credit-packages', async (request, reply) => {
+    if (!request.authUser.tenantId) {
+      return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
+    }
+
+    const tenant = await app.prisma.tenant.findUnique({
+      where: { id: request.authUser.tenantId },
+      select: { defaultCountry: true },
+    });
+    const country = tenant?.defaultCountry || 'IN';
+
+    const packages = await app.prisma.creditPackage.findMany({
+      where: { isActive: true },
+      orderBy: { sortOrder: 'asc' },
+    });
+
+    const { quotePackage } = await import('../services/pricing.js');
+    const priced = await Promise.all(packages.map(async (p) => {
+      const q = await quotePackage(app.prisma, p, country);
+      return {
+        id: p.id,
+        name: p.name,
+        description: p.description,
+        credits: p.credits,
+        isPopular: p.isPopular,
+        currency: q.currency,
+        baseMinor: q.baseMinor,
+        totalMinor: q.totalMinor,
+        // Only what the operator chose to itemise for the buyer.
+        fees: q.fees.filter((f) => f.visible),
+        messages: q.messages,
+        perMessageMinor: q.perMessageMinor,
+      };
+    }));
+
+    return { success: true, data: { country, packages: priced } };
+  });
+
   app.get('/settings/currency', async (_request, _reply) => {
     const { getCurrencyContext } = await import('../services/currency.js');
     const fx = await getCurrencyContext(app.prisma);

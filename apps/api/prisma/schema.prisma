@@ -1769,3 +1769,109 @@ model PlatformSetting {
 
   @@map("platform_settings")
 }
+
+// ============================================
+// COMMERCE -- packages, fees, payment providers
+// ============================================
+
+/// A credit pack offered for sale. These used to be hardcoded in the frontend
+/// at a price with no relationship to the rate card that actually bills the
+/// messages, which is how a pack ended up selling credits at 11x the rate they
+/// were consumed at.
+model CreditPackage {
+  id       String @id @default(cuid())
+  name     String
+  credits  Int
+  /// Price in the platform's reporting currency, inclusive of nothing --
+  /// fees are applied on top by the fee engine.
+  priceMinor Int
+  currency String @default("INR")
+
+  description String?
+  isPopular   Boolean @default(false)
+  isActive    Boolean @default(true)
+  sortOrder   Int     @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("credit_packages")
+}
+
+enum FeeType {
+  PERCENT
+  FIXED
+}
+
+enum FeeAppliesTo {
+  CREDIT_PURCHASE
+  SUBSCRIPTION
+  ALL
+}
+
+/// What a percent fee is a percent *of*. A boolean "compounds" could not
+/// express GST charged on a platform fee, which is what this app actually does.
+enum FeeBasis {
+  /// The package price alone.
+  BASE
+  /// Package price plus every fee charged before this one.
+  SUBTOTAL
+  /// Only the fees charged before this one -- tax on a service charge.
+  PRECEDING_FEES
+}
+
+/// An arbitrary named charge added at checkout -- platform fee, GST, gateway
+/// fee, anything else. Stacked in `sortOrder`, and a percent fee can be told to
+/// compound on the fees before it (the way tax on a service fee works) rather
+/// than only on the base amount.
+model PlatformFee {
+  id    String @id @default(cuid())
+  name  String
+  code  String @unique
+
+  type      FeeType
+  /// Percent as basis points (250 = 2.5%) so nothing depends on float equality.
+  /// For FIXED, the amount in minor units of the fee's currency.
+  value     Int
+  currency  String @default("INR")
+
+  appliesTo FeeAppliesTo @default(CREDIT_PURCHASE)
+  /// What a PERCENT fee is calculated against. Ignored for FIXED.
+  basis     FeeBasis @default(BASE)
+  /// Shown to the buyer in the breakdown, the way a delivery app itemises.
+  isVisible Boolean @default(true)
+  isActive  Boolean @default(true)
+  sortOrder Int     @default(0)
+
+  description String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("platform_fees")
+}
+
+/// A payment gateway the platform can charge through. Secrets are encrypted at
+/// rest with the same helper the WhatsApp tokens use.
+model PaymentProvider {
+  id       String  @id @default(cuid())
+  provider String  @unique
+  label    String
+
+  isActive  Boolean @default(false)
+  isDefault Boolean @default(false)
+  testMode  Boolean @default(true)
+
+  publicKey     String?
+  secretKey     String?
+  webhookSecret String?
+  /// Anything provider-specific that does not fit the fields above.
+  config        Json?
+
+  supportedCurrencies String[] @default(["INR"])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("payment_providers")
+}

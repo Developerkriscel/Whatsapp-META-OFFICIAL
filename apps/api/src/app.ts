@@ -22,6 +22,7 @@ import { registerInvoiceRoutes } from './routes/invoice.js';
 import { registerWhatsAppRoutes } from './routes/whatsapp.js';
 import { registerCreditRoutes } from './routes/credits.js';
 import { registerSuperadminCreditRoutes } from './routes/superadminCredits.js';
+import { registerSuperadminCommerceRoutes } from './routes/superadminCommerce.js';
 import { registerSSERoutes } from './routes/sse.js';
 import { registerAutomationRoutes } from './routes/automation.js';
 import { registerTeamRoutes } from './routes/teams.js';
@@ -193,6 +194,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(registerInvoiceRoutes, { prefix: '/api/v1' });
   await app.register(registerCreditRoutes, { prefix: '/api/v1' });
   await app.register(registerSuperadminCreditRoutes, { prefix: '/api/v1/superadmin' });
+  await app.register(registerSuperadminCommerceRoutes, { prefix: '/api/v1/superadmin' });
   const { registerSuperadminAdvancedRoutes } = await import('./routes/superadminFeatures.js');
   await app.register(registerSuperadminAdvancedRoutes, { prefix: '/api/v1/superadmin' });
   await app.register(registerWebhookRoutes);
