@@ -69,6 +69,8 @@ interface Template {
   category: string;
   status: 'approved' | 'pending' | 'rejected';
   preview: string;
+  /** True when Meta approved this template with an image/video header. */
+  hasMediaHeader: boolean;
 }
 
 const OPERATOR_LABELS: Record<string, string> = {
@@ -379,6 +381,10 @@ export default function CampaignsPage() {
     category: t.category,
     status: t.status,
     preview: t.body?.text || t.body || '',
+    // Media can only be attached to a template Meta approved with a header to
+    // put it in. Without this the wizard happily accepts an image and every
+    // recipient fails with #132018.
+    hasMediaHeader: !!t.header,
   }));
 
   const totalContacts = contactsData?.meta?.total || 0;
@@ -427,6 +433,12 @@ export default function CampaignsPage() {
     }
     if (wizardStep === 2 && !form.message) {
       return; // Message is required
+    }
+    // Meta rejects every recipient when media rides on a template that has no
+    // header, so this must not reach the send step.
+    if (wizardStep === 2 && form.mediaUrl && form.templateId && !selectedTemplate?.hasMediaHeader) {
+      showNotification('error', `"${selectedTemplate?.name}" has no media header — remove the attached media or pick a template that has one.`);
+      return;
     }
     if (wizardStep === 3 && !form.phoneNumberId) {
       return; // Phone number is required
@@ -1083,8 +1095,14 @@ export default function CampaignsPage() {
               <div className="flex gap-4 mt-3">
                 <button
                   type="button"
+                  disabled={!!form.templateId && !selectedTemplate?.hasMediaHeader}
                   onClick={() => setShowMediaInput((v) => !v)}
-                  className="flex items-center gap-2 text-sm text-wa-green hover:text-wa-teal transition"
+                  title={
+                    form.templateId && !selectedTemplate?.hasMediaHeader
+                      ? `"${selectedTemplate?.name}" was approved without a media header, so Meta will not accept an image with it`
+                      : undefined
+                  }
+                  className="flex items-center gap-2 text-sm text-wa-green hover:text-wa-teal transition disabled:text-ios-muted disabled:cursor-not-allowed disabled:hover:text-ios-muted"
                 >
                   <Image className="w-4 h-4" />
                   {showMediaInput ? 'Hide Media' : 'Add Media'}
@@ -1115,6 +1133,30 @@ export default function CampaignsPage() {
                   Add Variable
                 </button>
               </div>
+
+              {/* Media already attached, then a body-only template chosen. Say
+                  so rather than dropping their upload silently — and rather
+                  than letting it through, which fails every recipient. */}
+              {form.mediaUrl && form.templateId && !selectedTemplate?.hasMediaHeader && (
+                <div className="mt-3 flex items-start gap-2 p-3 rounded-apple-lg bg-red-50 border border-red-100 text-sm text-red-600">
+                  <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
+                  <div>
+                    <p className="font-medium">This media cannot be sent with “{selectedTemplate?.name}”.</p>
+                    <p className="mt-0.5">
+                      Meta approved that template without an image or video header, and rejects
+                      every recipient when one is attached. Remove the media, or choose a
+                      template that has a media header.
+                    </p>
+                    <button
+                      type="button"
+                      onClick={clearMedia}
+                      className="mt-2 underline font-medium"
+                    >
+                      Remove the media
+                    </button>
+                  </div>
+                </div>
+              )}
               {showMediaInput && (
                 <div className="mt-2 space-y-2">
                   <input

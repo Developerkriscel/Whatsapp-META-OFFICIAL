@@ -1919,6 +1919,22 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
       });
     }
 
+    // Media can only ride on a template whose approved definition has a header
+    // to put it in. Attaching an image to a body-only template makes the send
+    // loop add a header parameter, and Meta rejects every single recipient with
+    // "(#132018) ... header: Template does not contain title component, no
+    // parameters allowed". That is how a 248-recipient campaign failed 248
+    // times for one reason nobody could see. Refuse up front instead.
+    if (campaign.mediaUrl && !campaign.template.header) {
+      return reply.status(400).send({
+        success: false,
+        error: {
+          code: 'TEMPLATE_HAS_NO_HEADER',
+          message: `The template "${campaign.template.name}" has no image or video header, so the attached media cannot be sent with it. Remove the media, or use a template that was approved with a media header.`,
+        },
+      });
+    }
+
     // Meta rejects every send attempt against a template that isn't APPROVED
     // yet (PENDING/REJECTED/DRAFT) — without this check the campaign used to
     // launch anyway, mark itself SENDING, then fail every single recipient
@@ -4382,9 +4398,12 @@ async function sendCampaignMessagesInner(
         const components: any[] = [];
 
         // A header component only belongs on the payload when the campaign
-        // actually carries media — Meta rejects a header on a template whose
-        // approved definition has none.
-        if (campaign.mediaUrl) {
+        // actually carries media AND the template was approved with a header to
+        // hold it. Sending one to a body-only template fails every recipient
+        // with #132018 ("Template does not contain title component"). The send
+        // route refuses this combination up front; this covers the paths that
+        // do not go through it, such as a scheduled or resumed campaign.
+        if (campaign.mediaUrl && campaign.template.header) {
           components.push({
             type: 'header',
             parameters: [mediaHeaderParameter(campaign.mediaUrl)],
