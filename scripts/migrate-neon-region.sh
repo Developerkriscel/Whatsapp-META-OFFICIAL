@@ -56,6 +56,20 @@ docker image inspect "$IMAGE" >/dev/null 2>&1 || {
 }
 pg pg_dump --version
 
+# In cutover mode the API must stop BEFORE the snapshot and dump. Dumping a
+# live database and stopping it afterwards would silently lose every write that
+# landed during the dump -- a message sent in those seconds would vanish. The
+# rehearsal dumps live on purpose: it only measures, and never restores.
+if [ "$MODE" = "cutover" ]; then
+  if [ -z "${TARGET_DATABASE_URL:-}" ]; then
+    echo "FATAL: set TARGET_DATABASE_URL to the Singapore project's connection string" >&2
+    exit 1
+  fi
+  echo ""
+  echo "=== stopping the API (downtime begins) ==="
+  su -s /bin/bash kriscelwaapi -c 'pm2 stop kriscelwa-api'
+fi
+
 echo ""
 echo "=== 1. source snapshot ==="
 SRC_TABLES=$(pg psql "$SOURCE_DATABASE_URL" -tAc \
@@ -88,31 +102,33 @@ fi
 
 # ---------------- cutover ----------------
 
-if [ -z "${TARGET_DATABASE_URL:-}" ]; then
-  echo "FATAL: set TARGET_DATABASE_URL to the Singapore project's connection string" >&2
-  exit 1
-fi
-
-echo ""
-echo "=== 3. stop the API (begins downtime) ==="
-su -s /bin/bash kriscelwaapi -c 'pm2 stop kriscelwa-api'
-
 echo ""
 echo "=== 4. restore into target ==="
+# Restore over the DIRECT endpoint, not the pooler. Neon's pooler is pgbouncer
+# in transaction mode, which does not carry the session state a restore needs
+# (SET statements, and DDL that expects to hold a session). The app keeps using
+# the pooled URL afterwards -- this bypass is only for the restore itself.
+TARGET_DIRECT_URL="${TARGET_DATABASE_URL/-pooler/}"
+if [ "$TARGET_DIRECT_URL" = "$TARGET_DATABASE_URL" ]; then
+  echo "  note: target URL has no -pooler segment, using as-is"
+else
+  echo "  using direct (non-pooled) endpoint for restore"
+fi
+
 # pgcrypto must exist before objects that depend on it.
-pg psql "$TARGET_DATABASE_URL" -c 'CREATE EXTENSION IF NOT EXISTS pgcrypto;'
+pg psql "$TARGET_DIRECT_URL" -c 'CREATE EXTENSION IF NOT EXISTS pgcrypto;'
 START=$(date +%s)
 pg pg_restore --no-owner --no-acl --clean --if-exists \
-  -d "$TARGET_DATABASE_URL" "$DUMP"
+  -d "$TARGET_DIRECT_URL" "$DUMP"
 echo "  restored in $(( $(date +%s) - START ))s"
 
 echo ""
 echo "=== 5. verify row counts match ==="
-DST_TABLES=$(pg psql "$TARGET_DATABASE_URL" -tAc \
+DST_TABLES=$(pg psql "$TARGET_DIRECT_URL" -tAc \
   "SELECT count(*) FROM information_schema.tables WHERE table_schema='public';")
-DST_CONTACTS=$(pg psql "$TARGET_DATABASE_URL" -tAc "SELECT count(*) FROM contacts;")
-DST_MESSAGES=$(pg psql "$TARGET_DATABASE_URL" -tAc "SELECT count(*) FROM messages;")
-DST_TENANTS=$(pg psql "$TARGET_DATABASE_URL" -tAc "SELECT count(*) FROM tenants;")
+DST_CONTACTS=$(pg psql "$TARGET_DIRECT_URL" -tAc "SELECT count(*) FROM contacts;")
+DST_MESSAGES=$(pg psql "$TARGET_DIRECT_URL" -tAc "SELECT count(*) FROM messages;")
+DST_TENANTS=$(pg psql "$TARGET_DIRECT_URL" -tAc "SELECT count(*) FROM tenants;")
 echo "  source: tables=$SRC_TABLES contacts=$SRC_CONTACTS messages=$SRC_MESSAGES tenants=$SRC_TENANTS"
 echo "  target: tables=$DST_TABLES contacts=$DST_CONTACTS messages=$DST_MESSAGES tenants=$DST_TENANTS"
 
