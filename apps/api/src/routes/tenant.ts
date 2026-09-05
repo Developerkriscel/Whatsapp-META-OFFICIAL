@@ -2626,6 +2626,53 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
     return { success: true, data: template };
   });
 
+  /**
+   * POST /templates/:templateId/tidy-body
+   *
+   * Collapses runs of blank lines to the two Meta allows. Separate from submit
+   * and explicit, because it edits the user's copy — silently rewriting what
+   * someone typed is not a fix, it is a surprise.
+   */
+  app.post('/templates/:templateId/tidy-body', { preHandler: [app.requirePermission('templates', 'update')] }, async (request, reply) => {
+    const { templateId } = z.object({ templateId: z.string() }).parse(request.params);
+
+    const template = await app.prisma.template.findFirst({
+      where: { id: templateId, tenantId: request.authUser.tenantId },
+    });
+    if (!template) {
+      return reply.status(404).send({ success: false, error: { code: 'NOT_FOUND' } });
+    }
+    if (template.status !== 'DRAFT' && template.status !== 'REJECTED') {
+      return reply.status(400).send({
+        success: false,
+        error: { code: 'NOT_EDITABLE', message: `A template with status ${template.status} cannot be edited.` },
+      });
+    }
+
+    const { normaliseTemplateBody, checkTemplateBody } = await import('../services/metaTemplate.js');
+    const before = (template.body as any)?.text || '';
+    const after = normaliseTemplateBody(before);
+
+    if (after === before) {
+      return { success: true, data: { changed: false, remainingIssues: checkTemplateBody(after) } };
+    }
+
+    await app.prisma.template.update({
+      where: { id: templateId },
+      data: { body: { ...(template.body as any), text: after } },
+    });
+
+    return {
+      success: true,
+      data: {
+        changed: true,
+        removedCharacters: before.length - after.length,
+        // Anything the tidy cannot fix is still worth naming.
+        remainingIssues: checkTemplateBody(after),
+      },
+    };
+  });
+
   app.post('/templates/:templateId/submit', { preHandler: [app.requirePermission('templates', 'update')] }, async (request, reply) => {
     const { templateId } = z.object({ templateId: z.string() }).parse(request.params);
 
@@ -2660,6 +2707,25 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
           code: 'TEMPLATE_VALIDATION_FAILED',
           message: 'Template has issues that would likely be rejected by Meta',
           issues: complianceCheck.issues,
+        },
+      });
+    }
+
+    // Meta's formatting rules are fixed and documented, so failing them is
+    // worth catching here rather than spending a round trip to be told
+    // "Invalid parameter". This exact template failed on three consecutive
+    // newlines and the UI could only show a 400.
+    const { checkTemplateBody } = await import('../services/metaTemplate.js');
+    const bodyIssues = checkTemplateBody((template.body as any)?.text || '');
+    if (bodyIssues.length > 0) {
+      return reply.status(400).send({
+        success: false,
+        error: {
+          code: 'TEMPLATE_BODY_INVALID',
+          message: bodyIssues.map((i) => i.message).join(' '),
+          issues: bodyIssues,
+          // The newline case is mechanical, so the UI can offer to do it.
+          autoFixable: bodyIssues.every((i) => i.fixable),
         },
       });
     }

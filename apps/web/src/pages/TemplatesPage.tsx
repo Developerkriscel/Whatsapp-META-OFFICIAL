@@ -197,6 +197,7 @@ export default function TemplatesPage() {
 
   const submitMutation = useMutation({
     mutationFn: async (templateId: string) => {
+      pendingSubmitId.current = templateId;
       const response = await api.post(`/templates/${templateId}/submit`);
       return response.data;
     },
@@ -206,8 +207,37 @@ export default function TemplatesPage() {
       showNotification('success', 'Template submitted for Meta approval!');
     },
     onError: (error: any) => {
-      const message = error.response?.data?.error?.message || 'Failed to submit template';
-      showNotification('error', message);
+      const err = error.response?.data?.error;
+      // Meta's formatting rules are checked before submitting now, and the
+      // newline case is mechanical, so offer to do it rather than describing a
+      // problem the user then has to hunt for in a textarea.
+      if (err?.code === 'TEMPLATE_BODY_INVALID' && err?.autoFixable) {
+        setFixable({ id: pendingSubmitId.current!, message: err.message });
+        return;
+      }
+      showNotification('error', err?.message || 'Failed to submit template');
+    },
+  });
+
+  // Set when a submit fails on something we can repair in one call.
+  const [fixable, setFixable] = useState<{ id: string; message: string } | null>(null);
+  const pendingSubmitId = useRef<string | null>(null);
+
+  const tidyMutation = useMutation({
+    mutationFn: async (templateId: string) => {
+      await api.post(`/templates/${templateId}/tidy-body`);
+      const response = await api.post(`/templates/${templateId}/submit`);
+      return response.data;
+    },
+    onSuccess: () => {
+      setFixable(null);
+      queryClient.invalidateQueries({ queryKey: ['templates'] });
+      setSelectedTemplate(null);
+      showNotification('success', 'Spacing tidied and submitted for approval.');
+    },
+    onError: (error: any) => {
+      setFixable(null);
+      showNotification('error', error.response?.data?.error?.message || 'Could not submit');
     },
   });
 
@@ -683,6 +713,32 @@ export default function TemplatesPage() {
                   )}
                   Submit for Approval
                 </button>
+              )}
+
+              {/* Meta refused on formatting we can repair. Say exactly what is
+                  wrong and offer to do it, rather than leaving the user to find
+                  a blank line in a textarea. */}
+              {fixable && fixable.id === selectedTemplate.id && (
+                <div className="w-full p-3 bg-amber-50 border border-amber-200 rounded-apple-lg">
+                  <p className="text-sm text-amber-900 font-medium">Meta will not accept this yet</p>
+                  <p className="text-sm text-amber-800 mt-0.5">{fixable.message}</p>
+                  <div className="flex gap-2 mt-2">
+                    <button
+                      onClick={() => tidyMutation.mutate(selectedTemplate.id)}
+                      disabled={tidyMutation.isPending}
+                      className="px-3 py-1.5 bg-amber-600 text-white text-sm rounded-apple-lg hover:opacity-90 disabled:opacity-50 inline-flex items-center gap-1.5"
+                    >
+                      {tidyMutation.isPending && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                      Tidy the spacing and submit
+                    </button>
+                    <button
+                      onClick={() => setFixable(null)}
+                      className="px-3 py-1.5 text-sm text-amber-800 hover:underline"
+                    >
+                      I'll edit it myself
+                    </button>
+                  </div>
+                </div>
               )}
               <button
                 onClick={() => {

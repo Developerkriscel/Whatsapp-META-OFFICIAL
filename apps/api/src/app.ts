@@ -99,7 +99,29 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(rawBody, {
     field: 'rawBody',
     global: false,
-    routes: ['/api/v1/stripe/webhook'],
+    routes: ['/api/v1/stripe/webhook', '/webhooks/razorpay'],
+  });
+
+  /**
+   * A POST with no body but a JSON content-type.
+   *
+   * Several endpoints take no body at all — submit a template, sync, verify a
+   * number. axios still sets Content-Type: application/json on a bodyless
+   * post, and Fastify's default parser rejects that combination outright with
+   * FST_ERR_CTP_EMPTY_JSON_BODY. The button in the UI just showed "400".
+   *
+   * Treating an empty body as {} is what those routes already expect, and their
+   * zod schemas still reject a body that is present but malformed.
+   */
+  app.addContentTypeParser('application/json', { parseAs: 'string' }, (_req, body, done) => {
+    const text = (body as string) ?? '';
+    if (text.trim() === '') return done(null, {});
+    try {
+      done(null, JSON.parse(text));
+    } catch (err: any) {
+      err.statusCode = 400;
+      done(err, undefined);
+    }
   });
 
   // Meta calls the Data Deletion callback as application/x-www-form-urlencoded

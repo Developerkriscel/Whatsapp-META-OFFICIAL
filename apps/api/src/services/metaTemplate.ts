@@ -118,9 +118,77 @@ export async function submitTemplateToMeta(
       status: response.data.status,
     };
   } catch (error: any) {
+    const err = error.response?.data?.error;
     console.error('Failed to submit template to Meta:', error.response?.data);
-    throw new Error(`Failed to submit template: ${error.response?.data?.error?.message || error.message}`);
+    // Meta's top-level `message` for a rejected template is the useless
+    // "Invalid parameter". What is actually wrong is in error_user_msg, and
+    // discarding it left the UI showing a bare 400 with nothing to act on.
+    const detail = err?.error_user_msg || err?.error_user_title || err?.message || error.message;
+    throw new Error(`Failed to submit template: ${detail}`);
   }
+}
+
+/**
+ * Meta's formatting rules for a template body, checked before submitting.
+ *
+ * These are documented rules with fixed thresholds, so failing them is
+ * predictable — there is no reason to spend a round trip and an opaque
+ * "Invalid parameter" to discover a blank line.
+ */
+export interface BodyIssue {
+  code: string;
+  message: string;
+  fixable: boolean;
+}
+
+export function checkTemplateBody(text: string): BodyIssue[] {
+  const issues: BodyIssue[] = [];
+
+  // More than two consecutive newlines. Easy to introduce by pasting, and
+  // invisible in a textarea.
+  const runs = text.match(/\n{3,}/g);
+  if (runs) {
+    const worst = Math.max(...runs.map((r) => r.length));
+    issues.push({
+      code: 'CONSECUTIVE_NEWLINES',
+      message: `${runs.length} place${runs.length === 1 ? '' : 's'} with ${worst} blank lines in a row. Meta allows at most two.`,
+      fixable: true,
+    });
+  }
+
+  const emojis = text.match(/\p{Extended_Pictographic}/gu);
+  if (emojis && emojis.length > 10) {
+    issues.push({
+      code: 'TOO_MANY_EMOJIS',
+      message: `${emojis.length} emojis. Meta allows at most 10.`,
+      fixable: false,
+    });
+  }
+
+  // A body that is nothing but variables is rejected.
+  const withoutVars = text.replace(/\{\{\s*\d+\s*\}\}/g, '').trim();
+  if (text.trim() && withoutVars === '') {
+    issues.push({
+      code: 'ONLY_PARAMETERS',
+      message: 'The body is only variables. Meta needs some literal text around them.',
+      fixable: false,
+    });
+  }
+
+  if (text.length > 1024) {
+    issues.push({
+      code: 'TOO_LONG',
+      message: `${text.length} characters. Meta allows 1024.`,
+      fixable: false,
+    });
+  }
+
+  return issues;
+}
+
+/** Collapses runs of blank lines to the two Meta permits. */
+export function normaliseTemplateBody(text: string): string {
+  return text.replace(/\n{3,}/g, '\n\n');
 }
 
 /** Meta's header formats that carry a file rather than text. */
