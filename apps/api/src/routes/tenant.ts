@@ -4282,6 +4282,102 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
   /**
    * GET /notifications/unread-count - Get unread notification count
    */
+  /**
+   * GET /notifications/feed
+   *
+   * One list for the bell: unread customer messages alongside system
+   * notifications. They were separate before, and the one that matters most —
+   * a customer waiting for a reply — had no surface at all outside the
+   * Conversations page.
+   *
+   * Waiting conversations come first regardless of age. A notification about a
+   * finished campaign can wait; a customer cannot.
+   */
+  app.get('/notifications/feed', async (request, reply) => {
+    if (!request.authUser.tenantId) {
+      return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
+    }
+    const tenantId = request.authUser.tenantId;
+
+    const [conversations, conversationCount, notifications, notificationCount] = await Promise.all([
+      app.prisma.conversation.findMany({
+        where: { tenantId, unreadCount: { gt: 0 }, status: { not: 'CLOSED' } },
+        orderBy: { lastMessageAt: 'desc' },
+        take: 15,
+        select: {
+          id: true, unreadCount: true, lastMessageAt: true,
+          contact: { select: { name: true, phone: true } },
+          messages: {
+            where: { direction: 'INCOMING' },
+            orderBy: { createdAt: 'desc' },
+            take: 1,
+            select: { body: true, type: true, createdAt: true },
+          },
+        },
+      }),
+      // Counted separately from the list. Deriving the badge from a capped
+      // list made it read 15 when 32 people were waiting — a badge that
+      // undercounts is worse than none, because it looks handled.
+      app.prisma.conversation.count({
+        where: { tenantId, unreadCount: { gt: 0 }, status: { not: 'CLOSED' } },
+      }),
+      (app.prisma as any).notification.findMany({
+        where: {
+          tenantId, isDeleted: false,
+          OR: [{ userId: request.authUser.id }, { userId: null }],
+        },
+        orderBy: { createdAt: 'desc' },
+        take: 15,
+      }),
+      (app.prisma as any).notification.count({
+        where: {
+          tenantId, isRead: false, isDeleted: false,
+          OR: [{ userId: request.authUser.id }, { userId: null }],
+        },
+      }),
+    ]);
+
+    const unreadMessages = conversations.reduce((n, c) => n + c.unreadCount, 0);
+
+    return {
+      success: true,
+      data: {
+        // The badge counts conversations, not individual messages — one
+        // customer with nine unread messages is one thing to deal with.
+        badge: conversationCount + notificationCount,
+        unreadConversations: conversationCount,
+        // The list is capped; the count is not. Say when there is more.
+        conversationsShown: conversations.length,
+        unreadMessages,
+        unreadNotifications: notificationCount,
+        conversations: conversations.map((c) => {
+          const last = c.messages[0];
+          return {
+            id: c.id,
+            name: c.contact?.name || c.contact?.phone || 'Unknown',
+            phone: c.contact?.phone,
+            unreadCount: c.unreadCount,
+            at: c.lastMessageAt,
+            // Media has no body text, so say what it is rather than nothing.
+            preview: last?.body?.slice(0, 90)
+              || (last?.type && last.type !== 'TEXT' ? `Sent ${String(last.type).toLowerCase()}` : ''),
+          };
+        }),
+        notifications: notifications.map((n: any) => ({
+          id: n.id,
+          type: n.type,
+          title: n.title,
+          message: n.message,
+          isRead: n.isRead,
+          priority: n.priority,
+          referenceType: n.referenceType,
+          referenceId: n.referenceId,
+          at: n.createdAt,
+        })),
+      },
+    };
+  });
+
   app.get('/notifications/unread-count', async (request, reply) => {
     if (!request.authUser.tenantId) {
       return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });

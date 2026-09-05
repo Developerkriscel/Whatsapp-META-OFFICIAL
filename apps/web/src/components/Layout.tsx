@@ -28,6 +28,7 @@ import clsx from 'clsx';
 import { useQuery } from '@tanstack/react-query';
 import { api } from '../api/client';
 import { useCurrency, creditsToMoney, formatCredits } from '../lib/money';
+import NotificationBell from './NotificationBell';
 import HeaderAvatar, { AvatarKind } from './HeaderAvatar';
 
 interface LayoutProps {
@@ -130,6 +131,10 @@ export default function Layout({ children, variant }: LayoutProps) {
             <div className="flex items-center gap-3">
               {/* Credits Bar - Only for client variant */}
               {variant === 'client' && <CreditsBar />}
+
+              {/* Sits beside credits because both answer "does anything need me
+                  right now" — one about money, one about customers. */}
+              {variant === 'client' && <NotificationBell />}
 
               {/* Apple-style User Menu */}
               <div className="relative">

@@ -5,6 +5,7 @@
  */
 
 import { useState, useRef, useEffect } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api, teamsApi } from '../api/client';
 import {
@@ -79,6 +80,10 @@ type FilterType = 'open' | 'all' | 'unread' | 'closed' | 'pending' | 'mine' | 'b
 export default function ConversationsPage() {
   const [search, setSearch] = useState('');
   const [selected, setSelected] = useState<Conversation | null>(null);
+  // The notification bell links straight to a conversation, so honour ?open=<id>
+  // once the list has loaded. Without this the link lands on the inbox and the
+  // person has to find the thread they just clicked.
+  const [searchParams, setSearchParams] = useSearchParams();
   const [message, setMessage] = useState('');
   const [filter, setFilter] = useState<FilterType>('open');
   const [showSidebar, setShowSidebar] = useState(true);
@@ -157,6 +162,21 @@ export default function ConversationsPage() {
     createdAt: conv.createdAt,
     messages: [],
   }));
+
+  // Open the conversation named in ?open=<id>, once it is in the list. The
+  // parameter is cleared afterwards so a refresh does not keep re-opening it.
+  useEffect(() => {
+    const wanted = searchParams.get('open');
+    if (!wanted || selected?.id === wanted) return;
+    const match = conversations.find((c) => c.id === wanted);
+    if (match) {
+      setSelected(match);
+      setChatTab('messages');
+      searchParams.delete('open');
+      setSearchParams(searchParams, { replace: true });
+    }
+  }, [searchParams, conversations, selected]);
+
 
   // Active conversation from detail query
   const activeConv: any = activeConvData?.data;
