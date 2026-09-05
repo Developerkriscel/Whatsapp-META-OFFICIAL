@@ -2,11 +2,11 @@
  * Tenant Settings Page - Fully Functional with API Integration
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../api/client';
 import { useAuth } from '../context/AuthContext';
-import { Save, Building, Globe, Bell, Key, Shield, Eye, EyeOff, Check, Loader2, Copy, Plus, Trash2, X, QrCode } from 'lucide-react';
+import { Save, Building, Globe, Bell, Key, Shield, Eye, EyeOff, Check, Loader2, Copy, Plus, Trash2, X, QrCode, Camera } from 'lucide-react';
 
 const TABS = [
   { id: 'profile', label: 'Profile', icon: Building },
@@ -42,6 +42,31 @@ export default function SettingsPage() {
   const [showPassword, setShowPassword] = useState({ current: false, new: false, confirm: false });
 
   // Profile form state
+  // The Change Photo button had no handler at all, and User.avatarUrl was a
+  // column nothing ever wrote.
+  const avatarInputRef = useRef<HTMLInputElement>(null);
+  const [avatarUrl, setAvatarUrl] = useState<string | null>(null);
+  const [avatarError, setAvatarError] = useState('');
+  const [avatarUploading, setAvatarUploading] = useState(false);
+
+  const uploadAvatar = async (file: File) => {
+    setAvatarError('');
+    setAvatarUploading(true);
+    try {
+      const fd = new FormData();
+      fd.append('file', file);
+      const res = await api.post('/uploads/avatar', fd, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+      });
+      setAvatarUrl(res.data?.data?.url ?? null);
+    } catch (err: any) {
+      setAvatarError(err?.response?.data?.error?.message || 'Could not upload that image.');
+    } finally {
+      setAvatarUploading(false);
+      if (avatarInputRef.current) avatarInputRef.current.value = '';
+    }
+  };
+
   const [profileForm, setProfileForm] = useState({
     name: user?.name || '',
     email: user?.email || '',
@@ -272,6 +297,8 @@ export default function SettingsPage() {
         phone: profileData.phone || '',
         timezone: profileData.tenant?.timezone || 'America/New_York',
       });
+      // Show the stored photo rather than the initial, when there is one.
+      setAvatarUrl(profileData.avatarUrl ?? null);
     }
   }, [profileData]);
 
@@ -391,13 +418,38 @@ export default function SettingsPage() {
             <div className="space-y-5">
               {/* Photo */}
               <div className="flex items-center gap-4">
-                <div className="w-16 h-16 rounded-full bg-ios-gray flex items-center justify-center">
-                  <span className="text-2xl font-semibold text-ios-secondary">
-                    {profileForm.name?.charAt(0)?.toUpperCase() || 'U'}
-                  </span>
+                <div className="w-16 h-16 rounded-full bg-ios-gray flex items-center justify-center overflow-hidden shrink-0">
+                  {avatarUrl ? (
+                    <img src={avatarUrl} alt="Profile photo" className="w-full h-full object-cover" />
+                  ) : (
+                    <span className="text-2xl font-semibold text-ios-secondary">
+                      {profileForm.name?.charAt(0)?.toUpperCase() || 'U'}
+                    </span>
+                  )}
                 </div>
-                <button className="btn-apple btn-apple-outline text-sm">Change Photo</button>
-                <span className="text-xs text-ios-muted">JPG or PNG. Max 5MB.</span>
+                <input
+                  ref={avatarInputRef}
+                  type="file"
+                  accept="image/jpeg,image/png,image/webp"
+                  className="hidden"
+                  onChange={(e) => {
+                    const f = e.target.files?.[0];
+                    if (f) uploadAvatar(f);
+                  }}
+                />
+                <button
+                  onClick={() => avatarInputRef.current?.click()}
+                  disabled={avatarUploading}
+                  className="btn-apple btn-apple-outline text-sm inline-flex items-center gap-2 disabled:opacity-50"
+                >
+                  {avatarUploading
+                    ? <><Loader2 className="w-4 h-4 animate-spin" /> Uploading…</>
+                    : <><Camera className="w-4 h-4" /> Change Photo</>}
+                </button>
+                <div className="text-xs">
+                  <p className="text-ios-muted">JPG, PNG or WebP. Max 5MB.</p>
+                  {avatarError && <p className="text-apple-red mt-0.5">{avatarError}</p>}
+                </div>
               </div>
 
               {/* Full Name */}
