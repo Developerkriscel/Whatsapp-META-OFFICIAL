@@ -11,14 +11,15 @@ import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../api/client';
 import {
-  Package, Percent, CreditCard, Plus, Trash2, Check, X, Coins,
+  Package, Percent, CreditCard, Plus, Trash2, Check, X, Coins, HardDrive,
   AlertTriangle, Loader2, Eye, EyeOff, Beaker,
 } from 'lucide-react';
 import { useCurrency } from '../lib/money';
 import SuperAdminCreditSettings from './SuperAdminCreditSettings';
 import PaymentProviderLogo from './PaymentProviderLogo';
+import SuperAdminStorageTab from './SuperAdminStorageTab';
 
-type Tab = 'settings' | 'packages' | 'fees' | 'providers';
+type Tab = 'settings' | 'packages' | 'fees' | 'providers' | 'storage';
 
 const BASIS_LABEL: Record<string, string> = {
   BASE: 'the package price',
@@ -41,6 +42,7 @@ export default function SuperAdminCommerceTab() {
           ['packages', 'Credit packages', Package],
           ['fees', 'Fees', Percent],
           ['providers', 'Payment providers', CreditCard],
+          ['storage', 'File storage', HardDrive],
         ] as const).map(([key, label, Icon]) => (
           <button
             key={key}
@@ -59,6 +61,7 @@ export default function SuperAdminCommerceTab() {
       {tab === 'packages' && <Packages money={money} qc={qc} />}
       {tab === 'fees' && <Fees money={money} qc={qc} symbol={fx.symbol} />}
       {tab === 'providers' && <Providers qc={qc} />}
+      {tab === 'storage' && <SuperAdminStorageTab />}
     </div>
   );
 }
