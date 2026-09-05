@@ -10,6 +10,7 @@ interface User {
   tenantName?: string;
   isSuperadmin?: boolean;
   avatarGender?: 'boy' | 'girl' | null;
+  avatarUrl?: string | null;
   impersonatedBy?: { id: string; name: string; email: string } | null;
 }
 

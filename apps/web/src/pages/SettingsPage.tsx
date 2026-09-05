@@ -58,7 +58,11 @@ export default function SettingsPage() {
       const res = await api.post('/uploads/avatar', fd, {
         headers: { 'Content-Type': 'multipart/form-data' },
       });
-      setAvatarUrl(res.data?.data?.url ?? null);
+      const url = res.data?.data?.url ?? null;
+      setAvatarUrl(url);
+      // The header reads the cached user, so without this the new photo only
+      // appears on this page until the next sign-in.
+      updateUser({ avatarUrl: url });
     } catch (err: any) {
       setAvatarError(err?.response?.data?.error?.message || 'Could not upload that image.');
     } finally {

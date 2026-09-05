@@ -146,8 +146,14 @@ export default function Layout({ children, variant }: LayoutProps) {
                     <p className="font-medium text-primary-apple text-sm leading-tight">{user?.name}</p>
                     <p className="text-xs text-secondary-apple leading-tight">{user?.email}</p>
                   </div>
-                  <div className="w-8 h-8 bg-wa-gradient rounded-full flex items-center justify-center text-white font-semibold text-sm shadow-wa">
-                    {user?.name?.charAt(0).toUpperCase()}
+                  <div className="w-8 h-8 rounded-full overflow-hidden shadow-wa shrink-0">
+                    {user?.avatarUrl ? (
+                      <img src={user.avatarUrl} alt="" className="w-full h-full object-cover" />
+                    ) : (
+                      <div className="w-full h-full bg-wa-gradient flex items-center justify-center text-white font-semibold text-sm">
+                        {user?.name?.charAt(0).toUpperCase()}
+                      </div>
+                    )}
                   </div>
                   <ChevronDown className="w-4 h-4 text-secondary-apple hidden sm:block" />
                 </button>
