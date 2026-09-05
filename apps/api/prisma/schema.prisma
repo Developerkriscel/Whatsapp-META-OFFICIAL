@@ -331,6 +331,7 @@ model Tenant {
 
   // ALL tenant-scoped relations
   users          User[]
+  paymentOrders  PaymentOrder[]
   contacts       Contact[]
   conversations  Conversation[]
   conversationNotes ConversationNote[]
@@ -1874,4 +1875,49 @@ model PaymentProvider {
   updatedAt DateTime @updatedAt
 
   @@map("payment_providers")
+}
+
+enum PaymentOrderStatus {
+  CREATED
+  PAID
+  FAILED
+  EXPIRED
+}
+
+/// A credit purchase in progress.
+///
+/// Exists so a payment can be verified against something the server decided.
+/// Without it the amount and credit count would have to be trusted from the
+/// browser at confirmation time, and a purchase could be replayed to grant the
+/// credits twice.
+model PaymentOrder {
+  id       String @id @default(cuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  provider        String
+  /// The provider's own order id.
+  providerOrderId String @unique
+  /// Set once the provider confirms; also the idempotency key for crediting.
+  providerPaymentId String? @unique
+
+  /// What the server decided this purchase is worth, fixed at creation.
+  credits     Int
+  amountMinor Int
+  currency    String @default("INR")
+
+  packageId String?
+  status    PaymentOrderStatus @default(CREATED)
+
+  /// Breakdown as quoted, kept for the receipt and for disputes.
+  breakdown Json?
+  failureReason String?
+
+  creditedAt DateTime?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([tenantId])
+  @@index([status])
+  @@map("payment_orders")
 }

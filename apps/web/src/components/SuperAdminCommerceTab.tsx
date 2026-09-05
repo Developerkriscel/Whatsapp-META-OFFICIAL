@@ -16,6 +16,7 @@ import {
 } from 'lucide-react';
 import { useCurrency } from '../lib/money';
 import SuperAdminCreditSettings from './SuperAdminCreditSettings';
+import PaymentProviderLogo from './PaymentProviderLogo';
 
 type Tab = 'settings' | 'packages' | 'fees' | 'providers';
 
@@ -420,7 +421,7 @@ function Providers({ qc }: { qc: any }) {
         return (
           <div key={a.provider} className={`p-4 rounded-apple-lg border ${cfg?.isActive ? 'border-wa-green/40 bg-wa-green/5' : 'border-black/10'}`}>
             <div className="flex items-center gap-3">
-              <CreditCard className={`w-5 h-5 ${cfg?.isActive ? 'text-wa-green' : 'text-ios-muted'}`} />
+              <PaymentProviderLogo provider={a.provider} muted={!cfg?.isActive} />
               <div className="flex-1">
                 <div className="flex items-center gap-2">
                   <span className="font-medium text-ios-dark">{a.label}</span>

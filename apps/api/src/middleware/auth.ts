@@ -54,6 +54,9 @@ const PUBLIC_ROUTES = [
   '/webhook',
   '/api/v1/webhooks/whatsapp',
   '/api/v1/stripe/webhook',
+  // Razorpay authenticates itself by signing the body; a bearer token would
+  // be meaningless here and would only stop the webhook arriving.
+  '/webhooks/razorpay',
   '/api/v1/whatsapp/oauth/callback',
   '/api/v1/meta/data-deletion',
   '/api/v1/meta/data-deletion-status',

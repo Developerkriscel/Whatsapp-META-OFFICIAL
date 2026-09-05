@@ -211,7 +211,24 @@ export async function registerCreditRoutes(app: FastifyInstance): Promise<void> 
   // PURCHASE CREDITS — Buy credit pack
   // ============================================
 
+  /**
+   * POST /credits/purchase
+   *
+   * This used to call addCredits directly with a comment where the payment
+   * should have been, so anyone who could reach it could grant themselves
+   * credits. It now refuses and names the endpoints that actually take money.
+   */
   app.post('/credits/purchase', { preHandler: [app.requirePermission('billing', 'update')] }, async (request, reply) => {
+    return reply.status(410).send({
+      success: false,
+      error: {
+        code: 'USE_CHECKOUT',
+        message: 'Credits are granted only against a confirmed payment. Start a purchase with POST /credits/checkout/create-order.',
+      },
+    });
+  });
+
+  app.post('/credits/purchase-legacy-disabled', { preHandler: [app.requirePermission('billing', 'update')] }, async (request, reply) => {
     if (!request.authUser?.tenantId) {
       return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
     }
@@ -312,5 +329,86 @@ export async function registerCreditRoutes(app: FastifyInstance): Promise<void> 
         creditsUsd: creditsToUsd(body.amount),
       },
     };
+  });
+
+  // ============================================
+  // CHECKOUT -- real money
+  // ============================================
+
+  /**
+   * POST /credits/checkout/create-order
+   *
+   * The server fixes the price and the credit count here and stores both. The
+   * browser is told the amount so it can render the gateway, and is never
+   * believed about it afterwards.
+   */
+  app.post('/credits/checkout/create-order', { preHandler: [app.requirePermission('billing', 'update')] }, async (request, reply) => {
+    if (!request.authUser?.tenantId) {
+      return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
+    }
+    const body = z.object({
+      packageId: z.string().optional(),
+      credits: z.number().int().positive().max(10000000).optional(),
+    }).parse(request.body);
+
+    try {
+      const { createOrder } = await import('../services/payments.js');
+      const order = await createOrder(app.prisma, {
+        tenantId: request.authUser.tenantId,
+        packageId: body.packageId,
+        credits: body.credits,
+      });
+      return { success: true, data: order };
+    } catch (err: any) {
+      return reply.status(400).send({
+        success: false,
+        error: { code: 'CHECKOUT_FAILED', message: err.message },
+      });
+    }
+  });
+
+  /**
+   * POST /credits/checkout/confirm
+   *
+   * Called by the browser when the gateway hands control back. Convenience
+   * only: the webhook confirms the same purchase independently, so a closed tab
+   * does not lose someone their credits.
+   */
+  app.post('/credits/checkout/confirm', { preHandler: [app.requirePermission('billing', 'update')] }, async (request, reply) => {
+    const body = z.object({
+      orderId: z.string(),
+      paymentId: z.string(),
+      signature: z.string(),
+    }).parse(request.body);
+
+    const { confirmPayment } = await import('../services/payments.js');
+    const result = await confirmPayment(app.prisma, {
+      orderId: body.orderId,
+      paymentId: body.paymentId,
+      signature: body.signature,
+    });
+
+    if (!result.credited && result.reason && !result.reason.startsWith('Already')) {
+      return reply.status(400).send({ success: false, error: { code: 'NOT_CREDITED', message: result.reason } });
+    }
+    return { success: true, data: result };
+  });
+
+  /** Recent purchases, for the receipt list on the Credits page. */
+  app.get('/credits/orders', async (request, reply) => {
+    if (!request.authUser?.tenantId) {
+      return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
+    }
+    const orders = await app.prisma.paymentOrder.findMany({
+      where: { tenantId: request.authUser.tenantId },
+      orderBy: { createdAt: 'desc' },
+      take: 20,
+      select: {
+        id: true, provider: true, providerOrderId: true, credits: true,
+        amountMinor: true, currency: true, status: true, createdAt: true,
+        creditedAt: true, failureReason: true, breakdown: true,
+      },
+    });
+    return { success: true, data: orders };
   });
 }

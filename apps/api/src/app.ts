@@ -17,6 +17,7 @@ import { registerSuperadminRoutes } from './routes/superadmin.js';
 import { registerWebhookRoutes } from './routes/webhooks.js';
 import { registerBillingRoutes } from './routes/billing.js';
 import { registerStripeWebhook } from './routes/stripe-webhook.js';
+import { registerRazorpayWebhook } from './routes/razorpay-webhook.js';
 import { registerAddOnRoutes } from './routes/tenant-addons.js';
 import { registerInvoiceRoutes } from './routes/invoice.js';
 import { registerWhatsAppRoutes } from './routes/whatsapp.js';
@@ -199,6 +200,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(registerSuperadminAdvancedRoutes, { prefix: '/api/v1/superadmin' });
   await app.register(registerWebhookRoutes);
   await app.register(registerStripeWebhook);
+  await app.register(registerRazorpayWebhook);
   await app.register(registerSSERoutes, { prefix: '/api/v1' });
   await app.register(registerAutomationRoutes, { prefix: '/api/v1' });
   await app.register(registerTeamRoutes, { prefix: '/api/v1' });

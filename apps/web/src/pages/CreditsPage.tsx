@@ -254,15 +254,46 @@ export default function CreditsPage() {
     },
   });
 
+  // Buying now goes through the gateway. The endpoint this used to call granted
+  // the credits with no payment at all, and has been closed.
+  const [checkoutMessage, setCheckoutMessage] = useState<{ tone: 'ok' | 'warn' | 'err'; text: string } | null>(null);
+
   const purchaseMutation = useMutation({
-    mutationFn: async (data: { packId?: string; credits?: number; currency?: string }) => {
-      const response = await api.post('/credits/purchase', data);
-      return response.data;
+    mutationFn: async (data: { packageId?: string; credits?: number }) => {
+      const { buyCredits } = await import('../lib/checkout');
+      return buyCredits({
+        packageId: data.packageId,
+        credits: data.credits,
+        prefill: (() => {
+          try {
+            const u = JSON.parse(localStorage.getItem('user') || '{}');
+            return { name: u?.name, email: u?.email };
+          } catch { return {}; }
+        })(),
+      });
     },
-    onSuccess: () => {
-      setShowPurchase(false);
-      setSelectedPack(null);
-      setCustomCredits('');
+    onSuccess: (result: any) => {
+      if (result.status === 'credited') {
+        setCheckoutMessage({ tone: 'ok', text: `${result.credits.toLocaleString('en-IN')} credits added.` });
+        setShowPurchase(false);
+        setSelectedPack(null);
+        setCustomCredits('');
+      } else if (result.status === 'pending') {
+        // The webhook is the authority; the balance catches up on its own.
+        setCheckoutMessage({ tone: 'warn', text: result.message || 'Payment taken — your balance will update shortly.' });
+      } else if (result.status === 'dismissed') {
+        setCheckoutMessage(null);
+      } else {
+        setCheckoutMessage({ tone: 'err', text: result.message || 'The payment did not go through.' });
+      }
+      queryClient.invalidateQueries({ queryKey: ['credits'] });
+      queryClient.invalidateQueries({ queryKey: ['billing-credits'] });
+    },
+    onError: (err: any) => {
+      setCheckoutMessage({
+        tone: 'err',
+        text: err?.response?.data?.error?.message || err?.message || 'Could not start the payment.',
+      });
     },
   });
 
@@ -494,6 +525,15 @@ export default function CreditsPage() {
         <p className="text-sm text-ios-muted mb-6">Choose a package based on your messaging needs. All prices include platform fees.</p>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+          {checkoutMessage && (
+            <div className={`col-span-full mb-2 p-3 rounded-apple-lg border text-sm ${
+              checkoutMessage.tone === 'ok' ? 'bg-wa-green/10 border-wa-green/20 text-wa-green'
+              : checkoutMessage.tone === 'warn' ? 'bg-amber-50 border-amber-200 text-amber-700'
+              : 'bg-red-50 border-red-200 text-red-600'
+            }`}>
+              {checkoutMessage.text}
+            </div>
+          )}
           {PACKS.map((pack, index) => (
             <div
               key={pack.name}
@@ -568,16 +608,14 @@ export default function CreditsPage() {
         {/* Purchase Button */}
         <button
           onClick={() => {
+            setCheckoutMessage(null);
             if (selectedPack !== null) {
-              purchaseMutation.mutate({
-                credits: PACKS[selectedPack].credits,
-                currency: displayCurrency,
-              });
+              const pk = PACKS[selectedPack];
+              // Prefer the package id so the server prices it from its own row
+              // rather than re-deriving from a credit count.
+              purchaseMutation.mutate(pk.id ? { packageId: pk.id } : { credits: pk.credits });
             } else if (customCredits && parseInt(customCredits) >= 500) {
-              purchaseMutation.mutate({
-                credits: parseInt(customCredits),
-                currency: displayCurrency,
-              });
+              purchaseMutation.mutate({ credits: parseInt(customCredits) });
             }
           }}
           disabled={purchaseMutation.isPending || (selectedPack === null && (!customCredits || parseInt(customCredits) < 500))}
@@ -652,11 +690,11 @@ export default function CreditsPage() {
             <button
               onClick={() => {
                 if (selectedPack !== null) {
-                  purchaseMutation.mutate({
-                    credits: PACKS[selectedPack].credits,
-                    currency: displayCurrency,
-                  });
-                  setShowPurchase(false);
+                  const pk = PACKS[selectedPack];
+                  setCheckoutMessage(null);
+                  // The modal stays open until the gateway resolves, so a
+                  // dismissed payment does not look like a completed one.
+                  purchaseMutation.mutate(pk.id ? { packageId: pk.id } : { credits: pk.credits });
                 }
               }}
               disabled={selectedPack === null || purchaseMutation.isPending}
