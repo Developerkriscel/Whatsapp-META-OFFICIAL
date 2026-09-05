@@ -69,17 +69,32 @@ export async function registerInsightsRoutes(app: FastifyInstance): Promise<void
       }),
     ]);
 
-    // Calculate delivery rate
-    const deliveredCount = await app.prisma.message.count({
-      where: { tenantId, direction: 'OUTGOING', status: 'DELIVERED' },
-    });
-    const deliveryRate = totalMessages > 0 ? Math.round((deliveredCount / totalMessages) * 100) : 0;
+    // status is terminal, not cumulative: a message that was read is READ and
+    // no longer DELIVERED. Counting only DELIVERED excluded everything that had
+    // been read, which is how this page could report a read rate above its
+    // delivery rate — impossible, since reading requires delivery.
+    //
+    // The denominator is what actually reached Meta, not every row: a message
+    // that failed to send was never eligible for delivery, and including it
+    // depressed the rate for a reason that has nothing to do with deliverability.
+    const [deliveredCount, readCount, acceptedCount, failedCount] = await Promise.all([
+      app.prisma.message.count({
+        where: { tenantId, direction: 'OUTGOING', status: { in: ['DELIVERED', 'READ'] } },
+      }),
+      app.prisma.message.count({
+        where: { tenantId, direction: 'OUTGOING', status: 'READ' },
+      }),
+      app.prisma.message.count({
+        where: { tenantId, direction: 'OUTGOING', status: { in: ['SENT', 'DELIVERED', 'READ'] } },
+      }),
+      app.prisma.message.count({
+        where: { tenantId, direction: 'OUTGOING', status: 'FAILED' },
+      }),
+    ]);
 
-    // Calculate read rate
-    const readCount = await app.prisma.message.count({
-      where: { tenantId, direction: 'OUTGOING', status: 'READ' },
-    });
-    const readRate = totalMessages > 0 ? Math.round((readCount / totalMessages) * 100) : 0;
+    const deliveryRate = acceptedCount > 0 ? Math.round((deliveredCount / acceptedCount) * 100) : 0;
+    const readRate = deliveredCount > 0 ? Math.round((readCount / deliveredCount) * 100) : 0;
+    const failureRate = totalMessages > 0 ? Math.round((failedCount / totalMessages) * 100) : 0;
 
     // WhatsApp quality
     const connectedPhones = phoneNumbers.length;
@@ -95,6 +110,13 @@ export async function registerInsightsRoutes(app: FastifyInstance): Promise<void
           sentThisMonth: messagesThisMonth,
           deliveryRate,
           readRate,
+          // Reported alongside so a low delivery rate can be told apart from a
+          // high failure rate — they have completely different causes.
+          failureRate,
+          delivered: deliveredCount,
+          read: readCount,
+          failed: failedCount,
+          accepted: acceptedCount,
         },
         contacts: {
           total: totalContacts,
