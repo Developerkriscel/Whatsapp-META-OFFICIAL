@@ -159,9 +159,16 @@ export async function putObject(
     throw new Error(`R2 rejected the upload (${res.status}): ${text.slice(0, 200)}`);
   }
 
+  // Absolute, always. A relative URL is resolved against the origin of the page
+  // that renders it — the web host — where this route does not exist, and the
+  // image renders broken with a 404 nobody sees.
+  const apiBase = (process.env.PUBLIC_API_URL || '').replace(/\/+$/, '');
+
   return {
     key,
-    url: cfg.publicBaseUrl ? `${cfg.publicBaseUrl}/${key}` : `/api/v1/files/${key}`,
+    url: cfg.publicBaseUrl
+      ? `${cfg.publicBaseUrl}/${key}`
+      : `${apiBase}/api/v1/files/${key}`,
     publicDirect: !!cfg.publicBaseUrl,
     size: body.length,
   };
