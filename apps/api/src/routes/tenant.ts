@@ -2730,6 +2730,47 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
       });
     }
 
+    // Meta refuses a name that already carries content in this language, and
+    // says so only after the submit. The name can be held by a template that
+    // was deleted here but not there, so it is invisible from this side —
+    // checking first turns an unexplainable rejection into a clear one.
+    {
+      const credentials = await app.prisma.whatsAppCredentials.findUnique({
+        where: { tenantId: request.authUser.tenantId! },
+      });
+      const wabaId = await resolveEffectiveWabaId(
+        app.prisma, request.authUser.tenantId!, credentials?.wabaId, template.phoneNumberId,
+      );
+      if (credentials?.accessToken && wabaId) {
+        try {
+          const token = decryptSecret(credentials.accessToken);
+          const normalised = template.name.toLowerCase().replace(/[^a-z0-9_]/g, '_');
+          const res = await fetch(
+            `https://graph.facebook.com/v21.0/${wabaId}/message_templates?name=${encodeURIComponent(normalised)}&access_token=${encodeURIComponent(token)}`,
+          );
+          if (res.ok) {
+            const body: any = await res.json();
+            const clash = (body.data || []).find(
+              (t: any) => t.name === normalised && t.language === template.language,
+            );
+            if (clash && clash.id !== template.metaTemplateId) {
+              return reply.status(409).send({
+                success: false,
+                error: {
+                  code: 'NAME_TAKEN_ON_META',
+                  message: `Meta already has a template called "${normalised}" in ${template.language} (currently ${clash.status}). Rename this one, or delete the existing template first.`,
+                  existing: { name: clash.name, status: clash.status, language: clash.language, id: clash.id },
+                },
+              });
+            }
+          }
+        } catch {
+          // A failed check is not a reason to block the submit — Meta will
+          // still refuse the collision, just less helpfully.
+        }
+      }
+    }
+
     // Update template to PENDING
     const updated = await app.prisma.template.update({
       where: { id: templateId },
@@ -2946,14 +2987,69 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
     return { success: true, data: template };
   });
 
+  /**
+   * DELETE /templates/:templateId
+   *
+   * Also removes it from Meta when it exists there. Deleting only our row left
+   * the template on Meta holding its name, and the next submit under the same
+   * name was refused with "There is already English (US) content for this
+   * template" — which reads as a bug in the app, because the thing it names is
+   * invisible from here.
+   */
   app.delete('/templates/:templateId', { preHandler: [app.requirePermission('templates', 'delete')] }, async (request, reply) => {
     const { templateId } = z.object({ templateId: z.string() }).parse(request.params);
+
+    const template = await app.prisma.template.findFirst({
+      where: { id: templateId, tenantId: request.authUser.tenantId },
+    });
+    if (!template) {
+      return reply.status(404).send({ success: false, error: { code: 'NOT_FOUND' } });
+    }
+
+    let removedFromMeta: boolean | null = null;
+    if (template.metaTemplateId) {
+      const credentials = await app.prisma.whatsAppCredentials.findUnique({
+        where: { tenantId: request.authUser.tenantId! },
+      });
+      const wabaId = await resolveEffectiveWabaId(
+        app.prisma, request.authUser.tenantId!, credentials?.wabaId, template.phoneNumberId,
+      );
+      if (credentials?.accessToken && wabaId) {
+        try {
+          const token = decryptSecret(credentials.accessToken);
+          // Meta deletes by name, which removes every language for it.
+          const res = await fetch(
+            `https://graph.facebook.com/v21.0/${wabaId}/message_templates?name=${encodeURIComponent(template.name)}&access_token=${encodeURIComponent(token)}`,
+            { method: 'DELETE' },
+          );
+          removedFromMeta = res.ok;
+          if (!res.ok) {
+            const body: any = await res.json().catch(() => ({}));
+            console.error(`[templates] Meta refused to delete ${template.name}:`, body?.error?.message);
+          }
+        } catch (err: any) {
+          removedFromMeta = false;
+          console.error(`[templates] could not delete ${template.name} from Meta:`, err?.message);
+        }
+      }
+    }
 
     await app.prisma.template.deleteMany({
       where: { id: templateId, tenantId: request.authUser.tenantId },
     });
 
-    return { success: true, data: { message: 'Template deleted' } };
+    return {
+      success: true,
+      data: {
+        message: 'Template deleted',
+        // Said plainly: a name still held on Meta cannot be reused, and the
+        // user is the only one who can see why their next submit fails.
+        removedFromMeta,
+        warning: removedFromMeta === false
+          ? `Removed here, but Meta still holds the name "${template.name}". Submitting a new template with that name will be refused until it clears.`
+          : undefined,
+      },
+    };
   });
 
   // ============================================
