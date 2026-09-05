@@ -11,12 +11,13 @@ import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../api/client';
 import {
-  Package, Percent, CreditCard, Plus, Trash2, Check, X,
+  Package, Percent, CreditCard, Plus, Trash2, Check, X, Coins,
   AlertTriangle, Loader2, Eye, EyeOff, Beaker,
 } from 'lucide-react';
 import { useCurrency } from '../lib/money';
+import SuperAdminCreditSettings from './SuperAdminCreditSettings';
 
-type Tab = 'packages' | 'fees' | 'providers';
+type Tab = 'settings' | 'packages' | 'fees' | 'providers';
 
 const BASIS_LABEL: Record<string, string> = {
   BASE: 'the package price',
@@ -25,7 +26,7 @@ const BASIS_LABEL: Record<string, string> = {
 };
 
 export default function SuperAdminCommerceTab() {
-  const [tab, setTab] = useState<Tab>('packages');
+  const [tab, setTab] = useState<Tab>('settings');
   const fx = useCurrency();
   const qc = useQueryClient();
   const money = (minor: number) =>
@@ -35,6 +36,7 @@ export default function SuperAdminCommerceTab() {
     <div className="space-y-5">
       <div className="flex gap-2">
         {([
+          ['settings', 'Credit settings', Coins],
           ['packages', 'Credit packages', Package],
           ['fees', 'Fees', Percent],
           ['providers', 'Payment providers', CreditCard],
@@ -52,6 +54,7 @@ export default function SuperAdminCommerceTab() {
         ))}
       </div>
 
+      {tab === 'settings' && <SuperAdminCreditSettings />}
       {tab === 'packages' && <Packages money={money} qc={qc} />}
       {tab === 'fees' && <Fees money={money} qc={qc} symbol={fx.symbol} />}
       {tab === 'providers' && <Providers qc={qc} />}

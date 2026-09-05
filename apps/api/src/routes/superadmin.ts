@@ -264,7 +264,8 @@ export async function registerSuperadminRoutes(app: FastifyInstance): Promise<vo
     // charges are in `currency`; costs are stored in USD.
     const rateInCurrency = body.charges / billable;
     const rateUsd = body.currency.toUpperCase() === 'USD' ? rateInCurrency : rateInCurrency / fx.fxRate;
-    const derivedCredits = Math.round(rateUsd * 10000);
+    const { usdToCredits } = await import('../services/creditService.js');
+    const derivedCredits = usdToCredits(rateUsd);
 
     const rate = await app.prisma.creditRate.findUnique({ where: { countryCode: body.countryCode.toUpperCase() } });
     if (!rate) {

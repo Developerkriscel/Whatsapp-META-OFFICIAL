@@ -147,8 +147,11 @@ export async function quotePackage(
 
   const fxRow = await prisma.platformSetting.findUnique({ where: { key: 'fx_usd_rate' } });
   const fx = Number(fxRow?.value ?? 88.5);
-  // 10,000 credits = $1 is the peg the billing engine consumes credits at.
-  const creditWorthMinor = (1 / 10000) * fx * 100;
+  // Read the peg rather than assuming 10,000. Hardcoding it here meant the
+  // value ratio — the one number that says whether a pack agrees with the rate
+  // card — did not move when the peg was changed to fix exactly that.
+  const { getCreditsPerUsd } = await import('./creditService.js');
+  const creditWorthMinor = (1 / getCreditsPerUsd()) * fx * 100;
   const paidPerCreditMinor = pkg.credits > 0 ? breakdown.totalMinor / pkg.credits : 0;
 
   return {

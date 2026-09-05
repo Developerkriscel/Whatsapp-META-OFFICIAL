@@ -286,6 +286,16 @@ let rateCache = new Map<string, { marketing: number; utility: number; auth: numb
 let rateCacheLoadedAt: Date | null = null;
 
 export async function refreshRateCache(prisma: PrismaClient): Promise<number> {
+  // The peg travels with the rates: changing one without the other silently
+  // rescales every price in the product.
+  try {
+    const peg = await prisma.platformSetting.findUnique({ where: { key: 'credits_per_usd' } });
+    const parsed = Number(peg?.value);
+    if (Number.isFinite(parsed) && parsed > 0) creditsPerUsd = parsed;
+  } catch {
+    // Settings unreadable — the default is still a working peg.
+  }
+
   const rows = await prisma.creditRate.findMany({ where: { isActive: true } });
   const next = new Map<string, { marketing: number; utility: number; auth: number; service: number }>();
   for (const r of rows) {
@@ -345,18 +355,33 @@ export function getRateUsd(country: string, category: MessageCategory): number {
 }
 
 /**
- * Convert credits to USD
- * 10,000 credits = $1.00
+ * How many credits one dollar buys.
+ *
+ * This was a hardcoded 10,000 in two directions, which made the peg the one
+ * pricing decision that could not be changed without a deploy — and it is the
+ * decision that determines whether a credit pack and the rate card agree with
+ * each other. Held in the same cache as the rates and refreshed with them, so
+ * conversion stays synchronous for the thirty-odd call sites that rely on it.
+ */
+export const DEFAULT_CREDITS_PER_USD = 10000;
+let creditsPerUsd = DEFAULT_CREDITS_PER_USD;
+
+export function getCreditsPerUsd(): number {
+  return creditsPerUsd;
+}
+
+/**
+ * Convert credits to USD at the configured peg.
  */
 export function creditsToUsd(credits: number): number {
-  return credits / 10000;
+  return credits / creditsPerUsd;
 }
 
 /**
  * Convert USD to credits
  */
 export function usdToCredits(usd: number): number {
-  return Math.round(usd * 10000);
+  return Math.round(usd * creditsPerUsd);
 }
 
 /**

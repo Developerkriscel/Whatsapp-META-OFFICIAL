@@ -244,7 +244,7 @@ export async function registerCreditRoutes(app: FastifyInstance): Promise<void> 
       description = `Purchased ${pack.name}`;
     } else if (body.credits) {
       creditsToAdd = body.credits;
-      priceUsd = creditsToAdd / 10000; // $0.0001 per credit
+      priceUsd = creditsToUsd(creditsToAdd);
       localCurrency = body.currency || 'USD';
       description = `Purchased ${creditsToAdd} credits`;
     } else {
