@@ -315,7 +315,7 @@ async function processIncomingMessage(
 
   // Broadcast unread count update
   const unreadCount = await app.prisma.conversation.count({
-    where: { tenantId, status: 'OPEN', unreadCount: { gt: 0 } },
+    where: { tenantId, status: { not: 'CLOSED' }, unreadCount: { gt: 0 } },
   });
   broadcastToTenant(tenantId, {
     event: 'unread_count',

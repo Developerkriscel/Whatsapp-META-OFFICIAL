@@ -7,6 +7,7 @@ import { syncTemplatesFromMeta, submitTemplateToMeta, fetchMetaTemplates, resolv
 import { decryptSecret } from '../services/credentialEncryption.js';
 import { detectCountryFromPhone } from '../services/phoneCountry.js';
 import { checkTemplateContent, getAISuggestion } from '../services/aiAssist.js';
+import { broadcastToTenant } from './sse.js';
 
 type SegmentCondition = { field: string; operator: string; value?: string };
 
@@ -1352,6 +1353,63 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
         messages: undefined,
       })),
       meta: { page, limit, total, totalPages: Math.ceil(total / limit) },
+    };
+  });
+
+  /**
+   * POST /conversations/:conversationId/read
+   *
+   * Clears the unread counter for one thread. Nothing did this before: the
+   * webhook incremented conversation.unreadCount on every inbound message and
+   * no code path ever brought it back down, so the Unread tab and the bell
+   * accumulated forever. POST /messages/:messageId/read exists but only ever
+   * touched the message row — it never went near the conversation counter, and
+   * the web app never called it.
+   */
+  app.post('/conversations/:conversationId/read', async (request, reply) => {
+    const { conversationId } = z.object({ conversationId: z.string() }).parse(request.params);
+    const tenantId = request.authUser.tenantId;
+    if (!tenantId) {
+      return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
+    }
+
+    // findFirst with the tenant in the filter, not findUnique by id — the id
+    // comes from the caller, and a bare lookup would read another tenant's row.
+    const conversation = await app.prisma.conversation.findFirst({
+      where: { id: conversationId, tenantId },
+      select: { id: true },
+    });
+    if (!conversation) {
+      return reply.status(404).send({
+        success: false,
+        error: { code: 'CONVERSATION_NOT_FOUND', message: 'Conversation not found' },
+      });
+    }
+
+    const [, marked] = await app.prisma.$transaction([
+      app.prisma.conversation.update({
+        where: { id: conversationId },
+        data: { unreadCount: 0 },
+      }),
+      // readAt is what tells a later audit which inbound messages a human
+      // actually opened. Only incoming ones: an outgoing message being "read"
+      // is the recipient's act, reported by Meta on the status webhook.
+      app.prisma.message.updateMany({
+        where: { conversationId, tenantId, direction: 'INCOMING', readAt: null },
+        data: { readAt: new Date() },
+      }),
+    ]);
+
+    // Same event and shape the webhook broadcasts, so an open tab's badge
+    // drops without waiting for the next poll.
+    const unreadConversations = await app.prisma.conversation.count({
+      where: { tenantId, status: { not: 'CLOSED' }, unreadCount: { gt: 0 } },
+    });
+    broadcastToTenant(tenantId, { event: 'unread_count', data: { count: unreadConversations } });
+
+    return {
+      success: true,
+      data: { conversationId, messagesMarkedRead: marked.count, unreadConversations },
     };
   });
 

@@ -152,7 +152,7 @@ export default function ConversationsPage() {
     lastTime: conv.lastMessageAt
       ? new Date(conv.lastMessageAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
       : '',
-    unread: conv._count?.messages || 0,
+    unread: conv.unreadCount ?? 0,
     status: conv.status || 'OPEN',
     isBotActive: conv.isBotActive ?? false,
     assignedToId: conv.assignedToId,
@@ -162,6 +162,32 @@ export default function ConversationsPage() {
     createdAt: conv.createdAt,
     messages: [],
   }));
+
+  // Opening a thread is what makes it read. Nothing did this before, so
+  // unreadCount only ever went up: the Unread tab and the bell both kept
+  // counting threads that had already been dealt with.
+  const markReadMutation = useMutation({
+    mutationFn: async (conversationId: string) => {
+      const res = await api.post(`/conversations/${conversationId}/read`);
+      return res.data;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['conversations'] });
+      // The bell keys on 'notification-feed'; it counts the same threads, so
+      // it has to drop at the same moment the list badge does.
+      queryClient.invalidateQueries({ queryKey: ['notification-feed'] });
+    },
+  });
+
+  const lastMarkedRef = useRef<string | null>(null);
+  useEffect(() => {
+    const id = selected?.id;
+    // Guarded on a ref, not on unread > 0: the list refetches every few
+    // seconds and a re-render must not fire a second POST for the same thread.
+    if (!id || lastMarkedRef.current === id) return;
+    lastMarkedRef.current = id;
+    markReadMutation.mutate(id);
+  }, [selected?.id]);
 
   // Open the conversation named in ?open=<id>, once it is in the list. The
   // parameter is cleared afterwards so a refresh does not keep re-opening it.
