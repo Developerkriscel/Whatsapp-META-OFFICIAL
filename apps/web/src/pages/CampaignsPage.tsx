@@ -39,8 +39,10 @@ import {
   RefreshCw,
   AlertTriangle,
   ListChecks,
+  Lock,
 } from 'lucide-react';
 import ContactPicker from '../components/ContactPicker';
+import WhatsAppPreview from '../components/WhatsAppPreview';
 
 interface Campaign {
   id: string;
@@ -73,6 +75,10 @@ interface Template {
   hasMediaHeader: boolean;
   /** IMAGE, VIDEO, DOCUMENT, TEXT, or null. */
   headerFormat: string | null;
+  /** Text of a TEXT header. */
+  headerText: string | null;
+  footer: string | null;
+  buttons: { type?: string; text?: string; url?: string }[];
 }
 
 const OPERATOR_LABELS: Record<string, string> = {
@@ -390,12 +396,23 @@ export default function CampaignsPage() {
       String(t.header?.format || t.header?.type || '').toUpperCase(),
     ),
     headerFormat: String(t.header?.format || t.header?.type || '').toUpperCase() || null,
+    headerText: t.header?.text ?? null,
+    // Stored as {text, type} by the template routes, but older rows and the
+    // builder both hand back a bare string.
+    footer: typeof t.footer === 'string' ? t.footer : (t.footer?.text ?? null),
+    buttons: Array.isArray(t.buttons) ? t.buttons : [],
   }));
 
   const totalContacts = contactsData?.meta?.total || 0;
   const selectedSegment = segments.find(s => s.id === form.segmentId);
   const selectedTemplate = templates.find(t => t.id === form.templateId);
   const selectedPhoneNumber = phoneNumbers.find(p => p.id === form.phoneNumberId);
+
+  // What Meta actually delivers. The send path reads the approved template body
+  // (campaign.template.body.text) — Campaign has no message column at all, so
+  // anything typed in the box below is never stored and never sent. Previewing
+  // form.message would show text that cannot reach a recipient.
+  const previewBody = form.templateId ? (selectedTemplate?.preview || '') : form.message;
 
   // Reset form
   const resetForm = () => {
@@ -1095,15 +1112,31 @@ export default function CampaignsPage() {
               <div className="relative">
                 <textarea
                   ref={messageTextareaRef}
-                  value={form.message}
+                  value={previewBody}
                   onChange={(e) => setForm({ ...form, message: e.target.value })}
+                  // Meta sends the approved template body verbatim. Edits here
+                  // were never stored (Campaign has no message column) and never
+                  // reached a recipient, so the box offered a change it could not
+                  // make. Locked while a template is selected.
+                  readOnly={!!form.templateId}
                   placeholder="Type your message here...&#10;&#10;Use {{1}} for the first variable (filled with contact name)"
-                  className="input-apple w-full h-40 resize-none"
+                  className={`input-apple w-full h-40 resize-none ${
+                    form.templateId ? 'bg-ios-gray/60 text-ios-secondary cursor-default' : ''
+                  }`}
                 />
                 <div className="absolute bottom-3 right-3 text-xs text-ios-muted">
-                  {form.message.length} / 1024
+                  {previewBody.length} / 1024
                 </div>
               </div>
+              {form.templateId && (
+                <p className="text-xs text-ios-muted mt-1.5 flex items-start gap-1.5">
+                  <Lock className="w-3 h-3 mt-0.5 shrink-0" />
+                  <span>
+                    Meta sends an approved template exactly as approved, so this text is fixed.
+                    To change the wording, edit the template and resubmit it for review.
+                  </span>
+                </p>
+              )}
               <div className="flex gap-4 mt-3">
                 <button
                   type="button"
@@ -1119,6 +1152,9 @@ export default function CampaignsPage() {
                   <Image className="w-4 h-4" />
                   {showMediaInput ? 'Hide Media' : 'Add Media'}
                 </button>
+                {/* Variables come from the approved template. Adding one here
+                    while a template is selected changes nothing that gets sent. */}
+                {!form.templateId && (
                 <button
                   type="button"
                   onClick={() => {
@@ -1144,6 +1180,7 @@ export default function CampaignsPage() {
                   <Zap className="w-4 h-4" />
                   Add Variable
                 </button>
+                )}
               </div>
 
               {/* A template that needs media, with none attached. Stated here
@@ -1271,6 +1308,7 @@ export default function CampaignsPage() {
                   )}
                 </div>
               )}
+              {!form.templateId && (
               <div className="mt-3">
                 <CampaignMessageSuggest
                   audienceDescription={
@@ -1284,25 +1322,24 @@ export default function CampaignsPage() {
                   onApply={(message) => setForm({ ...form, message })}
                 />
               </div>
+              )}
             </div>
 
             {/* Preview */}
             {form.message && (
               <div className="bg-ios-gray/50 rounded-apple-lg p-4">
-                <p className="text-xs text-ios-muted mb-2">Preview</p>
-                <div className="bg-white rounded-apple-lg p-4 border border-black/10">
-                  <div className="flex items-start gap-3">
-                    <div className="w-8 h-8 bg-wa-gradient rounded-full flex items-center justify-center flex-shrink-0">
-                      <Phone className="w-4 h-4 text-white" />
-                    </div>
-                    <div className="flex-1">
-                      <div className="bg-wa-green/10 rounded-apple-lg rounded-tl-none p-3">
-                        <p className="text-sm text-ios-dark whitespace-pre-wrap">{form.message}</p>
-                      </div>
-                      <p className="text-xs text-ios-muted mt-1">12:00 PM</p>
-                    </div>
-                  </div>
-                </div>
+                <p className="text-xs text-ios-muted mb-2">Preview — how this arrives on WhatsApp</p>
+                <WhatsAppPreview
+                  body={previewBody}
+                  headerFormat={selectedTemplate?.headerFormat}
+                  headerText={selectedTemplate?.headerText}
+                  mediaUrl={form.mediaUrl}
+                  mediaName={mediaName}
+                  footer={selectedTemplate?.footer}
+                  buttons={selectedTemplate?.buttons}
+                  businessName={selectedPhoneNumber?.displayName || 'Your Business'}
+                  caption="Variables show as chips here; each recipient sees their own value."
+                />
               </div>
             )}
           </div>
@@ -1535,19 +1572,16 @@ export default function CampaignsPage() {
               {form.message && (
                 <div>
                   <p className="text-xs text-ios-muted uppercase tracking-wide mb-2">Message Preview</p>
-                  <div className="bg-white rounded-apple-lg p-4 border border-black/10">
-                    <div className="flex items-start gap-3">
-                      <div className="w-8 h-8 bg-wa-gradient rounded-full flex items-center justify-center flex-shrink-0">
-                        <Phone className="w-4 h-4 text-white" />
-                      </div>
-                      <div className="flex-1">
-                        <div className="bg-wa-green/10 rounded-apple-lg rounded-tl-none p-3">
-                          <p className="text-sm text-ios-dark whitespace-pre-wrap">{form.message}</p>
-                        </div>
-                        <p className="text-xs text-ios-muted mt-1">12:00 PM</p>
-                      </div>
-                    </div>
-                  </div>
+                  <WhatsAppPreview
+                    body={previewBody}
+                    headerFormat={selectedTemplate?.headerFormat}
+                    headerText={selectedTemplate?.headerText}
+                    mediaUrl={form.mediaUrl}
+                    mediaName={mediaName}
+                    footer={selectedTemplate?.footer}
+                    buttons={selectedTemplate?.buttons}
+                    businessName={selectedPhoneNumber?.displayName || 'Your Business'}
+                  />
                 </div>
               )}
 

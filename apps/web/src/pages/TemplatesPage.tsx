@@ -3,6 +3,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../api/client';
 import { Plus, Search, X, FileText, Send, Check, Clock, AlertCircle, Copy, Edit3, SendHorizontal, CheckCircle2, Loader2, Trash2 } from 'lucide-react';
 import TemplateQualityPanel from '../components/TemplateQualityPanel';
+import WhatsAppPreview from '../components/WhatsAppPreview';
 
 interface Template {
   id: string;
@@ -586,6 +587,28 @@ export default function TemplatesPage() {
                   onApplySuggestion={(text) => setForm({ ...form, bodyText: text })}
                 />
               </div>
+
+              {/* What Meta will actually render, while there is still time to
+                  change it. The sample image doubles as the preview image —
+                  it is the one Meta approves the header against. */}
+              {form.bodyText.trim() && (
+                <div>
+                  <label className="block text-sm font-medium text-ios-secondary mb-1">Preview</label>
+                  <WhatsAppPreview
+                    body={form.bodyText}
+                    headerFormat={form.headerFormat === 'NONE' ? null : form.headerFormat}
+                    headerText={form.headerText}
+                    mediaUrl={form.headerSampleUrl}
+                    mediaName={form.headerSampleName}
+                    businessName={
+                      phoneNumbers.find((p: any) => p.id === form.phoneNumberId)?.displayName
+                      || phoneNumbers[0]?.displayName
+                      || 'Your Business'
+                    }
+                  />
+                </div>
+              )}
+
               <div className="flex gap-2 pt-2">
                 <button
                   onClick={() => createMutation.mutate(form)}
@@ -661,37 +684,32 @@ export default function TemplatesPage() {
                   <span className="font-medium text-ios-dark">{new Date(selectedTemplate.lastSentAt).toLocaleDateString()}</span>
                 </div>
               )}
+              {/* One preview instead of four separate field dumps — header,
+                  body, footer and buttons are all visible in the shape the
+                  recipient sees them in. */}
               <div>
-                <span className="text-ios-muted block mb-1">Message Body</span>
-                <div className="bg-ios-gray rounded-apple-lg p-3 text-ios-dark whitespace-pre-wrap">
-                  {selectedTemplate.body?.text}
-                </div>
+                <span className="text-ios-muted block mb-1.5">Message</span>
+                <WhatsAppPreview
+                  body={selectedTemplate.body?.text || ''}
+                  headerFormat={selectedTemplate.header?.format || selectedTemplate.header?.type}
+                  headerText={selectedTemplate.header?.text}
+                  mediaUrl={selectedTemplate.header?.sampleUrl}
+                  footer={
+                    typeof selectedTemplate.footer === 'string'
+                      ? selectedTemplate.footer
+                      : (selectedTemplate.footer as any)?.text
+                  }
+                  buttons={selectedTemplate.buttons || []}
+                  businessName={phoneNumbers[0]?.displayName || 'Your Business'}
+                  caption={
+                    ['IMAGE', 'VIDEO', 'DOCUMENT'].includes(
+                      String(selectedTemplate.header?.format || '').toUpperCase(),
+                    )
+                      ? 'Approved with a media header — every campaign using this template must attach a file.'
+                      : undefined
+                  }
+                />
               </div>
-              {selectedTemplate.header && (
-                <div>
-                  <span className="text-ios-muted block mb-1">Header ({selectedTemplate.header.type})</span>
-                  <p className="text-ios-dark">{selectedTemplate.header.text}</p>
-                </div>
-              )}
-              {selectedTemplate.footer && (
-                <div>
-                  <span className="text-ios-muted block mb-1">Footer</span>
-                  <p className="text-ios-secondary">{selectedTemplate.footer}</p>
-                </div>
-              )}
-              {(selectedTemplate.buttons?.length ?? 0) > 0 && (
-                <div>
-                  <span className="text-ios-muted block mb-2">Buttons ({selectedTemplate.buttons?.length})</span>
-                  <div className="space-y-1">
-                    {(selectedTemplate.buttons || []).map((btn: any, i: number) => (
-                      <div key={i} className="flex gap-2 items-center">
-                        <span className="w-6 h-6 bg-wa-green/20 text-wa-green rounded-apple text-xs flex items-center justify-center">{i + 1}</span>
-                        <span className="text-ios-dark">{btn.text}</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
               <div className="flex justify-between text-xs text-ios-muted pt-2">
                 <span>Created {new Date(selectedTemplate.createdAt).toLocaleDateString()}</span>
                 <span>Updated {new Date(selectedTemplate.updatedAt).toLocaleDateString()}</span>
