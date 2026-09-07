@@ -2177,6 +2177,26 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
       });
     }
 
+    // The other direction, which the first version of this check missed. A
+    // template approved WITH a media header requires that header on every
+    // send: omitting it means Meta is handed a template expecting an image and
+    // given nothing, and refuses every recipient with "expected IMAGE,
+    // received UNKNOWN". A 250-recipient campaign failed 250 times that way.
+    const templateHeader = campaign.template.header as any;
+    const headerFormat = String(templateHeader?.format || templateHeader?.type || '').toUpperCase();
+    const headerNeedsMedia = ['IMAGE', 'VIDEO', 'DOCUMENT'].includes(headerFormat);
+
+    if (headerNeedsMedia && !campaign.mediaUrl) {
+      return reply.status(400).send({
+        success: false,
+        error: {
+          code: 'TEMPLATE_NEEDS_MEDIA',
+          message: `The template "${campaign.template.name}" was approved with ${headerFormat === 'IMAGE' ? 'an image' : 'a ' + headerFormat.toLowerCase()} header, so every message must carry one. Attach ${headerFormat === 'IMAGE' ? 'an image' : 'a ' + headerFormat.toLowerCase()} on the Message step.`,
+          requiredFormat: headerFormat,
+        },
+      });
+    }
+
     // Meta rejects every send attempt against a template that isn't APPROVED
     // yet (PENDING/REJECTED/DRAFT) — without this check the campaign used to
     // launch anyway, mark itself SENDING, then fail every single recipient

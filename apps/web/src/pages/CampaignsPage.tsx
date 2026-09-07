@@ -69,8 +69,10 @@ interface Template {
   category: string;
   status: 'approved' | 'pending' | 'rejected';
   preview: string;
-  /** True when Meta approved this template with an image/video header. */
+  /** True only for IMAGE/VIDEO/DOCUMENT headers — the ones that carry a file. */
   hasMediaHeader: boolean;
+  /** IMAGE, VIDEO, DOCUMENT, TEXT, or null. */
+  headerFormat: string | null;
 }
 
 const OPERATOR_LABELS: Record<string, string> = {
@@ -381,10 +383,13 @@ export default function CampaignsPage() {
     category: t.category,
     status: t.status,
     preview: t.body?.text || t.body || '',
-    // Media can only be attached to a template Meta approved with a header to
-    // put it in. Without this the wizard happily accepts an image and every
-    // recipient fails with #132018.
-    hasMediaHeader: !!t.header,
+    // Only IMAGE, VIDEO and DOCUMENT headers carry a file. A TEXT header is
+    // still a header, and treating it as one that accepts media would fail
+    // every recipient just as surely as having no header at all.
+    hasMediaHeader: ['IMAGE', 'VIDEO', 'DOCUMENT'].includes(
+      String(t.header?.format || t.header?.type || '').toUpperCase(),
+    ),
+    headerFormat: String(t.header?.format || t.header?.type || '').toUpperCase() || null,
   }));
 
   const totalContacts = contactsData?.meta?.total || 0;
@@ -438,6 +443,13 @@ export default function CampaignsPage() {
     // header, so this must not reach the send step.
     if (wizardStep === 2 && form.mediaUrl && form.templateId && !selectedTemplate?.hasMediaHeader) {
       showNotification('error', `"${selectedTemplate?.name}" has no media header — remove the attached media or pick a template that has one.`);
+      return;
+    }
+    // And the reverse: a template approved with a media header needs one on
+    // every message. Without it Meta refuses each recipient with "expected
+    // IMAGE, received UNKNOWN".
+    if (wizardStep === 2 && form.templateId && selectedTemplate?.hasMediaHeader && !form.mediaUrl) {
+      showNotification('error', `"${selectedTemplate?.name}" was approved with a media header — attach an image before continuing.`);
       return;
     }
     if (wizardStep === 3 && !form.phoneNumberId) {
@@ -1133,6 +1145,22 @@ export default function CampaignsPage() {
                   Add Variable
                 </button>
               </div>
+
+              {/* A template that needs media, with none attached. Stated here
+                  rather than only on the way out of the step, because the fix
+                  is the button directly above. */}
+              {form.templateId && selectedTemplate?.hasMediaHeader && !form.mediaUrl && (
+                <div className="mt-3 flex items-start gap-2 p-3 rounded-apple-lg bg-amber-50 border border-amber-200 text-sm text-amber-900">
+                  <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
+                  <div>
+                    <p className="font-medium">“{selectedTemplate?.name}” needs an image.</p>
+                    <p className="mt-0.5">
+                      It was approved with a media header, so every message has to carry one.
+                      Use Add Media above — without it Meta rejects every recipient.
+                    </p>
+                  </div>
+                </div>
+              )}
 
               {/* Media already attached, then a body-only template chosen. Say
                   so rather than dropping their upload silently — and rather
