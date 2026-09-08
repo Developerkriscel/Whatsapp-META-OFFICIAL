@@ -262,6 +262,12 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
    * table of Meta's USD prices and its own exchange rate, which is how it ended
    * up disagreeing with the rate card that does the actual billing. Everything
    * here comes from the same tables and the same margin the send path uses.
+   *
+   * What a tenant pays is theirs to see; how it splits between Meta's charge
+   * and our margin is not. Those figures are deliberately absent from this
+   * response rather than merely hidden by the page -- a column the browser
+   * never renders is still a number in the network tab. The full split stays
+   * on the superadmin side.
    */
   app.get('/billing/summary', async (request, reply) => {
     const tenantId = request.authUser.tenantId;
@@ -269,7 +275,7 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
       return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
     }
 
-    const { priceMessage, getMarginPercent, toRupees, metaCostPaise } = await import('../services/billing.js');
+    const { priceMessage, toRupees, metaCostPaise } = await import('../services/billing.js');
 
     const tenant = await app.prisma.tenant.findUnique({
       where: { id: tenantId },
@@ -323,9 +329,7 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
       const pr = priceMessage(country, c);
       return {
         category: c,
-        metaCost: toRupees(pr.metaPaise),
         yourPrice: toRupees(pr.chargePaise),
-        margin: toRupees(pr.marginPaise),
         chargePaise: pr.chargePaise,
       };
     });
@@ -351,8 +355,6 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
         return {
           category: c,
           messages: l.messages,
-          metaCost: toRupees(l.metaPaise),
-          platformFee: toRupees(l.billedPaise - l.metaPaise),
           total: toRupees(l.billedPaise),
         };
       });
@@ -366,7 +368,6 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
         country,
         currency: 'INR',
         symbol: '₹',
-        marginPercent: getMarginPercent(),
         balance: toRupees(balancePaise),
         balancePaise,
         toppedUp: toRupees(toppedUp._sum.amount ?? 0),
@@ -380,10 +381,6 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
           ? monthStart.toLocaleDateString('en-IN', { month: 'long', year: 'numeric' })
           : 'All time',
         breakdown,
-        // Meta's own total and ours, kept separate so the margin is visible
-        // rather than implied by the difference of two other numbers.
-        metaTotal: breakdown.reduce((n, l) => n + l.metaCost, 0),
-        feeTotal: breakdown.reduce((n, l) => n + l.platformFee, 0),
         rates,
         // Range rather than an average: the two categories differ by an order
         // of magnitude, so a single "messages remaining" number would be wrong
@@ -573,11 +570,11 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
           readRate: pct(read, delivered),
           failureRate: pct(failed, total),
         },
+        // What the tenant paid, not how it splits. metaCost, margin and
+        // marginPct used to ride along here as well, which handed every tenant
+        // our cost base and markup in a response their own dashboard fetches.
         spend: {
-          metaCost: toMoney(metaSpend, fx),       // what Meta billed for this traffic
           charged: toMoney(charged, fx),          // what the tenant paid
-          margin: toMoney(charged - metaSpend, fx),
-          marginPct: metaSpend > 0 ? Math.round(((charged - metaSpend) / metaSpend) * 1000) / 10 : null,
           avgPerMessage: toUnitMoney(priced > 0 ? charged / priced : 0, fx),
           freeMessages: freeCount,
           // Costing covers only what Meta has reported on. Stating the gap keeps
@@ -588,14 +585,12 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
         byCategory: byCategory.map((c) => ({
           category: c.metaCategory,
           messages: c._count,
-          metaCost: toMoney(num(c._sum.metaCostUsd), fx),
           charged: toMoney(num(c._sum.platformCostUsd), fx),
         })),
         byCountry: [...perCountry.entries()]
           .map(([country, v]) => ({
             country,
             messages: v.messages,
-            metaCost: toMoney(v.meta, fx),
             charged: toMoney(v.charged, fx),
             avgPerMessage: toUnitMoney(v.messages > 0 ? v.charged / v.messages : 0, fx),
           }))

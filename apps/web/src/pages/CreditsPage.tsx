@@ -20,23 +20,18 @@ import {
 
 interface Rate {
   category: 'MARKETING' | 'UTILITY' | 'AUTHENTICATION';
-  metaCost: number;
   yourPrice: number;
-  margin: number;
 }
 
 interface BillLine {
   category: Rate['category'] | 'SESSION';
   messages: number;
-  metaCost: number;
-  platformFee: number;
   total: number;
 }
 
 interface Summary {
   country: string;
   symbol: string;
-  marginPercent: number;
   balance: number;
   toppedUp: number;
   billed: number;
@@ -46,8 +41,6 @@ interface Summary {
   period: 'month' | 'all';
   periodLabel: string;
   breakdown: BillLine[];
-  metaTotal: number;
-  feeTotal: number;
   rates: Rate[];
   canSend: { marketing: number; utility: number };
 }
@@ -231,8 +224,6 @@ export default function CreditsPage() {
                   <tr className="text-xs text-ios-muted text-left border-b border-black/10">
                     <th className="py-2 pr-4 font-medium">Category</th>
                     <th className="py-2 pr-4 font-medium text-right">Delivered</th>
-                    <th className="py-2 pr-4 font-medium text-right">Meta charge</th>
-                    <th className="py-2 pr-4 font-medium text-right">Platform fee</th>
                     <th className="py-2 font-medium text-right">Amount</th>
                   </tr>
                 </thead>
@@ -246,12 +237,6 @@ export default function CreditsPage() {
                       <td className="py-3 pr-4 text-right tabular-nums text-ios-dark">
                         {l.messages.toLocaleString('en-IN')}
                       </td>
-                      <td className="py-3 pr-4 text-right tabular-nums text-ios-secondary">
-                        {money(l.metaCost, s)}
-                      </td>
-                      <td className="py-3 pr-4 text-right tabular-nums text-ios-secondary">
-                        {money(l.platformFee, s)}
-                      </td>
                       <td className="py-3 text-right tabular-nums text-ios-dark font-semibold">
                         {money(l.total, s)}
                       </td>
@@ -263,12 +248,6 @@ export default function CreditsPage() {
                     <td className="py-3 pr-4 font-semibold text-ios-dark">Total</td>
                     <td className="py-3 pr-4 text-right tabular-nums font-semibold text-ios-dark">
                       {data.billedMessages.toLocaleString('en-IN')}
-                    </td>
-                    <td className="py-3 pr-4 text-right tabular-nums text-ios-secondary">
-                      {money(data.metaTotal, s)}
-                    </td>
-                    <td className="py-3 pr-4 text-right tabular-nums text-ios-secondary">
-                      {money(data.feeTotal, s)}
                     </td>
                     <td className="py-3 text-right tabular-nums text-lg font-bold text-ios-dark">
                       {money(data.billed, s)}
@@ -293,9 +272,7 @@ export default function CreditsPage() {
       <div className="card-apple p-5">
         <div className="flex items-baseline justify-between flex-wrap gap-2">
           <h2 className="font-semibold text-ios-dark">Message rates — {data.country}</h2>
-          <p className="text-xs text-ios-muted">
-            Meta&apos;s official price plus a {data.marginPercent}% platform fee
-          </p>
+          <p className="text-xs text-ios-muted">Charged per message delivered</p>
         </div>
 
         <div className="overflow-x-auto mt-4">
@@ -303,9 +280,7 @@ export default function CreditsPage() {
             <thead>
               <tr className="text-xs text-ios-muted text-left border-b border-black/10">
                 <th className="py-2 pr-4 font-medium">Type</th>
-                <th className="py-2 pr-4 font-medium text-right">Meta&apos;s price</th>
-                <th className="py-2 pr-4 font-medium text-right">Platform fee</th>
-                <th className="py-2 font-medium text-right">You pay</th>
+                <th className="py-2 font-medium text-right">Price per message</th>
               </tr>
             </thead>
             <tbody>
@@ -314,12 +289,6 @@ export default function CreditsPage() {
                   <td className="py-3 pr-4">
                     <p className="text-ios-dark font-medium">{CATEGORY_LABEL[r.category]}</p>
                     <p className="text-xs text-ios-muted">{CATEGORY_NOTE[r.category]}</p>
-                  </td>
-                  <td className="py-3 pr-4 text-right tabular-nums text-ios-secondary">
-                    {money(r.metaCost, s, 2)}
-                  </td>
-                  <td className="py-3 pr-4 text-right tabular-nums text-ios-secondary">
-                    {money(r.margin, s, 2)}
                   </td>
                   <td className="py-3 text-right tabular-nums text-ios-dark font-semibold">
                     {money(r.yourPrice, s, 2)}
