@@ -269,7 +269,7 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
       return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
     }
 
-    const { priceMessage, getMarginPercent, toRupees } = await import('../services/billing.js');
+    const { priceMessage, getMarginPercent, toRupees, metaCostPaise } = await import('../services/billing.js');
 
     const tenant = await app.prisma.tenant.findUnique({
       where: { id: tenantId },
@@ -284,15 +284,32 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
     // A refunded hold is money that went back, so counting it as revenue would
     // bill for messages nobody received — the exact thing delivery settlement
     // exists to prevent.
-    const [settled, refunded] = await Promise.all([
+    // A period, because a bill is always for a period. Defaults to this
+    // calendar month, which is how Meta itself bills.
+    const q = z.object({ period: z.enum(['month', 'all']).default('month') }).parse(request.query || {});
+    const monthStart = new Date();
+    monthStart.setDate(1);
+    monthStart.setHours(0, 0, 0, 0);
+    const periodWhere = q.period === 'month' ? { createdAt: { gte: monthStart } } : {};
+
+    const [settled, refunded, byCategory] = await Promise.all([
       app.prisma.messageCredit.aggregate({
-        where: { tenantId, refunded: false },
+        where: { tenantId, refunded: false, ...periodWhere },
         _sum: { cost: true },
         _count: { _all: true },
       }),
       app.prisma.messageCredit.aggregate({
-        where: { tenantId, refunded: true },
+        where: { tenantId, refunded: true, ...periodWhere },
         _sum: { refundAmount: true },
+        _count: { _all: true },
+      }),
+      // Grouped by country as well as category: what Meta charged depends on
+      // both, so summing a category across countries and pricing it at one
+      // country's rate would misstate the cost side of the bill.
+      app.prisma.messageCredit.groupBy({
+        by: ['category', 'countryCode'],
+        where: { tenantId, refunded: false, ...periodWhere },
+        _sum: { cost: true },
         _count: { _all: true },
       }),
     ]);
@@ -313,6 +330,33 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
       };
     });
 
+    // The bill, itemised the way Meta itemises it: one line per message
+    // category, with what Meta charged and what we added kept separate.
+    const lines = new Map<string, { category: string; messages: number; metaPaise: number; billedPaise: number }>();
+    for (const row of byCategory as any[]) {
+      const cat = String(row.category || 'UTILITY').toUpperCase();
+      const line = lines.get(cat) || { category: cat, messages: 0, metaPaise: 0, billedPaise: 0 };
+      line.messages += row._count._all;
+      line.billedPaise += row._sum.cost ?? 0;
+      // Meta's side is priced from the rate for the country those messages
+      // actually went to, not the tenant's default.
+      line.metaPaise += row._count._all * metaCostPaise(row.countryCode, cat as any);
+      lines.set(cat, line);
+    }
+    const ORDER = ['MARKETING', 'UTILITY', 'AUTHENTICATION', 'SESSION'];
+    const breakdown = ORDER
+      .filter((c) => lines.has(c))
+      .map((c) => {
+        const l = lines.get(c)!;
+        return {
+          category: c,
+          messages: l.messages,
+          metaCost: toRupees(l.metaPaise),
+          platformFee: toRupees(l.billedPaise - l.metaPaise),
+          total: toRupees(l.billedPaise),
+        };
+      });
+
     const marketing = rates.find((r) => r.category === 'MARKETING')!;
     const utility = rates.find((r) => r.category === 'UTILITY')!;
 
@@ -331,6 +375,15 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
         billedMessages: settled._count._all,
         refunded: toRupees(refunded._sum.refundAmount ?? 0),
         refundedMessages: refunded._count._all,
+        period: q.period,
+        periodLabel: q.period === 'month'
+          ? monthStart.toLocaleDateString('en-IN', { month: 'long', year: 'numeric' })
+          : 'All time',
+        breakdown,
+        // Meta's own total and ours, kept separate so the margin is visible
+        // rather than implied by the difference of two other numbers.
+        metaTotal: breakdown.reduce((n, l) => n + l.metaCost, 0),
+        feeTotal: breakdown.reduce((n, l) => n + l.platformFee, 0),
         rates,
         // Range rather than an average: the two categories differ by an order
         // of magnitude, so a single "messages remaining" number would be wrong

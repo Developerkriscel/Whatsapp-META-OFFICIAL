@@ -38,7 +38,10 @@ export async function holdForMessage(
     paise: number;
   },
 ): Promise<void> {
-  if (data.paise <= 0) return;
+  // A zero-cost message is still recorded. Meta does not charge for replies
+  // inside an open service window, and a bill that silently omits them cannot
+  // show that they were free — it just looks like they never happened.
+  if (data.paise < 0) return;
   await prisma.messageCredit.create({
     data: {
       tenantId: data.tenantId,

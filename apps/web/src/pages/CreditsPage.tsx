@@ -25,6 +25,14 @@ interface Rate {
   margin: number;
 }
 
+interface BillLine {
+  category: Rate['category'] | 'SESSION';
+  messages: number;
+  metaCost: number;
+  platformFee: number;
+  total: number;
+}
+
 interface Summary {
   country: string;
   symbol: string;
@@ -35,20 +43,27 @@ interface Summary {
   billedMessages: number;
   refunded: number;
   refundedMessages: number;
+  period: 'month' | 'all';
+  periodLabel: string;
+  breakdown: BillLine[];
+  metaTotal: number;
+  feeTotal: number;
   rates: Rate[];
   canSend: { marketing: number; utility: number };
 }
 
-const CATEGORY_LABEL: Record<Rate['category'], string> = {
+const CATEGORY_LABEL: Record<string, string> = {
   MARKETING: 'Marketing',
   UTILITY: 'Utility',
   AUTHENTICATION: 'Authentication',
+  SESSION: 'Service',
 };
 
-const CATEGORY_NOTE: Record<Rate['category'], string> = {
+const CATEGORY_NOTE: Record<string, string> = {
   MARKETING: 'Promotions, offers, product news',
   UTILITY: 'Order updates, reminders, alerts',
   AUTHENTICATION: 'One-time passcodes',
+  SESSION: 'Replies inside an open 24-hour window',
 };
 
 function money(n: number, symbol = '₹', dp = 2) {
@@ -58,16 +73,23 @@ function money(n: number, symbol = '₹', dp = 2) {
 export default function CreditsPage() {
   const qc = useQueryClient();
   const [topUp, setTopUp] = useState('');
+  const [period, setPeriod] = useState<'month' | 'all'>('month');
 
   const { data, isLoading } = useQuery({
-    queryKey: ['billing-summary'],
-    queryFn: async () => (await api.get('/billing/summary')).data?.data as Summary,
+    queryKey: ['billing-summary', period],
+    queryFn: async () =>
+      (await api.get(`/billing/summary?period=${period}`)).data?.data as Summary,
     refetchInterval: 30000,
   });
 
+  // The endpoint answers { country, packages: [...] }. Mapping the envelope
+  // itself is what threw "(l || []).map is not a function" on this page.
   const { data: packs } = useQuery({
     queryKey: ['credit-packages'],
-    queryFn: async () => (await api.get('/credit-packages')).data?.data,
+    queryFn: async () => {
+      const d = (await api.get('/credit-packages')).data?.data;
+      return Array.isArray(d?.packages) ? d.packages : Array.isArray(d) ? d : [];
+    },
   });
 
   // Balance is only ever granted against a confirmed payment, so this opens a
@@ -170,6 +192,103 @@ export default function CreditsPage() {
         </div>
       </div>
 
+      {/* The bill itself, itemised by message category the way Meta itemises
+          it — Meta's charge and our fee on separate columns, so the margin is
+          shown rather than left to be inferred from a difference. */}
+      <div className="card-apple p-5">
+        <div className="flex items-baseline justify-between flex-wrap gap-3">
+          <div>
+            <h2 className="font-semibold text-ios-dark">Billing</h2>
+            <p className="text-xs text-ios-muted mt-0.5">
+              {data.periodLabel} · delivered messages only
+            </p>
+          </div>
+          <div className="flex rounded-apple-lg border border-black/10 overflow-hidden text-xs">
+            {(['month', 'all'] as const).map((k) => (
+              <button
+                key={k}
+                onClick={() => setPeriod(k)}
+                className={`px-3 py-1.5 transition ${
+                  period === k ? 'bg-wa-green text-white' : 'text-ios-secondary hover:bg-ios-gray'
+                }`}
+              >
+                {k === 'month' ? 'This month' : 'All time'}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {data.breakdown.length === 0 ? (
+          <p className="text-sm text-ios-muted mt-4">
+            No delivered messages {period === 'month' ? 'this month' : 'yet'}. Charges appear here once
+            WhatsApp confirms delivery.
+          </p>
+        ) : (
+          <>
+            <div className="overflow-x-auto mt-4">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-xs text-ios-muted text-left border-b border-black/10">
+                    <th className="py-2 pr-4 font-medium">Category</th>
+                    <th className="py-2 pr-4 font-medium text-right">Delivered</th>
+                    <th className="py-2 pr-4 font-medium text-right">Meta charge</th>
+                    <th className="py-2 pr-4 font-medium text-right">Platform fee</th>
+                    <th className="py-2 font-medium text-right">Amount</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {data.breakdown.map((l) => (
+                    <tr key={l.category} className="border-b border-black/5">
+                      <td className="py-3 pr-4">
+                        <p className="text-ios-dark font-medium">{CATEGORY_LABEL[l.category] || l.category}</p>
+                        <p className="text-xs text-ios-muted">{CATEGORY_NOTE[l.category] || ''}</p>
+                      </td>
+                      <td className="py-3 pr-4 text-right tabular-nums text-ios-dark">
+                        {l.messages.toLocaleString('en-IN')}
+                      </td>
+                      <td className="py-3 pr-4 text-right tabular-nums text-ios-secondary">
+                        {money(l.metaCost, s)}
+                      </td>
+                      <td className="py-3 pr-4 text-right tabular-nums text-ios-secondary">
+                        {money(l.platformFee, s)}
+                      </td>
+                      <td className="py-3 text-right tabular-nums text-ios-dark font-semibold">
+                        {money(l.total, s)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+                <tfoot>
+                  <tr className="border-t-2 border-black/10">
+                    <td className="py-3 pr-4 font-semibold text-ios-dark">Total</td>
+                    <td className="py-3 pr-4 text-right tabular-nums font-semibold text-ios-dark">
+                      {data.billedMessages.toLocaleString('en-IN')}
+                    </td>
+                    <td className="py-3 pr-4 text-right tabular-nums text-ios-secondary">
+                      {money(data.metaTotal, s)}
+                    </td>
+                    <td className="py-3 pr-4 text-right tabular-nums text-ios-secondary">
+                      {money(data.feeTotal, s)}
+                    </td>
+                    <td className="py-3 text-right tabular-nums text-lg font-bold text-ios-dark">
+                      {money(data.billed, s)}
+                    </td>
+                  </tr>
+                </tfoot>
+              </table>
+            </div>
+
+            {data.refunded > 0 && (
+              <p className="text-xs text-ios-muted mt-3">
+                {money(data.refunded, s)} was returned for {data.refundedMessages.toLocaleString('en-IN')}{' '}
+                message{data.refundedMessages === 1 ? '' : 's'} that never reached a handset. Those are
+                not in the total above.
+              </p>
+            )}
+          </>
+        )}
+      </div>
+
       {/* Meta's official cost, and what you pay on top. */}
       <div className="card-apple p-5">
         <div className="flex items-baseline justify-between flex-wrap gap-2">
@@ -235,8 +354,11 @@ export default function CreditsPage() {
             >
               <p className="text-xs text-ios-muted">{k.name}</p>
               <p className="text-lg font-semibold text-ios-dark tabular-nums mt-0.5">
-                {money(k.price ?? k.priceMinor / 100, s)}
+                {money((k.totalMinor ?? k.priceMinor ?? 0) / 100, s)}
               </p>
+              {k.messages > 0 && (
+                <p className="text-xs text-ios-muted mt-0.5">{k.messages.toLocaleString('en-IN')} messages</p>
+              )}
             </button>
           ))}
         </div>
