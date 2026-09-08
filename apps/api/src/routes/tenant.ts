@@ -255,6 +255,94 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
     return { success: true, data: { country, packages: priced } };
   });
 
+  /**
+   * GET /billing/summary — the whole Credits page in one call, in rupees.
+   *
+   * The page used to assemble this itself from four endpoints plus a hardcoded
+   * table of Meta's USD prices and its own exchange rate, which is how it ended
+   * up disagreeing with the rate card that does the actual billing. Everything
+   * here comes from the same tables and the same margin the send path uses.
+   */
+  app.get('/billing/summary', async (request, reply) => {
+    const tenantId = request.authUser.tenantId;
+    if (!tenantId) {
+      return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
+    }
+
+    const { priceMessage, getMarginPercent, toRupees } = await import('../services/billing.js');
+
+    const tenant = await app.prisma.tenant.findUnique({
+      where: { id: tenantId },
+      select: { defaultCountry: true },
+    });
+    const country = tenant?.defaultCountry || 'IN';
+
+    const account = await app.prisma.tenantCredit.findUnique({ where: { tenantId } });
+    const balancePaise = account?.balance ?? 0;
+
+    // What has actually been earned: holds that were taken and never returned.
+    // A refunded hold is money that went back, so counting it as revenue would
+    // bill for messages nobody received — the exact thing delivery settlement
+    // exists to prevent.
+    const [settled, refunded] = await Promise.all([
+      app.prisma.messageCredit.aggregate({
+        where: { tenantId, refunded: false },
+        _sum: { cost: true },
+        _count: { _all: true },
+      }),
+      app.prisma.messageCredit.aggregate({
+        where: { tenantId, refunded: true },
+        _sum: { refundAmount: true },
+        _count: { _all: true },
+      }),
+    ]);
+
+    const toppedUp = await app.prisma.tenantCreditTransaction.aggregate({
+      where: { credit: { tenantId }, type: { in: ['PURCHASE', 'BONUS', 'ADJUSTMENT'] }, amount: { gt: 0 } },
+      _sum: { amount: true },
+    });
+
+    const rates = (['MARKETING', 'UTILITY', 'AUTHENTICATION'] as const).map((c) => {
+      const pr = priceMessage(country, c);
+      return {
+        category: c,
+        metaCost: toRupees(pr.metaPaise),
+        yourPrice: toRupees(pr.chargePaise),
+        margin: toRupees(pr.marginPaise),
+        chargePaise: pr.chargePaise,
+      };
+    });
+
+    const marketing = rates.find((r) => r.category === 'MARKETING')!;
+    const utility = rates.find((r) => r.category === 'UTILITY')!;
+
+    return {
+      success: true,
+      data: {
+        country,
+        currency: 'INR',
+        symbol: '₹',
+        marginPercent: getMarginPercent(),
+        balance: toRupees(balancePaise),
+        balancePaise,
+        toppedUp: toRupees(toppedUp._sum.amount ?? 0),
+        // The bill: delivered messages only.
+        billed: toRupees(settled._sum.cost ?? 0),
+        billedMessages: settled._count._all,
+        refunded: toRupees(refunded._sum.refundAmount ?? 0),
+        refundedMessages: refunded._count._all,
+        rates,
+        // Range rather than an average: the two categories differ by an order
+        // of magnitude, so a single "messages remaining" number would be wrong
+        // for whichever kind the tenant actually sends.
+        canSend: {
+          marketing: marketing.chargePaise > 0 ? Math.floor(balancePaise / marketing.chargePaise) : 0,
+          utility: utility.chargePaise > 0 ? Math.floor(balancePaise / utility.chargePaise) : 0,
+        },
+      },
+    };
+  });
+
   app.get('/settings/currency', async (_request, _reply) => {
     const { getCurrencyContext } = await import('../services/currency.js');
     const { getCreditsPerUsd } = await import('../services/creditService.js');
@@ -1770,16 +1858,21 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
       type: parsed.type,
     };
 
-    const countryCode = contact?.country || 'US';
+    // Default to the home market, not the US -- an unknown country was being
+    // priced at US rates on an Indian platform.
+    const countryCode = contact?.country || 'IN';
     const category = 'UTILITY'; // Default for text messages (free within session window)
 
-    // Check and deduct credits
-    const { deductCredits, getRateCredits } = await import('../services/creditService.js') as any;
-    const costCredits = getRateCredits(countryCode, category);
+    // Hold the money for this message. The balance moves now so an empty
+    // account cannot send, but the charge is only earned once Meta reports
+    // delivery -- a terminal failure returns it (services/settlement.ts).
+    const { deductCredits } = await import('../services/creditService.js') as any;
+    const { chargePaise, formatRupees } = await import('../services/billing.js');
+    const costPaise = chargePaise(countryCode, category as any);
     const creditsResult = await deductCredits(
       app.prisma,
       request.authUser.tenantId!,
-      costCredits,
+      costPaise,
       `message-send-${Date.now()}`,
       'MESSAGE',
       `Message to ${countryCode}`,
@@ -1789,10 +1882,10 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
       return reply.status(402).send({
         success: false,
         error: {
-          code: 'INSUFFICIENT_CREDITS',
-          message: `Not enough credits. You need ${costCredits} credits to send this message. Please purchase more credits.`,
-          required: costCredits,
-          current: creditsResult.balanceAfter,
+          code: 'INSUFFICIENT_BALANCE',
+          message: `Not enough balance. This message costs ${formatRupees(costPaise)}. Please top up.`,
+          requiredPaise: costPaise,
+          currentPaise: creditsResult.balanceAfter,
         },
       });
     }
@@ -1840,6 +1933,16 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
         mediaUrl: isMedia ? parsed.mediaUrl : undefined,
         status: 'PENDING',
       },
+    });
+
+    // The hold has to name a message before that message can be refunded.
+    const { holdForMessage } = await import('../services/settlement.js');
+    await holdForMessage(app.prisma, {
+      tenantId: request.authUser.tenantId!,
+      messageId: message.id,
+      country: countryCode,
+      category,
+      paise: costPaise,
     });
 
     // Fetch target contact phone for Meta dispatch
@@ -1892,8 +1995,8 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
       success: true,
       data: {
         ...finalMessage,
-        creditsCost: costCredits,
-        creditsRemaining: creditsResult.balanceAfter,
+        costPaise,
+        balancePaise: creditsResult.balanceAfter,
       },
     });
   });
@@ -4950,7 +5053,7 @@ async function sendCampaignMessagesInner(
 
   const { dispatchOutboundMessage } = await import('../services/whatsappService.js');
 
-  const { reserveCreditsForBatch, releaseUnusedReservation, getRateCredits } =
+  const { reserveCreditsForBatch, releaseUnusedReservation } =
     await import('../services/creditService.js') as any;
   const templateCategory = campaign.template?.category || 'UTILITY';
 
@@ -4974,7 +5077,8 @@ async function sendCampaignMessagesInner(
     // many as the balance allows — a tenant short on credits sends what they can
     // afford instead of the campaign failing wholesale or, before this, sending
     // the remainder free.
-    const unitCosts = contacts.map((c) => getRateCredits(c.country || tenantDefaultCountry, templateCategory));
+    const { chargePaise } = await import('../services/billing.js');
+    const unitCosts = contacts.map((c) => chargePaise(c.country || tenantDefaultCountry, templateCategory as any));
     const reservation = await reserveCreditsForBatch(
       app.prisma, tenantId, unitCosts, campaignId,
       `Campaign: ${campaign.name} (batch of ${contacts.length})`,
@@ -5095,12 +5199,13 @@ async function sendCampaignMessagesInner(
         });
         createdMessageId = message.id;
 
-        // Credits for this recipient were already taken as part of the batch
+        // The money for this recipient was already held as part of the batch
         // reservation above, so there is no per-message transaction here — that
         // is what makes bulk throughput possible. Only what Meta accepts is
         // counted as consumed; the balance of the reservation is returned once
-        // the batch settles.
-        const costCredits = getRateCredits(contact.country || tenantDefaultCountry, templateCategory);
+        // the batch settles, and each accepted message's hold is returned
+        // individually if it never reaches the handset.
+        const costPaise = chargePaise(contact.country || tenantDefaultCountry, templateCategory as any);
 
         const dispatchResult = await dispatchOutboundMessage({
           app,
@@ -5129,7 +5234,19 @@ async function sendCampaignMessagesInner(
           throw dispatchErr;
         }
 
-        consumed += costCredits;
+        consumed += costPaise;
+
+        // Name the hold so a failure webhook can return it. Without a row here
+        // a campaign message that Meta accepted and then failed to deliver
+        // would be charged for regardless.
+        const { holdForMessage } = await import('../services/settlement.js');
+        await holdForMessage(app.prisma, {
+          tenantId,
+          messageId: message.id,
+          country: contact.country || tenantDefaultCountry,
+          category: templateCategory,
+          paise: costPaise,
+        });
 
         sent++;
       } catch (err: any) {

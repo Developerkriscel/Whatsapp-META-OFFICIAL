@@ -49,13 +49,40 @@ async function main() {
       const loaded = await refreshRateCache(app.prisma);
       console.log(`[Credits] rate cache loaded: ${loaded} countries${seeded ? ` (seeded ${seeded} new)` : ''}`);
 
+      // Billing prices in paise off the same rows, plus the margin. Loaded
+      // here too so pricing never has to query per message.
+      const { refreshBillingCache, getMarginPercent } = await import('./services/billing.js');
+      const priced = await refreshBillingCache(app.prisma);
+      console.log(`[Billing] ${priced} countries priced at ${getMarginPercent()}% margin`);
+
       const RATE_REFRESH_MS = 5 * 60 * 1000;
       const timer = setInterval(() => {
         refreshRateCache(app.prisma).catch((e) =>
           console.error('[Credits] rate cache refresh failed:', e?.message),
         );
+        refreshBillingCache(app.prisma).catch((e) =>
+          console.error('[Billing] cache refresh failed:', e?.message),
+        );
       }, RATE_REFRESH_MS);
       timer.unref();
+
+      // Return holds on messages Meta accepted but never reported delivered.
+      // A failure webhook covers what Meta tells us about; a handset that never
+      // comes back online just stops producing statuses, and those holds would
+      // otherwise be kept for ever.
+      const { sweepExpiredHolds } = await import('./services/settlement.js');
+      const SWEEP_MS = 30 * 60 * 1000;
+      const runSweep = () =>
+        sweepExpiredHolds(app.prisma)
+          .then((r) => {
+            if (r.swept > 0) {
+              console.log(`[Settlement] returned ${r.refundedPaise} paise on ${r.swept} undelivered message(s)`);
+            }
+          })
+          .catch((e) => console.error('[Settlement] sweep failed:', e?.message));
+      runSweep();
+      const sweepTimer = setInterval(runSweep, SWEEP_MS);
+      sweepTimer.unref();
     } catch (e: any) {
       // Sending still works — getRateCredits falls back to Meta's published
       // prices — so this must not stop the server coming up.

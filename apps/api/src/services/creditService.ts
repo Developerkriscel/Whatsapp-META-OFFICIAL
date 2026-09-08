@@ -844,6 +844,14 @@ export async function seedCreditRates(prisma: PrismaClient, markup = DEFAULT_MAR
   const existing = await prisma.creditRate.findMany({ select: { countryCode: true } });
   const have = new Set(existing.map((r) => r.countryCode.toUpperCase()));
 
+  // META_RATES is in the old unit -- one ten-thousandth of a dollar. Rates are
+  // now stored in paise, so a country seeded from that table has to be
+  // converted on the way in. Without this a newly published country would be
+  // inserted at roughly 113x its real price and nothing would flag it, because
+  // the number would look no different from any other integer in the column.
+  const PAISE_PER_OLD_CREDIT = 0.885; // (88.5 INR/USD) / (10,000 credits/USD) * 100
+  const toPaise = (oldCredits: number) => Math.max(1, Math.round(oldCredits * PAISE_PER_OLD_CREDIT));
+
   let created = 0;
   for (const [code, rates] of entries) {
     if (have.has(code.toUpperCase())) continue;
@@ -853,13 +861,13 @@ export async function seedCreditRates(prisma: PrismaClient, markup = DEFAULT_MAR
         countryCode: code,
         countryName: COUNTRY_NAMES[code] || code,
         currency: rates.currency,
-        marketingCredits: Math.max(1, Math.round(rates.marketing * markup)),
-        utilityCredits: Math.max(1, Math.round(rates.utility * markup)),
-        authCredits: Math.max(1, Math.round(rates.auth * markup)),
+        marketingCredits: Math.max(1, Math.round(toPaise(rates.marketing) * markup)),
+        utilityCredits: Math.max(1, Math.round(toPaise(rates.utility) * markup)),
+        authCredits: Math.max(1, Math.round(toPaise(rates.auth) * markup)),
         serviceCredits: rates.session, // free on Meta's side; charging for it would be inventing a cost
-        metaMarketingCredits: rates.marketing,
-        metaUtilityCredits: rates.utility,
-        metaAuthCredits: rates.auth,
+        metaMarketingCredits: toPaise(rates.marketing),
+        metaUtilityCredits: toPaise(rates.utility),
+        metaAuthCredits: toPaise(rates.auth),
       },
     });
     created++;

@@ -453,6 +453,29 @@ async function processStatusUpdate(
     await recordMessageCost(app.prisma, existing.id, status.pricing, existing.contact?.country);
   }
 
+  // Settle the hold taken when this message was sent. A tenant is charged for
+  // messages that reach a handset, not for messages we handed to Meta — so a
+  // terminal failure returns the money, and delivery simply lets the charge
+  // stand. Guarded on isNewTransition because Meta retries webhooks and a retry
+  // must not refund twice (refundUndelivered is idempotent as well; this just
+  // avoids the query).
+  if (ourStatus === 'FAILED' && isNewTransition) {
+    const { refundUndelivered } = await import('../services/settlement.js');
+    const reason = updateData.errorMessage
+      ? `Not delivered: ${String(updateData.errorMessage).slice(0, 120)}`
+      : 'Not delivered — Meta reported the message failed';
+    const returned = await refundUndelivered(app.prisma, existing.id, reason).catch((err) => {
+      console.error(`[Settlement] refund failed for message ${existing.id}:`, err?.message);
+      return 0;
+    });
+    if (returned > 0) {
+      broadcastToTenant(tenantId, {
+        event: 'balance_changed',
+        data: { messageId: existing.id, refundedPaise: returned },
+      });
+    }
+  }
+
   // Campaign cards showed 0% delivered/read forever — the per-message
   // status was updated above, but nothing ever rolled that back up into
   // the campaign's own totalDelivered/totalRead/totalFailed counters that
