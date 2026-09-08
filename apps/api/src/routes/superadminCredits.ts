@@ -591,31 +591,73 @@ export async function registerSuperadminCreditRoutes(app: FastifyInstance): Prom
 
     // What the current settings actually mean, so a change can be judged
     // against the thing it affects rather than in the abstract.
+    //
+    // creditWorth is the whole model: the rate card is stored in credits, so
+    // one number turns credits into money. It is reported in the platform's
+    // reporting currency, not USD -- the dollar is an implementation detail of
+    // how the peg happens to be stored, and putting it in front of an admin
+    // pricing an Indian product just adds a conversion to do in your head.
     let implications: any = null;
     if (rate) {
       const creditWorth = (1 / peg) * fx.fxRate;
       const sellPerMsg = rate.marketingCredits * creditWorth;
       const costPerMsg = rate.metaMarketingCredits * creditWorth;
       implications = {
-        creditWorth: Math.round(creditWorth * 100000) / 100000,
+        creditWorth,
+        creditsPerUnit: creditWorth > 0 ? 1 / creditWorth : null,
         marketingSellPerMessage: Math.round(sellPerMsg * 10000) / 10000,
         marketingCostPerMessage: Math.round(costPerMsg * 10000) / 10000,
         marginPct: costPerMsg > 0 ? Math.round(((sellPerMsg - costPerMsg) / costPerMsg) * 1000) / 10 : null,
       };
+    }
 
-      if (pack) {
-        const { quotePackage } = await import('../services/pricing.js');
-        const q = await quotePackage(app.prisma, pack, 'IN');
-        implications.samplePack = {
-          name: pack.name,
-          totalMinor: q.totalMinor,
-          credits: pack.credits,
-          messages: q.messages,
-          buyerPerMessageMinor: q.perMessageMinor,
-          // Above 1 means a buyer pays more per credit than the engine spends
-          // them at. The two should agree.
-          valueRatio: q.valueRatio,
-        };
+    // Every active pack, and what each one implies a credit is worth. A pack
+    // is a price for a quantity of credits, so it states a credit's worth on
+    // its own -- and packs that disagree with each other, or with the peg, are
+    // the actual defect. The previous version read one pack (the first by sort
+    // order) and derived a suggested peg from the *current* peg, so once the
+    // peg went wrong the suggestion could only ever repeat it.
+    const allPacks = await app.prisma.creditPackage.findMany({
+      where: { isActive: true },
+      orderBy: { sortOrder: 'asc' },
+    });
+    const packImplications = allPacks.map((k) => {
+      const price = k.priceMinor / 100;
+      const impliedWorth = k.credits > 0 ? price / k.credits : 0;
+      const messages = rate?.marketingCredits ? Math.floor(k.credits / rate.marketingCredits) : 0;
+      return {
+        id: k.id,
+        name: k.name,
+        price,
+        credits: k.credits,
+        impliedCreditWorth: impliedWorth,
+        messages,
+        perMessage: messages > 0 ? price / messages : 0,
+      };
+    });
+
+    // The value the packs themselves agree on. Consensus rather than first-by-
+    // sort-order: one mispriced pack should not redefine the platform's peg.
+    let consensusWorth: number | null = null;
+    let consensusPacks: string[] = [];
+    if (packImplications.length) {
+      const buckets = new Map<string, { worth: number; names: string[] }>();
+      for (const k of packImplications) {
+        if (!(k.impliedCreditWorth > 0)) continue;
+        // Round to 4 significant figures so packs priced consistently land in
+        // the same bucket despite rounding in their stored prices.
+        const key = k.impliedCreditWorth.toPrecision(4);
+        const b = buckets.get(key) || { worth: k.impliedCreditWorth, names: [] };
+        b.names.push(k.name);
+        buckets.set(key, b);
+      }
+      let best: { worth: number; names: string[] } | null = null;
+      for (const b of buckets.values()) {
+        if (!best || b.names.length > best.names.length) best = b;
+      }
+      if (best && best.names.length > 0) {
+        consensusWorth = best.worth;
+        consensusPacks = best.names;
       }
     }
 
@@ -627,6 +669,8 @@ export async function registerSuperadminCreditRoutes(app: FastifyInstance): Prom
         defaultMarkup: DEFAULT_MARKUP,
         currency: fx,
         implications,
+        packs: packImplications,
+        consensus: consensusWorth != null ? { creditWorth: consensusWorth, packs: consensusPacks } : null,
       },
     };
   });
@@ -640,6 +684,13 @@ export async function registerSuperadminCreditRoutes(app: FastifyInstance): Prom
   app.patch('/credit-settings', async (request, reply) => {
     const body = z.object({
       creditsPerUsd: z.number().positive().max(10000000).optional(),
+      /**
+       * What one credit is worth, in the reporting currency. This is the field
+       * the panel sends: the peg is stored per-USD for historical reasons, but
+       * an admin pricing an Indian product should set a rupee value and never
+       * see a dollar. The conversion happens here, once, instead of in the UI.
+       */
+      creditWorth: z.number().positive().max(1000).optional(),
       currency: z.string().length(3).optional(),
       fxRateFromUsd: z.number().positive().max(100000).optional(),
     }).parse(request.body);
@@ -651,8 +702,28 @@ export async function registerSuperadminCreditRoutes(app: FastifyInstance): Prom
       });
     }
 
+    if (body.creditWorth !== undefined && body.creditsPerUsd !== undefined) {
+      return reply.status(400).send({
+        success: false,
+        error: {
+          code: 'CONFLICTING_PEG',
+          message: 'Send creditWorth or creditsPerUsd, not both — they set the same thing.',
+        },
+      });
+    }
+
     const { getCreditsPerUsd, refreshRateCache } = await import('../services/creditService.js');
     const before = getCreditsPerUsd();
+
+    // A rupee-per-credit value has to be converted against the rate that will
+    // be in force after this same request, or saving a new exchange rate and a
+    // new credit worth together would apply the old rate to the new worth.
+    if (body.creditWorth !== undefined) {
+      const { getCurrencyContext } = await import('../services/currency.js');
+      const current = await getCurrencyContext(app.prisma);
+      const effectiveFx = body.fxRateFromUsd ?? current.fxRate;
+      body.creditsPerUsd = effectiveFx / body.creditWorth;
+    }
 
     const writes: any[] = [];
     if (body.creditsPerUsd !== undefined) {
@@ -685,16 +756,28 @@ export async function registerSuperadminCreditRoutes(app: FastifyInstance): Prom
     const totalBalance = await app.prisma.tenantCredit.aggregate({ _sum: { balance: true } });
     const credits = totalBalance._sum.balance ?? 0;
 
+    // Report the effect in the reporting currency. What every balance is now
+    // worth is the thing an admin is deciding about; making them multiply by
+    // an exchange rate to find out is the same USD detour the panel just
+    // removed from its inputs.
+    const { getCurrencyContext } = await import('../services/currency.js');
+    const fxAfter = await getCurrencyContext(app.prisma);
+    const worthBefore = (1 / before) * fxAfter.fxRate;
+    const worthAfter = (1 / after) * fxAfter.fxRate;
+
     return {
       success: true,
       data: {
         creditsPerUsd: after,
+        creditWorth: worthAfter,
+        currency: fxAfter.currency,
+        symbol: fxAfter.symbol,
         pegChanged: before !== after,
         // Outstanding balances are unchanged in credits and therefore changed
         // in value. Stated plainly, because it is easy to miss.
         outstandingCredits: credits,
-        outstandingUsdBefore: Math.round((credits / before) * 100) / 100,
-        outstandingUsdAfter: Math.round((credits / after) * 100) / 100,
+        outstandingBefore: Math.round(credits * worthBefore * 100) / 100,
+        outstandingAfter: Math.round(credits * worthAfter * 100) / 100,
       },
     };
   });

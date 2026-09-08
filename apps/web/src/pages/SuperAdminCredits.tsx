@@ -7,6 +7,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../api/client';
 import SuperAdminRatesTab from '../components/SuperAdminRatesTab';
 import SuperAdminCommerceTab from '../components/SuperAdminCommerceTab';
+import { useCurrency, creditsToMoney } from '../lib/money';
 import {
   Coins,
   Search,
@@ -50,6 +51,7 @@ interface Adjustment {
 }
 
 export default function SuperAdminCreditsPage() {
+  const currency = useCurrency();
   const [activeTab, setActiveTab] = useState<TabType>('overview');
   const [search, setSearch] = useState('');
   const [showAdjustModal, setShowAdjustModal] = useState(false);
@@ -256,7 +258,7 @@ export default function SuperAdminCreditsPage() {
                 <div>
                   <p className="text-sm text-ios-secondary">Total Platform Balance</p>
                   <p className="text-2xl font-bold text-ios-dark">{formatCredits(totalPlatformBalance)}</p>
-                  <p className="text-xs text-ios-muted">~${(totalPlatformBalance / 10000).toFixed(2)} USD</p>
+                  <p className="text-xs text-ios-muted">{creditsToMoney(totalPlatformBalance, currency)}</p>
                 </div>
               </div>
             </div>

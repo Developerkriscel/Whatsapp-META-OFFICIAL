@@ -257,8 +257,25 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
 
   app.get('/settings/currency', async (_request, _reply) => {
     const { getCurrencyContext } = await import('../services/currency.js');
+    const { getCreditsPerUsd } = await import('../services/creditService.js');
     const fx = await getCurrencyContext(app.prisma);
-    return { success: true, data: { ...fx, creditsPerUsd: 10000 } };
+
+    // The peg was hardcoded here at 10,000, so every credits-to-money figure in
+    // the web app ignored the configured value entirely -- the superadmin panel
+    // could change the peg and no page that spent credits would agree with it.
+    const creditsPerUsd = getCreditsPerUsd();
+
+    return {
+      success: true,
+      data: {
+        ...fx,
+        creditsPerUsd,
+        // What one credit is worth in the reporting currency. Sent so the web
+        // app can price a balance without dividing by a dollar peg and
+        // multiplying by an exchange rate to get back to rupees.
+        creditWorth: creditsPerUsd > 0 ? fx.fxRate / creditsPerUsd : 0,
+      },
+    };
   });
 
   app.get('/dashboard/overview', async (request, reply) => {

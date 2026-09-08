@@ -280,7 +280,7 @@ export default function SuperAdminRatesTab() {
                   </tbody>
                 </table>
                 <p className="text-xs text-ios-muted mt-3">
-                  Meta&apos;s cost is in the account&apos;s billing currency and your price is in USD credits, so these
+                  Meta&apos;s cost is in the account&apos;s billing currency and your price is in credits, so these
                   are two separate facts rather than a margin — comparing them needs an exchange rate this screen
                   does not hold.
                 </p>

@@ -967,6 +967,7 @@ function UsersTab({ tenantId, users }: { tenantId: string; users: TenantUser[] }
 // ============================================
 
 function CreditsTab({ tenantId, tenantName }: { tenantId: string; tenantName: string }) {
+  const currency = useCurrency();
   const fxCredits = useCurrency();
   const queryClient = useQueryClient();
   const [mode, setMode] = useState<'add' | 'deduct'>('add');
@@ -1072,7 +1073,7 @@ function CreditsTab({ tenantId, tenantName }: { tenantId: string; tenantName: st
             <div>
               <p className="text-sm text-ios-muted">Total Purchased</p>
               <p className="text-2xl font-bold text-ios-dark">{credits.totalPurchased.toLocaleString()}</p>
-              <p className="text-xs text-ios-muted">${(credits.totalPurchased / 100).toFixed(2)} USD</p>
+              <p className="text-xs text-ios-muted">{creditsToMoney(credits.totalPurchased, currency)}</p>
             </div>
           </div>
         </div>
@@ -1084,7 +1085,7 @@ function CreditsTab({ tenantId, tenantName }: { tenantId: string; tenantName: st
             <div>
               <p className="text-sm text-ios-muted">Total Used</p>
               <p className="text-2xl font-bold text-ios-dark">{credits.totalUsed.toLocaleString()}</p>
-              <p className="text-xs text-ios-muted">${(credits.totalUsed / 100).toFixed(2)} USD</p>
+              <p className="text-xs text-ios-muted">{creditsToMoney(credits.totalUsed, currency)}</p>
             </div>
           </div>
         </div>

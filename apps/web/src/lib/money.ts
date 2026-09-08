@@ -14,6 +14,12 @@
 import { useQuery } from '@tanstack/react-query';
 import { api } from '../api/client';
 
+/**
+ * Only a last-resort fallback for the seconds before /settings/currency
+ * answers. It used to be the value every conversion actually used, which meant
+ * the superadmin panel could change the peg and no page that spent credits
+ * would agree with it.
+ */
 export const CREDITS_PER_USD = 10000;
 
 export interface CurrencyContext {
@@ -22,6 +28,10 @@ export interface CurrencyContext {
   fxRate: number;
   fxSource: 'configured' | 'default';
   fxUpdatedAt: string | null;
+  /** Configured peg, no longer assumed. */
+  creditsPerUsd: number;
+  /** What one credit is worth in `currency`. The only number needed to price a balance. */
+  creditWorth: number;
 }
 
 /** Used until the setting loads, so a page never flashes the wrong symbol. */
@@ -31,6 +41,8 @@ const FALLBACK: CurrencyContext = {
   fxRate: 88.5,
   fxSource: 'default',
   fxUpdatedAt: null,
+  creditsPerUsd: CREDITS_PER_USD,
+  creditWorth: 88.5 / CREDITS_PER_USD,
 };
 
 /**
@@ -76,10 +88,21 @@ export function formatUnitMoney(usd: number, ctx: CurrencyContext): string {
   });
 }
 
-/** Credits are the stored balance unit; this is what they are worth. */
+/**
+ * Credits are the stored balance unit; this is what they are worth.
+ *
+ * Goes straight from credits to the reporting currency using the configured
+ * per-credit value. It used to divide by a hardcoded 10,000 to reach dollars
+ * and then multiply back up by the exchange rate — two conversions that could
+ * disagree with the panel that set them.
+ */
 export function creditsToMoney(credits: number, ctx: CurrencyContext, unit = false): string {
-  const usd = credits / CREDITS_PER_USD;
-  return unit ? formatUnitMoney(usd, ctx) : formatMoney(usd, ctx);
+  const amount = credits * ctx.creditWorth;
+  const decimals = unit ? (Math.abs(amount) < 1 ? 4 : 3) : 2;
+  return ctx.symbol + amount.toLocaleString(localeFor(ctx.currency), {
+    minimumFractionDigits: decimals,
+    maximumFractionDigits: decimals,
+  });
 }
 
 /** Plain credit count with grouping, for where the balance itself is the point. */
