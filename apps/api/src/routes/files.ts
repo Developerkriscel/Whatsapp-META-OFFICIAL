@@ -10,6 +10,7 @@ import { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import crypto from 'crypto';
 import { getR2Config, putObject, getObject, deleteObject, saveR2Config, testR2 } from '../services/objectStorage.js';
+import { requireSuperadmin } from '../middleware/auth.js';
 
 const AVATAR_TYPES: Record<string, string> = {
   'image/jpeg': '.jpg',
@@ -127,6 +128,10 @@ export async function registerFileRoutes(app: FastifyInstance) {
 
 /** Storage configuration, superadmin only. */
 export async function registerStorageAdminRoutes(app: FastifyInstance) {
+  // The comment above said "superadmin only" but nothing enforced it, so a
+  // tenant token could read and overwrite the platform's R2 credentials.
+  app.addHook('preHandler', requireSuperadmin());
+
   app.get('/storage', async () => {
     const cfg = await getR2Config(app.prisma);
     return {

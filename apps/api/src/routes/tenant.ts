@@ -2186,7 +2186,7 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
       existingText: z.string().optional(),
     }).parse(request.body);
 
-    const result = await getAISuggestion({ module: 'campaign', context: body });
+    const result = await getAISuggestion({ module: 'campaign', context: body }, app.prisma);
     return { success: true, data: result };
   });
 
@@ -2769,9 +2769,10 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
   });
 
   /**
-   * POST /templates/ai-rewrite - Optional Mistral-powered rewrite targeting the
+   * POST /templates/ai-rewrite - Optional model-powered rewrite targeting the
    * compliance issues found by /templates/analyze. Returns data: null when no
-   * MISTRAL_API_KEY is configured, or when the AI call fails for any reason.
+   * AI provider is configured, or when the call fails for any reason. Which
+   * provider answers is set in Superadmin -> System -> AI.
    */
   app.post('/templates/ai-rewrite', { preHandler: [app.requirePermission('templates', 'create')] }, async (request, reply) => {
     const body = z.object({
@@ -2791,7 +2792,7 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
       module: 'template',
       context: { category: body.category, bodyText: body.bodyText },
       ruleIssues: body.issues,
-    });
+    }, app.prisma);
 
     return { success: true, data: result };
   });
@@ -4226,7 +4227,7 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
     const fields = ['tag', 'city', 'country', 'language', 'company', 'totalMessagesSent', 'lastMessageAt', 'createdAt'];
     const operators = ['equals', 'not_equals', 'contains', 'not_contains', 'starts_with', 'ends_with', 'is_empty', 'is_not_empty', 'greater_than', 'less_than', 'within_days'];
 
-    const suggestion = await getAISuggestion({ module: 'segment', context: { goal, fields, operators } });
+    const suggestion = await getAISuggestion({ module: 'segment', context: { goal, fields, operators } }, app.prisma);
     if (!suggestion) {
       return { success: true, data: null };
     }

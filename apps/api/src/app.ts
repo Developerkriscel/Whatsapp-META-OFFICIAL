@@ -25,6 +25,7 @@ import { registerCreditRoutes } from './routes/credits.js';
 import { registerSuperadminCreditRoutes } from './routes/superadminCredits.js';
 import { registerSuperadminCommerceRoutes } from './routes/superadminCommerce.js';
 import { registerFileRoutes, registerStorageAdminRoutes } from './routes/files.js';
+import { registerAiAdminRoutes } from './routes/superadminAi.js';
 import { registerSSERoutes } from './routes/sse.js';
 import { registerAutomationRoutes } from './routes/automation.js';
 import { registerTeamRoutes } from './routes/teams.js';
@@ -220,6 +221,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(registerSuperadminCreditRoutes, { prefix: '/api/v1/superadmin' });
   await app.register(registerSuperadminCommerceRoutes, { prefix: '/api/v1/superadmin' });
   await app.register(registerStorageAdminRoutes, { prefix: '/api/v1/superadmin' });
+  await app.register(registerAiAdminRoutes, { prefix: '/api/v1/superadmin' });
   await app.register(registerFileRoutes, { prefix: '/api/v1' });
   const { registerSuperadminAdvancedRoutes } = await import('./routes/superadminFeatures.js');
   await app.register(registerSuperadminAdvancedRoutes, { prefix: '/api/v1/superadmin' });

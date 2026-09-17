@@ -1,11 +1,14 @@
 /**
  * AI Assist — rule-based Meta template compliance checking (always on, no
- * network) plus optional Mistral-powered rewrite/suggestion calls (only when
- * MISTRAL_API_KEY is configured). The rule engine is the real prevention
- * mechanism; the AI call is an enhancement layered on top of it.
+ * network) plus optional model-powered rewrite/suggestion calls.
+ *
+ * The rule engine is the real prevention mechanism; the model call is an
+ * enhancement layered on top of it, and returns null whenever no provider is
+ * configured or the call fails. Which provider answers is decided in
+ * aiProvider.ts, not here.
  */
 
-import axios from 'axios';
+import type { PrismaClient } from '@prisma/client';
 
 export type TemplateCategory = 'MARKETING' | 'UTILITY' | 'AUTHENTICATION';
 
@@ -159,8 +162,14 @@ export interface AISuggestionResult {
   raw?: any;
 }
 
+/**
+ * Synchronous best-effort check, kept for callers that cannot await. It only
+ * sees environment keys, so a key stored from the panel does not register here
+ * -- prefer isAIConfigured(prisma) from aiProvider.ts where a prisma client is
+ * available.
+ */
 export function isAIAvailable(): boolean {
-  return !!process.env.MISTRAL_API_KEY;
+  return !!(process.env.MISTRAL_API_KEY || process.env.OPENAI_API_KEY);
 }
 
 function buildPrompt(input: AISuggestionInput): { system: string; user: string } {
@@ -219,42 +228,22 @@ function buildPrompt(input: AISuggestionInput): { system: string; user: string }
   }
 }
 
-export async function getAISuggestion(input: AISuggestionInput): Promise<AISuggestionResult | null> {
-  const apiKey = process.env.MISTRAL_API_KEY;
-  if (!apiKey) return null;
+export async function getAISuggestion(
+  input: AISuggestionInput,
+  prisma?: PrismaClient,
+): Promise<AISuggestionResult | null> {
+  if (!prisma) return null;
 
   const { system, user } = buildPrompt(input);
-  const model = process.env.MISTRAL_MODEL || 'mistral-small-latest';
+  const { chatCompletion } = await import('./aiProvider.js');
 
-  try {
-    const response = await axios.post(
-      'https://api.mistral.ai/v1/chat/completions',
-      {
-        model,
-        messages: [
-          { role: 'system', content: system },
-          { role: 'user', content: user },
-        ],
-        max_tokens: 500,
-        temperature: 0.4,
-      },
-      {
-        headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-        timeout: 10000,
-      }
-    );
+  const result = await chatCompletion(prisma, { system, user, maxTokens: 500, temperature: 0.4 });
+  if (!result) return null;
 
-    const content: string = response.data?.choices?.[0]?.message?.content?.trim();
-    if (!content) return null;
-
-    return {
-      suggestion: content,
-      rationale: `Suggested by ${model} based on ${input.ruleIssues?.length ? 'the compliance issues found' : 'your description'}.`,
-      raw: response.data,
-    };
-  } catch (err) {
-    return null;
-  }
+  return {
+    suggestion: result.content,
+    rationale: `Suggested by ${result.model} based on ${input.ruleIssues?.length ? 'the compliance issues found' : 'your description'}.`,
+  };
 }
 
 /**
@@ -263,33 +252,17 @@ export async function getAISuggestion(input: AISuggestionInput): Promise<AISugge
  * knowledge-base-backed RAG path in knowledgeBase.ts, for tenants who want
  * an AI chatbot without setting up a knowledge base first.
  */
-export async function generateSimpleReply(params: { systemPrompt: string; userMessage: string }): Promise<string | null> {
-  const apiKey = process.env.MISTRAL_API_KEY;
-  if (!apiKey) return null;
-
-  const model = process.env.MISTRAL_MODEL || 'mistral-small-latest';
-
-  try {
-    const response = await axios.post(
-      'https://api.mistral.ai/v1/chat/completions',
-      {
-        model,
-        messages: [
-          { role: 'system', content: params.systemPrompt },
-          { role: 'user', content: params.userMessage },
-        ],
-        max_tokens: 300,
-        temperature: 0.5,
-      },
-      {
-        headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-        timeout: 15000,
-      }
-    );
-
-    const content: string = response.data?.choices?.[0]?.message?.content?.trim();
-    return content || null;
-  } catch (err) {
-    return null;
-  }
+export async function generateSimpleReply(
+  params: { systemPrompt: string; userMessage: string },
+  prisma?: PrismaClient,
+): Promise<string | null> {
+  if (!prisma) return null;
+  const { chatCompletion } = await import('./aiProvider.js');
+  const result = await chatCompletion(prisma, {
+    system: params.systemPrompt,
+    user: params.userMessage,
+    maxTokens: 300,
+    temperature: 0.5,
+  });
+  return result?.content ?? null;
 }

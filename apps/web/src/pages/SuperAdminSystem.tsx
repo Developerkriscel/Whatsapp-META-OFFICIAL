@@ -5,6 +5,7 @@
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { api } from '../api/client';
+import SuperAdminAiTab from '../components/SuperAdminAiTab';
 import {
   Activity,
   Server,
@@ -24,7 +25,7 @@ import {
   Loader2,
 } from 'lucide-react';
 
-const TABS = ['overview', 'whatsapp', 'services', 'webhooks', 'announcements', 'rate-markup', 'logs', 'alerts'] as const;
+const TABS = ['overview', 'whatsapp', 'ai', 'services', 'webhooks', 'announcements', 'rate-markup', 'logs', 'alerts'] as const;
 type TabType = typeof TABS[number];
 
 export default function SuperAdminSystemPage() {
@@ -378,6 +379,8 @@ export default function SuperAdminSystemPage() {
 
       {/* Webhooks Queue & Meta API Rate Limit Inspector Tab */}
       {activeTab === 'whatsapp' && <WhatsAppHealthTab />}
+
+      {activeTab === 'ai' && <SuperAdminAiTab />}
 
       {activeTab === 'webhooks' && <WebhooksInspectorTab />}
 
