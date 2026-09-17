@@ -217,10 +217,31 @@ export async function chatCompletion(
     maxTokens?: number;
     temperature?: number;
     timeoutMs?: number;
+    /** Whose budget this comes out of. Null for platform calls like a test. */
+    tenantId?: string | null;
+    /** Which product surface asked, for the usage breakdown. */
+    feature?: string;
   },
 ): Promise<ChatResult | null> {
   const r = await resolveProvider(prisma);
   if (!r.apiKey) return null;
+
+  const { checkAllowed, recordUsage } = await import('./aiGovernor.js');
+  const tenantId = params.tenantId ?? null;
+  const feature = params.feature ?? 'unknown';
+
+  // Ask permission before spending someone's money. A refusal is recorded too,
+  // otherwise a tenant sitting on their limit would look idle rather than
+  // blocked.
+  const gate = await checkAllowed(prisma, tenantId);
+  if (!gate.allowed) {
+    await recordUsage(prisma, {
+      tenantId, provider: r.provider, model: r.chatModel, feature,
+      ok: false, errorCode: gate.reason, latencyMs: 0,
+    });
+    console.warn(`[AI] refused ${feature} for ${tenantId ?? 'platform'}: ${gate.reason}`);
+    return null;
+  }
 
   const messages = [
     { role: 'system', content: params.system },
@@ -237,6 +258,7 @@ export async function chatCompletion(
   for (const shape of [first, first === 'modern' ? 'legacy' : 'modern'] as const) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), params.timeoutMs ?? 20000);
+    const startedAt = Date.now();
     try {
       const res = await fetch(`${r.spec.baseUrl}/chat/completions`, {
         method: 'POST',
@@ -248,6 +270,16 @@ export async function chatCompletion(
       if (res.ok) {
         const j: any = await res.json();
         const content: string = j?.choices?.[0]?.message?.content?.trim();
+        const u = j?.usage;
+        // Recorded whether or not there was text: an empty answer still burned
+        // tokens, and a reasoning model burning a whole budget on thinking is
+        // exactly the pattern worth being able to see.
+        await recordUsage(prisma, {
+          tenantId, provider: r.provider, model: r.chatModel, feature,
+          promptTokens: u?.prompt_tokens, completionTokens: u?.completion_tokens,
+          ok: !!content, errorCode: content ? null : 'EMPTY_RESPONSE',
+          latencyMs: Date.now() - startedAt,
+        });
         if (!content) return null;
         shapeByModel.set(r.chatModel, shape);
         return { content, model: r.chatModel, provider: r.provider };
@@ -256,12 +288,22 @@ export async function chatCompletion(
       const j: any = await res.json().catch(() => ({}));
       const message = String(j?.error?.message || res.statusText);
       if (res.status === 400 && isShapeComplaint(message)) {
-        // Wrong shape for this model — try the other one.
+        // Wrong shape for this model — try the other one, and do not record a
+        // failure for something we are about to retry successfully.
         continue;
       }
+      await recordUsage(prisma, {
+        tenantId, provider: r.provider, model: r.chatModel, feature,
+        ok: false, errorCode: `HTTP_${res.status}`, latencyMs: Date.now() - startedAt,
+      });
       console.error(`[AI] ${r.provider}/${r.chatModel} HTTP ${res.status}: ${message.slice(0, 200)}`);
       return null;
     } catch (err: any) {
+      await recordUsage(prisma, {
+        tenantId, provider: r.provider, model: r.chatModel, feature,
+        ok: false, errorCode: err?.name === 'AbortError' ? 'TIMEOUT' : 'NETWORK',
+        latencyMs: Date.now() - startedAt,
+      });
       console.error(`[AI] ${r.provider}/${r.chatModel} failed: ${err?.message}`);
       return null;
     } finally {
@@ -302,6 +344,64 @@ export async function embed(
   } catch (err: any) {
     console.error(`[AI] embeddings failed: ${err?.message}`);
     return input.map(() => null);
+  }
+}
+
+
+/**
+ * Chat models the configured key can actually reach.
+ *
+ * A mistyped model name is a silent failure: the call 404s and every AI
+ * feature simply stops suggesting, with nothing on screen to say why. Listing
+ * what the provider will serve lets the panel offer a choice instead of a
+ * free-text field.
+ */
+export async function listModels(
+  prisma: PrismaClient,
+  provider?: Provider,
+): Promise<{ provider: Provider; models: string[]; error?: string }> {
+  const r = await resolveProvider(prisma);
+  const target = provider ?? r.provider;
+  const spec = PROVIDERS[target];
+
+  let apiKey = r.apiKey;
+  if (target !== r.provider) {
+    const rows = await prisma.platformSetting.findMany({ where: { key: spec.keySetting } });
+    apiKey = decryptIfPresent(rows[0]?.value) || process.env[spec.envKey] || null;
+  }
+  if (!apiKey) return { provider: target, models: [], error: `No API key stored for ${spec.label}.` };
+
+  try {
+    const res = await fetch(`${spec.baseUrl}/models`, {
+      headers: { Authorization: `Bearer ${apiKey}` },
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!res.ok) {
+      const j: any = await res.json().catch(() => ({}));
+      return {
+        provider: target,
+        models: [],
+        error: `HTTP ${res.status}: ${String(j?.error?.message || res.statusText).slice(0, 140)}`,
+      };
+    }
+    const j: any = await res.json();
+    const ids: string[] = (j?.data || []).map((m: any) => String(m.id));
+
+    // Only text chat models. The list also carries audio, image, embedding,
+    // moderation and transcription entries, none of which can answer a
+    // template rewrite -- offering them would just be a menu of ways to break.
+    const models = ids
+      .filter((id) =>
+        target === 'openai'
+          ? /^(gpt-|o[1-9]|chatgpt)/.test(id) &&
+            !/audio|realtime|transcribe|tts|image|search|moderation|embedding|instruct|codex/.test(id)
+          : !/embed|moderation|ocr/.test(id),
+      )
+      .sort();
+
+    return { provider: target, models };
+  } catch (err: any) {
+    return { provider: target, models: [], error: err?.message || 'Could not reach the provider.' };
   }
 }
 

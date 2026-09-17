@@ -2186,7 +2186,7 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
       existingText: z.string().optional(),
     }).parse(request.body);
 
-    const result = await getAISuggestion({ module: 'campaign', context: body }, app.prisma);
+    const result = await getAISuggestion({ module: 'campaign', context: body }, app.prisma, request.authUser.tenantId);
     return { success: true, data: result };
   });
 
@@ -2792,7 +2792,7 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
       module: 'template',
       context: { category: body.category, bodyText: body.bodyText },
       ruleIssues: body.issues,
-    }, app.prisma);
+    }, app.prisma, request.authUser.tenantId);
 
     return { success: true, data: result };
   });
@@ -4227,7 +4227,7 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
     const fields = ['tag', 'city', 'country', 'language', 'company', 'totalMessagesSent', 'lastMessageAt', 'createdAt'];
     const operators = ['equals', 'not_equals', 'contains', 'not_contains', 'starts_with', 'ends_with', 'is_empty', 'is_not_empty', 'greater_than', 'less_than', 'within_days'];
 
-    const suggestion = await getAISuggestion({ module: 'segment', context: { goal, fields, operators } }, app.prisma);
+    const suggestion = await getAISuggestion({ module: 'segment', context: { goal, fields, operators } }, app.prisma, request.authUser.tenantId);
     if (!suggestion) {
       return { success: true, data: null };
     }

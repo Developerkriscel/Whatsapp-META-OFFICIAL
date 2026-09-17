@@ -172,6 +172,8 @@ export async function generateRagReply(params: GenerateRagReplyParams): Promise<
     maxTokens: 400,
     temperature: 0.3,
     timeoutMs: 15000,
+    tenantId,
+    feature: 'chatbot-rag',
   });
   if (!result) return null;
 

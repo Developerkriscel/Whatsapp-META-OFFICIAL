@@ -367,7 +367,7 @@ export async function registerAutomationRoutes(app: FastifyInstance): Promise<vo
     const suggestion = await getAISuggestion({
       module: 'flow',
       context: { intent, stepTypes: FLOW_STEP_TYPES },
-    }, app.prisma);
+    }, app.prisma, request.authUser.tenantId);
     if (!suggestion) {
       return { success: true, data: null };
     }
@@ -628,7 +628,7 @@ async function executeFlowStep(
         generatedReply = await generateSimpleReply({
           systemPrompt: `${currentStep.systemPrompt || 'You are a helpful, friendly assistant.'}\n\nAbout the business:\n${currentStep.businessDescription}\n\nAnswer naturally and helpfully based on this. If you don't know something specific, offer to connect the customer with a human.`,
           userMessage: inboundText,
-        }, app.prisma);
+        }, app.prisma, flow.tenantId);
       } else if (inboundText && currentStep.knowledgeBaseId) {
         const { generateRagReply } = await import('../services/knowledgeBase.js');
         const result = await generateRagReply({

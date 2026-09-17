@@ -361,6 +361,10 @@ model Tenant {
   // Teams
   teams Team[]
 
+  // AI
+  aiUsage  AiUsage[]
+  aiPolicy AiTenantPolicy?
+
   @@index([status])
   @@index([planId])
   @@map("tenants")
@@ -1920,4 +1924,62 @@ model PaymentOrder {
   @@index([tenantId])
   @@index([status])
   @@map("payment_orders")
+}
+
+/// One row per model call: who made it, what it cost, whether it worked.
+///
+/// Nothing recorded AI usage before, so there was no way to answer "which
+/// tenant is spending the budget", "is this model actually being used", or
+/// "how often are calls failing" — and no basis on which to rate limit.
+model AiUsage {
+  id String @id @default(cuid())
+
+  /// Null for platform-level calls (a provider test, say) that belong to no tenant.
+  tenantId String?
+  tenant   Tenant? @relation(fields: [tenantId], references: [id], onDelete: SetNull)
+
+  provider String
+  model    String
+  /// Which product surface asked: template, campaign, segment, flow, chatbot, test.
+  feature  String
+
+  promptTokens     Int @default(0)
+  completionTokens Int @default(0)
+  totalTokens      Int @default(0)
+  /// Charge in millionths of a rupee. Token counts are small and prices are
+  /// per-million-tokens, so paise would round almost every call to zero.
+  costMicro        Int @default(0)
+
+  ok        Boolean @default(true)
+  errorCode String?
+  latencyMs Int     @default(0)
+
+  createdAt DateTime @default(now())
+
+  @@index([tenantId, createdAt])
+  @@index([createdAt])
+  @@index([model])
+  @@map("ai_usage")
+}
+
+/// Per-tenant AI limits. A row exists only where the platform default is
+/// overridden, so the defaults stay in one place.
+model AiTenantPolicy {
+  id       String @id @default(cuid())
+  tenantId String @unique
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  /// Turns AI off for this tenant alone, without touching anyone else.
+  enabled Boolean @default(true)
+
+  /// Null means "use the platform default".
+  dailyTokenLimit   Int?
+  monthlyTokenLimit Int?
+  requestsPerMinute Int?
+
+  note      String?
+  updatedAt DateTime @updatedAt
+  createdAt DateTime @default(now())
+
+  @@map("ai_tenant_policies")
 }

@@ -231,13 +231,17 @@ function buildPrompt(input: AISuggestionInput): { system: string; user: string }
 export async function getAISuggestion(
   input: AISuggestionInput,
   prisma?: PrismaClient,
+  tenantId?: string | null,
 ): Promise<AISuggestionResult | null> {
   if (!prisma) return null;
 
   const { system, user } = buildPrompt(input);
   const { chatCompletion } = await import('./aiProvider.js');
 
-  const result = await chatCompletion(prisma, { system, user, maxTokens: 500, temperature: 0.4 });
+  const result = await chatCompletion(prisma, {
+    system, user, maxTokens: 500, temperature: 0.4,
+    tenantId, feature: input.module,
+  });
   if (!result) return null;
 
   return {
@@ -255,6 +259,7 @@ export async function getAISuggestion(
 export async function generateSimpleReply(
   params: { systemPrompt: string; userMessage: string },
   prisma?: PrismaClient,
+  tenantId?: string | null,
 ): Promise<string | null> {
   if (!prisma) return null;
   const { chatCompletion } = await import('./aiProvider.js');
@@ -263,6 +268,8 @@ export async function generateSimpleReply(
     user: params.userMessage,
     maxTokens: 300,
     temperature: 0.5,
+    tenantId,
+    feature: 'chatbot',
   });
   return result?.content ?? null;
 }
