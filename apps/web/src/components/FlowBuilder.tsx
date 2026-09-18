@@ -30,6 +30,9 @@ interface FlowStep {
   keyword?: string;
   // Message
   message?: string;
+  // AI reply scope — extra subjects the bot may discuss beyond the business
+  // description. Everything else is refused with the fallback message.
+  allowedTopics?: string[];
   // Condition
   conditionType?: 'contains' | 'equals' | 'starts_with' | 'has_tag';
   value?: string;
@@ -564,15 +567,48 @@ function AIReplyEditor({
         </>
       )}
 
+      {/* Scope. The bot answers the public under the business's own number,
+          so what it will not discuss matters as much as what it will. */}
       <div className="mt-4">
-        <label className="block text-xs font-semibold text-ios-secondary uppercase tracking-wide mb-2">System Prompt / Persona</label>
+        <label className="block text-xs font-semibold text-ios-secondary uppercase tracking-wide mb-2">
+          Also allowed to discuss
+        </label>
+        <input
+          type="text"
+          value={(step.allowedTopics || []).join(', ')}
+          onChange={e =>
+            set({
+              allowedTopics: e.target.value
+                .split(',')
+                .map(t => t.trim())
+                .filter(Boolean),
+            })
+          }
+          placeholder="e.g. shipping partners, GST invoices, festival timings"
+          className="input-apple w-full"
+        />
+        <p className="text-xs text-ios-muted mt-1.5">
+          The bot answers questions about your business and these subjects. Everything else — general
+          knowledge, code, homework, advice, other companies — gets the fallback message below, whoever
+          asks and however they ask it.
+        </p>
+      </div>
+
+      <div className="mt-4">
+        <label className="block text-xs font-semibold text-ios-secondary uppercase tracking-wide mb-2">
+          House rules <span className="text-ios-muted font-normal normal-case">(optional)</span>
+        </label>
         <textarea
           value={step.systemPrompt || ''}
           onChange={e => set({ systemPrompt: e.target.value })}
-          placeholder="You are a helpful assistant for {{business_name}}. Answer only using the provided context."
+          placeholder="e.g. Always mention free delivery over ₹999. Never quote prices for bulk orders — offer a callback."
           rows={3}
           className="input-apple w-full resize-none"
         />
+        <p className="text-xs text-ios-muted mt-1.5">
+          Added to the bot's instructions. Tone, things to always mention, things to leave to a human.
+          The scope and refusal rules above are applied regardless of what you write here.
+        </p>
       </div>
 
       <div className="mt-4">

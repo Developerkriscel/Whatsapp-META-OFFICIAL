@@ -139,6 +139,13 @@ export interface GenerateRagReplyParams {
   knowledgeBaseId: string;
   systemPrompt: string;
   userMessage: string;
+  /**
+   * Scope and refusal rules. Optional so a caller without them still works,
+   * but the chatbot path always supplies them — grounding a reply in retrieved
+   * documents stops it inventing facts, and does nothing at all to stop it
+   * answering a question that has no business being asked.
+   */
+  guardrails?: import('./aiGuardrails.js').GuardrailConfig;
 }
 
 export interface RagReplyResult {
@@ -152,7 +159,7 @@ export interface RagReplyResult {
  * embedding failure, no relevant chunks, or generation failure) — never throws.
  */
 export async function generateRagReply(params: GenerateRagReplyParams): Promise<RagReplyResult | null> {
-  const { prisma, tenantId, knowledgeBaseId, systemPrompt, userMessage } = params;
+  const { prisma, tenantId, knowledgeBaseId, systemPrompt, userMessage, guardrails } = params;
 
   const queryEmbedding = await embedText(prisma, userMessage);
   if (!queryEmbedding) return null;
@@ -163,12 +170,17 @@ export async function generateRagReply(params: GenerateRagReplyParams): Promise<
   const context = chunks.map((c, i) => `[${i + 1}] ${c.content}`).join('\n\n');
 
   const { chatCompletion } = await import('./aiProvider.js');
-  const result = await chatCompletion(prisma, {
-    system:
-      `${systemPrompt}\n\nAnswer only using the context below. If the context doesn't contain the answer, ` +
+  const { buildSystemPrompt, prepareUserMessage } = await import('./aiGuardrails.js');
+
+  const system = guardrails
+    ? buildSystemPrompt({ ...guardrails, context })
+    : `${systemPrompt}\n\nAnswer only using the context below. If the context doesn't contain the answer, ` +
       `say you're not sure and offer to connect them with a human — never invent information.\n\n` +
-      `Context:\n${context}`,
-    user: userMessage,
+      `Context:\n${context}`;
+
+  const result = await chatCompletion(prisma, {
+    system,
+    user: guardrails ? prepareUserMessage(userMessage) : userMessage,
     maxTokens: 400,
     temperature: 0.3,
     timeoutMs: 15000,

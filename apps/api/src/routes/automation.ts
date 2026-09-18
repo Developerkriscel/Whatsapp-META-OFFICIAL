@@ -458,19 +458,23 @@ export async function triggerFlowForConversation(
     return { success: false, error: { code: 'BOT_INACTIVE', message: 'Bot is paused for this conversation' } };
   }
 
-  // Find active flow for this phone number
+  // Find active flow for this phone number. The tenant comes with it because
+  // the AI step needs the business's own name -- a bot that cannot say who it
+  // works for cannot credibly refuse things outside that business either.
   let flow = await app.prisma.botFlow.findFirst({
     where: {
       tenantId,
       isActive: true,
       phoneNumberIds: { has: conversation.phoneNumberId },
     },
+    include: { tenant: { select: { name: true } } },
   });
 
   // Fall back to default flow
   if (!flow) {
     flow = await app.prisma.botFlow.findFirst({
       where: { tenantId, isActive: true, isDefault: true },
+      include: { tenant: { select: { name: true } } },
     });
   }
 
@@ -623,11 +627,30 @@ async function executeFlowStep(
       // The bot must never send nothing — if there's no inbound text, or
       // generation fails/finds nothing relevant, fall back to fallbackMessage.
       let generatedReply: string | null = null;
+
+      const fallbackMessage: string =
+        currentStep.fallbackMessage ||
+        "I'm not sure about that — let me connect you with a member of our team.";
+
+      // The bot answers the public under the business's own number, so the
+      // scope, the refusal and the screening are built here rather than left to
+      // whatever the operator happened to type in the prompt box.
+      const { buildSystemPrompt, prepareUserMessage, screenReply } =
+        await import('../services/aiGuardrails.js');
+
+      const guardrails = {
+        businessName: (flow as any).tenant?.name || 'this business',
+        businessDescription: currentStep.businessDescription,
+        allowedTopics: currentStep.allowedTopics,
+        houseRules: currentStep.systemPrompt,
+        fallbackMessage,
+      };
+
       if (inboundText && currentStep.businessDescription) {
         const { generateSimpleReply } = await import('../services/aiAssist.js');
         generatedReply = await generateSimpleReply({
-          systemPrompt: `${currentStep.systemPrompt || 'You are a helpful, friendly assistant.'}\n\nAbout the business:\n${currentStep.businessDescription}\n\nAnswer naturally and helpfully based on this. If you don't know something specific, offer to connect the customer with a human.`,
-          userMessage: inboundText,
+          systemPrompt: buildSystemPrompt(guardrails),
+          userMessage: prepareUserMessage(inboundText),
         }, app.prisma, flow.tenantId);
       } else if (inboundText && currentStep.knowledgeBaseId) {
         const { generateRagReply } = await import('../services/knowledgeBase.js');
@@ -635,15 +658,21 @@ async function executeFlowStep(
           prisma: app.prisma,
           tenantId: flow.tenantId,
           knowledgeBaseId: currentStep.knowledgeBaseId,
-          systemPrompt: currentStep.systemPrompt || 'You are a helpful business assistant.',
+          systemPrompt: currentStep.systemPrompt || '',
           userMessage: inboundText,
+          guardrails,
         });
         generatedReply = result?.reply || null;
       }
-      const replyText: string =
-        generatedReply ||
-        currentStep.fallbackMessage ||
-        "I'm not sure about that — let me connect you with a member of our team.";
+
+      // Whatever came back is checked before a real customer sees it. A reply
+      // carrying code, reciting its own instructions, or running away in length
+      // is replaced by the business's fallback line, which is always safe.
+      const screened = screenReply(generatedReply, { fallbackMessage });
+      if (generatedReply && !screened.ok) {
+        console.warn(`[Bot] reply rejected for tenant ${flow.tenantId}: ${screened.reason}`);
+      }
+      const replyText: string = screened.ok && screened.text ? screened.text : fallbackMessage;
 
       const message = await app.prisma.message.create({
         data: {

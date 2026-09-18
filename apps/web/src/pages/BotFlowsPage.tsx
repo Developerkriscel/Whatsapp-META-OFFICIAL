@@ -29,6 +29,34 @@ interface BotFlow {
   _count?: { executions: number };
 }
 
+/**
+ * Why a request failed, in enough detail to act on.
+ *
+ * Every mutation here fell back to a fixed string like "Failed to save flow"
+ * whenever the server did not supply error.message — which is exactly the case
+ * where something unusual happened and the reason mattered. A request that
+ * never reached the server, one that timed out, and one rejected with a 403
+ * all produced the same six words, so the only way to tell them apart was the
+ * network tab.
+ */
+function describeError(error: any, fallback: string): string {
+  const fromBody = error?.response?.data?.error?.message;
+  if (fromBody) return fromBody;
+
+  if (error?.response) {
+    const status = error.response.status;
+    const code = error.response.data?.error?.code;
+    if (status === 401) return 'Your session expired. Sign in again.';
+    if (status === 403) return code ? `Not allowed (${code})` : 'You do not have permission for this.';
+    if (status === 413) return 'That flow is too large to save.';
+    return `${fallback} — server returned ${status}${code ? ` (${code})` : ''}`;
+  }
+
+  if (error?.code === 'ECONNABORTED') return `${fallback} — the request timed out.`;
+  if (error?.message === 'Network Error') return `${fallback} — could not reach the server.`;
+  return error?.message ? `${fallback} — ${error.message}` : fallback;
+}
+
 export default function BotFlowsPage() {
   const [showCreate, setShowCreate] = useState(false);
   const [editingFlow, setEditingFlow] = useState<BotFlow | null>(null);
@@ -100,7 +128,7 @@ export default function BotFlowsPage() {
       // Open the builder for the new flow
       if (data?.data) setEditingFlow(data.data);
     },
-    onError: (error: any) => toast.error(error.response?.data?.error?.message || 'Failed to create flow'),
+    onError: (error: any) => toast.error(describeError(error, 'Failed to create flow')),
   });
 
   const deleteMutation = useMutation({
@@ -112,7 +140,7 @@ export default function BotFlowsPage() {
       setSelectedFlow(null);
       toast.success('Flow deleted');
     },
-    onError: (error: any) => toast.error(error.response?.data?.error?.message || 'Failed to delete flow'),
+    onError: (error: any) => toast.error(describeError(error, 'Failed to delete flow')),
   });
 
   const toggleMutation = useMutation({
@@ -128,7 +156,7 @@ export default function BotFlowsPage() {
       setSelectedFlow(prev => prev ? { ...prev, isActive: vars.isActive } : null);
       toast.success(vars.isActive ? 'Flow activated' : 'Flow deactivated');
     },
-    onError: (error: any) => toast.error(error.response?.data?.error?.message || 'Failed to toggle flow'),
+    onError: (error: any) => toast.error(describeError(error, 'Failed to toggle flow')),
   });
 
   const setPhoneNumbersMutation = useMutation({
@@ -139,7 +167,7 @@ export default function BotFlowsPage() {
       setAssigningNumbersFlow(null);
       toast.success('Numbers updated for this flow');
     },
-    onError: (error: any) => toast.error(error.response?.data?.error?.message || 'Failed to update numbers'),
+    onError: (error: any) => toast.error(describeError(error, 'Failed to update numbers')),
   });
 
   const setDefaultMutation = useMutation({
@@ -148,7 +176,7 @@ export default function BotFlowsPage() {
       queryClient.invalidateQueries({ queryKey: ['bot-flows'] });
       toast.success('Set as default flow — it will now trigger for any inbound message with no more specific match');
     },
-    onError: (error: any) => toast.error(error.response?.data?.error?.message || 'Failed to set as default'),
+    onError: (error: any) => toast.error(describeError(error, 'Failed to set as default')),
   });
 
   const saveFlowDataMutation = useMutation({
@@ -161,7 +189,7 @@ export default function BotFlowsPage() {
       setEditingFlow(null);
       toast.success('Flow saved successfully!');
     },
-    onError: (error: any) => toast.error(error.response?.data?.error?.message || 'Failed to save flow'),
+    onError: (error: any) => toast.error(describeError(error, 'Failed to save flow')),
   });
 
   const cloneMutation = useMutation({
@@ -173,7 +201,7 @@ export default function BotFlowsPage() {
       queryClient.invalidateQueries({ queryKey: ['bot-flows'] });
       toast.success('Template cloned to your flows');
     },
-    onError: (error: any) => toast.error(error.response?.data?.error?.message || 'Failed to clone template'),
+    onError: (error: any) => toast.error(describeError(error, 'Failed to clone template')),
   });
 
   // ============================================
