@@ -313,6 +313,16 @@ function TenantDetailModal({ tenantId, onClose }: TenantDetailModalProps) {
     },
   });
 
+  const trialMutation = useMutation({
+    mutationFn: async (body: any) => {
+      await api.patch(`/superadmin/tenants/${tenantId}`, body);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['superadmin-tenants'] });
+      queryClient.invalidateQueries({ queryKey: ['superadmin-tenant-detail', tenantId] });
+    },
+  });
+
   if (isLoading) {
     return createPortal(
       <div className="fixed inset-0 bg-black/60 backdrop-blur-md flex items-center justify-center z-[9999]">
@@ -342,12 +352,11 @@ function TenantDetailModal({ tenantId, onClose }: TenantDetailModalProps) {
             </div>
           </div>
           <div className="flex items-center gap-2">
-            <span className={`px-2 py-0.5 text-xs rounded-apple-full font-medium ${
-              tenant.status === 'ACTIVE' ? 'bg-wa-green/20 text-wa-green' :
-              tenant.status === 'TRIAL' ? 'bg-wa-green/20 text-wa-green' :
-              tenant.status === 'SUSPENDED' ? 'bg-red-500/20 text-red-500' : 'bg-ios-gray text-ios-secondary'
-            }`}>
-              {tenant.status}
+            <span
+              className={`px-2 py-0.5 text-xs rounded-apple-full font-medium capitalize ${tenantAccess(tenant).className}`}
+              title={tenantAccess(tenant).detail || undefined}
+            >
+              {tenantAccess(tenant).label}
             </span>
             {tenant.status === 'ACTIVE' || tenant.status === 'TRIAL' ? (
               <button
@@ -394,6 +403,58 @@ function TenantDetailModal({ tenantId, onClose }: TenantDetailModalProps) {
             </button>
           </div>
         </div>
+
+        {/* A workspace that cannot use the product says so here, on every tab,
+            with the remedy attached. Putting this only on the Billing tab meant
+            someone looking at Overview saw a green badge and no explanation of
+            why the customer was complaining. */}
+        {(() => {
+          const a = tenantAccess(tenant);
+          if (!a.lockedOut || a.state !== 'trial_expired') return null;
+          return (
+            <div className="px-6 py-4 bg-apple-red/5 border-b border-apple-red/20 flex-shrink-0">
+              <div className="flex items-start gap-2.5">
+                <AlertTriangle className="w-4 h-4 text-apple-red shrink-0 mt-0.5" />
+                <div className="min-w-0">
+                  <p className="text-sm font-medium text-ios-dark">
+                    This workspace is locked out — {a.detail?.toLowerCase()}.
+                  </p>
+                  <p className="text-xs text-ios-secondary mt-0.5">
+                    Every request it makes is refused with &ldquo;Your free trial has ended&rdquo;. Signing in
+                    and paying still work; nothing else does.
+                  </p>
+                  <div className="flex flex-wrap items-center gap-2 mt-2.5">
+                    <span className="text-xs text-ios-muted">Extend the trial:</span>
+                    {[7, 14, 30].map((d) => (
+                      <button
+                        key={d}
+                        onClick={() => trialMutation.mutate({ extendTrialDays: d })}
+                        disabled={trialMutation.isPending}
+                        className="px-2.5 py-1 text-xs border border-wa-green/40 text-wa-green rounded-apple-lg hover:bg-wa-green/10 disabled:opacity-50"
+                      >
+                        +{d} days
+                      </button>
+                    ))}
+                    <span className="text-xs text-ios-muted ml-1">or</span>
+                    <button
+                      onClick={() => {
+                        if (confirm(`Mark ${tenant.name} as a paying customer?
+
+Use this only once they are actually on a plan — it removes the trial deadline for good.`)) {
+                          trialMutation.mutate({ status: 'ACTIVE' });
+                        }
+                      }}
+                      disabled={trialMutation.isPending}
+                      className="px-2.5 py-1 text-xs bg-wa-green text-white rounded-apple-lg hover:bg-wa-green/90 disabled:opacity-50"
+                    >
+                      Mark as paying
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          );
+        })()}
 
         {/* Tabs */}
         <div className="flex border-b border-black/5 px-6 flex-shrink-0">
