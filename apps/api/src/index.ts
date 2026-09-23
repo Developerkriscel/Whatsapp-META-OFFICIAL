@@ -70,6 +70,20 @@ async function main() {
       // A failure webhook covers what Meta tells us about; a handset that never
       // comes back online just stops producing statuses, and those holds would
       // otherwise be kept for ever.
+      // Campaign header media has to outlive the send: Meta downloads a linked
+      // file after accepting the message, and retries for up to 24 hours.
+      // Deleting it when the campaign finished is what 404'd every recipient of
+      // one campaign eight seconds after it reported Completed.
+      const { sweepCampaignMedia } = await import('./routes/tenant.js');
+      const MEDIA_SWEEP_MS = 60 * 60 * 1000;
+      const runMediaSweep = () =>
+        sweepCampaignMedia(app).catch((e) =>
+          console.error('[Campaign] media sweep failed:', e?.message),
+        );
+      runMediaSweep();
+      const mediaTimer = setInterval(runMediaSweep, MEDIA_SWEEP_MS);
+      mediaTimer.unref();
+
       const { sweepExpiredHolds } = await import('./services/settlement.js');
       const SWEEP_MS = 30 * 60 * 1000;
       const runSweep = () =>

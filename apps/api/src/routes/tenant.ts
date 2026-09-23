@@ -8,6 +8,7 @@ import { decryptSecret } from '../services/credentialEncryption.js';
 import { detectCountryFromPhone } from '../services/phoneCountry.js';
 import { checkTemplateContent, getAISuggestion } from '../services/aiAssist.js';
 import { broadcastToTenant } from './sse.js';
+import { mediaHeaderFromId } from '../services/metaMedia.js';
 
 type SegmentCondition = { field: string; operator: string; value?: string };
 
@@ -4912,6 +4913,43 @@ function mediaHeaderParameter(mediaUrl: string): any {
  * Meta fetches the file during the send, so this must run only after the
  * campaign reaches a terminal state — never mid-send.
  */
+/**
+ * Deletes campaign media once Meta can no longer need it.
+ *
+ * "No longer need it" is not "the campaign finished". Meta downloads a linked
+ * file after accepting the message, and retries undelivered messages for up to
+ * 24 hours, so the file has to outlive both. This runs on a timer and only
+ * removes media whose campaign finished more than the grace period ago and has
+ * no messages still awaiting a delivery verdict.
+ */
+export async function sweepCampaignMedia(app: FastifyInstance): Promise<number> {
+  const GRACE_HOURS = 25; // WhatsApp's 24h message TTL, plus an hour's slack.
+  const cutoff = new Date(Date.now() - GRACE_HOURS * 3600 * 1000);
+
+  const stale = await app.prisma.campaign.findMany({
+    where: {
+      mediaPath: { not: null },
+      completedAt: { not: null, lt: cutoff },
+    },
+    select: { id: true },
+    take: 200,
+  });
+
+  let removed = 0;
+  for (const c of stale) {
+    // A message still PENDING or SENT has not reached a verdict, which means
+    // Meta may yet fetch the media for a retry.
+    const inFlight = await app.prisma.message.count({
+      where: { campaignId: c.id, status: { in: ['PENDING', 'SENT'] } },
+    });
+    if (inFlight > 0) continue;
+    await cleanUpCampaignMedia(app, c.id);
+    removed++;
+  }
+  if (removed > 0) console.log(`[Campaign] swept media for ${removed} campaign(s)`);
+  return removed;
+}
+
 async function cleanUpCampaignMedia(app: FastifyInstance, campaignId: string): Promise<void> {
   try {
     const campaign = await app.prisma.campaign.findUnique({
@@ -4953,11 +4991,12 @@ export async function sendCampaignMessages(
       where: { id: campaignId },
       data: { status: 'FAILED', completedAt: new Date() },
     }).catch(() => {});
-  } finally {
-    // Runs for both the success and failure paths — a campaign that died
-    // partway through still leaves an uploaded file that nothing will use.
-    await cleanUpCampaignMedia(app, campaignId);
   }
+  // No cleanup here. "Sent" means Meta accepted the message, not that it has
+  // fetched the image -- it downloads a `link` seconds later, and deleting the
+  // file in between is what failed all 25 recipients of 23-sep with 131053,
+  // eight seconds after the campaign reported Completed. sweepCampaignMedia()
+  // removes it once Meta can no longer want it.
 }
 
 async function sendCampaignMessagesInner(
@@ -5115,6 +5154,32 @@ async function sendCampaignMessagesInner(
   });
   const tenantDefaultCountry = campaignTenant?.defaultCountry || 'IN';
 
+  // Upload the header media to Meta once, before the loop, and send every
+  // recipient the resulting id. Sending a link instead makes Meta download the
+  // same file once per recipient *after* accepting each message, which is both
+  // wasteful and fragile -- that asynchronous fetch is what 404'd on campaign
+  // 23-sep. Falls back to the link when the upload cannot be done, so a
+  // campaign never fails to go out over this.
+  let uploadedMedia: { id: string; kind: 'image' | 'video' | 'document' } | null = null;
+  if (campaign.mediaPath && campaign.template?.header && campaign.phoneNumber?.metaPhoneId) {
+    const { uploadToMeta } = await import('../services/metaMedia.js');
+    const { resolveAccessToken } = await import('../services/credentialEncryption.js');
+    const creds = await app.prisma.whatsAppCredentials.findUnique({ where: { tenantId } });
+    const token = resolveAccessToken(campaign.phoneNumber.accessToken, creds?.accessToken);
+    if (token) {
+      uploadedMedia = await uploadToMeta({
+        filePath: campaign.mediaPath,
+        metaPhoneId: campaign.phoneNumber.metaPhoneId,
+        accessToken: token,
+      });
+      console.log(
+        uploadedMedia
+          ? `[Campaign] ${campaignId} media uploaded to Meta as ${uploadedMedia.id}`
+          : `[Campaign] ${campaignId} media upload failed — falling back to link`,
+      );
+    }
+  }
+
   for (let i = 0; i < contactIds.length; i += BATCH_SIZE) {
     const batch = contactIds.slice(i, i + BATCH_SIZE);
     const contacts = await app.prisma.contact.findMany({
@@ -5214,7 +5279,13 @@ async function sendCampaignMessagesInner(
         if (campaign.mediaUrl && campaign.template.header) {
           components.push({
             type: 'header',
-            parameters: [mediaHeaderParameter(campaign.mediaUrl)],
+            // Prefer the id Meta already holds. A link makes Meta fetch our
+            // server once per recipient, after accepting the message, and any
+            // failure in that window is reported as a delivery failure the
+            // sender cannot see the cause of.
+            parameters: [uploadedMedia
+              ? mediaHeaderFromId(uploadedMedia)
+              : mediaHeaderParameter(campaign.mediaUrl)],
           });
         }
 
