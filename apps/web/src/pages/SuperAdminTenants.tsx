@@ -2,13 +2,13 @@ import { useState, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../api/client';
+import { tenantAccess } from '../lib/tenantAccess';
 import { useCurrency, formatMoney, creditsToMoney, formatCredits } from '../lib/money';
 import {
   Building2, Search, Plus, X, Ban, CheckCircle, Users, CreditCard,
   Settings, ChevronDown, Shield, Coins, Copy, Check, Phone,
   FileText, Send, MessageSquare, UserCheck, ArrowUp, ArrowDown,
-  TrendingDown, Zap, Eye, EyeOff, Minus
-} from 'lucide-react';
+  TrendingDown, Zap, Eye, EyeOff, Minus, AlertTriangle } from 'lucide-react';
 
 interface TenantUser {
   id: string;
@@ -42,6 +42,7 @@ export default function SuperAdminTenantsPage() {
   const [search, setSearch] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
   const [status, setStatus] = useState('');
+  const [onlyLocked, setOnlyLocked] = useState(false);
   const [selectedTenantId, setSelectedTenantId] = useState<string | null>(null);
   const [showAddModal, setShowAddModal] = useState(false);
   const queryClient = useQueryClient();
@@ -62,7 +63,10 @@ export default function SuperAdminTenantsPage() {
     },
   });
 
-  const tenants = tenantsData?.data || [];
+  const allTenants = tenantsData?.data || [];
+  const tenants = onlyLocked
+    ? allTenants.filter((t: any) => tenantAccess(t).lockedOut)
+    : allTenants;
   const meta = tenantsData?.meta || { total: 0 };
   const total = meta.total || 0;
 
@@ -96,6 +100,31 @@ export default function SuperAdminTenantsPage() {
 
       <div className="card-apple">
         {/* Filters */}
+        {(() => {
+          const locked = allTenants.filter((t: any) => tenantAccess(t).lockedOut);
+          if (locked.length === 0) return null;
+          return (
+            <div className="px-4 py-3 bg-apple-red/5 border-b border-apple-red/20 flex items-start gap-2.5">
+              <AlertTriangle className="w-4 h-4 text-apple-red shrink-0 mt-0.5" />
+              <div className="text-sm">
+                <p className="font-medium text-ios-dark">
+                  {locked.length} workspace{locked.length === 1 ? '' : 's'} cannot use the product right now.
+                </p>
+                <p className="text-ios-secondary mt-0.5">
+                  Every request they make is refused. Open one and extend its trial or move it to a plan.
+                  {' '}
+                  <button
+                    onClick={() => setOnlyLocked((v) => !v)}
+                    className="underline font-medium"
+                  >
+                    {onlyLocked ? 'Show all' : 'Show only these'}
+                  </button>
+                </p>
+              </div>
+            </div>
+          );
+        })()}
+
         <div className="p-4 border-b border-black/5 flex items-center gap-4">
           <div className="relative flex-1 max-w-sm">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-ios-muted" />
@@ -157,14 +186,24 @@ export default function SuperAdminTenantsPage() {
                     <span className="text-sm text-ios-secondary">{t.plan?.name || t.planName || '—'}</span>
                   </td>
                   <td className="px-4 py-3">
-                    <span className={`px-2 py-0.5 text-xs rounded-apple-full font-medium ${
-                      t.status === 'ACTIVE' ? 'bg-wa-green/20 text-wa-green' :
-                      t.status === 'TRIAL' ? 'bg-wa-green/20 text-wa-green' :
-                      t.status === 'SUSPENDED' ? 'bg-red-500/20 text-red-500' :
-                      'bg-ios-gray text-ios-secondary'
-                    }`}>
-                      {t.status}
-                    </span>
+                    {(() => {
+                      // The status column alone cannot answer "can this
+                      // workspace use the product", which is the only thing
+                      // anyone reads this column for.
+                      const a = tenantAccess(t);
+                      return (
+                        <div>
+                          <span className={`px-2 py-0.5 text-xs rounded-apple-full font-medium capitalize ${a.className}`}>
+                            {a.label}
+                          </span>
+                          {a.detail && (
+                            <p className={`text-xs mt-0.5 ${a.lockedOut ? 'text-apple-red' : 'text-ios-muted'}`}>
+                              {a.detail}
+                            </p>
+                          )}
+                        </div>
+                      );
+                    })()}
                   </td>
                   <td className="px-4 py-3 text-sm text-ios-secondary">
                     {(t.currentContacts || 0).toLocaleString()}
@@ -1203,6 +1242,18 @@ function BillingTab({ tenantId, tenant }: { tenantId: string; tenant: any }) {
     },
   });
 
+  // Extending a trial was impossible from here: the only lever was flipping
+  // status to ACTIVE, which records a paying customer where there is none.
+  const trialMutation = useMutation({
+    mutationFn: async (body: any) => {
+      await api.patch(`/superadmin/tenants/${tenantId}`, body);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['superadmin-tenant-detail', tenantId] });
+      queryClient.invalidateQueries({ queryKey: ['superadmin-tenants'] });
+    },
+  });
+
   const changePlanMutation = useMutation({
     mutationFn: async (planId: string) => {
       await api.patch(`/superadmin/tenants/${tenantId}`, { planId });
@@ -1238,15 +1289,61 @@ function BillingTab({ tenantId, tenant }: { tenantId: string; tenant: any }) {
             {tenant.plan?.monthlyPrice ? `${formatMoney(Number(tenant.plan.monthlyPrice), fx, { decimals: 0 })}/month` : '—'}
           </p>
         </div>
-        <div className="bg-gradient-to-br from-apple-purple/10 to-apple-purple/20 border border-apple-purple/20 rounded-apple-xl p-6">
-          <p className="text-xs font-medium text-apple-purple uppercase tracking-wider mb-2">Subscription Status</p>
-          <p className="text-2xl font-bold text-ios-dark">{tenant.status}</p>
-          {tenant.trialEndsAt && (
-            <p className="text-sm text-ios-secondary mt-1">
-              Trial ends: {new Date(tenant.trialEndsAt).toLocaleDateString()}
-            </p>
-          )}
-        </div>
+        {(() => {
+          const a = tenantAccess(tenant);
+          return (
+            <div className={`border rounded-apple-xl p-6 ${
+              a.lockedOut
+                ? 'bg-apple-red/5 border-apple-red/30'
+                : 'bg-gradient-to-br from-apple-purple/10 to-apple-purple/20 border-apple-purple/20'
+            }`}>
+              <p className={`text-xs font-medium uppercase tracking-wider mb-2 ${
+                a.lockedOut ? 'text-apple-red' : 'text-apple-purple'
+              }`}>
+                Access
+              </p>
+              <p className="text-2xl font-bold text-ios-dark capitalize">{a.label}</p>
+              {a.detail && <p className="text-sm text-ios-secondary mt-1">{a.detail}</p>}
+              {tenant.trialEndsAt && (
+                <p className="text-xs text-ios-muted mt-1">
+                  Trial end date: {new Date(tenant.trialEndsAt).toLocaleDateString()}
+                </p>
+              )}
+
+              {a.lockedOut && a.state === 'trial_expired' && (
+                <div className="mt-4">
+                  <p className="text-sm text-apple-red">
+                    Every request from this workspace is being refused. Sign-in and billing still work,
+                    so they can pay — nothing else does.
+                  </p>
+                  <div className="flex flex-wrap items-center gap-2 mt-3">
+                    {[7, 14, 30].map((d) => (
+                      <button
+                        key={d}
+                        onClick={() => trialMutation.mutate({ extendTrialDays: d })}
+                        disabled={trialMutation.isPending}
+                        className="btn-apple btn-apple-outline text-xs py-1.5 disabled:opacity-50"
+                      >
+                        +{d} days
+                      </button>
+                    ))}
+                    <button
+                      onClick={() => {
+                        if (confirm('Mark this workspace as a paying customer? Use this only once they are actually on a plan — it removes the trial deadline entirely.')) {
+                          trialMutation.mutate({ status: 'ACTIVE' });
+                        }
+                      }}
+                      disabled={trialMutation.isPending}
+                      className="btn-apple btn-wa-green text-xs py-1.5 disabled:opacity-50"
+                    >
+                      Mark as paying
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })()}
       </div>
 
       {/* Usage Stats */}

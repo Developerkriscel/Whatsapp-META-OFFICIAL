@@ -792,11 +792,33 @@ export async function registerSuperadminRoutes(app: FastifyInstance): Promise<vo
       name: z.string().optional(),
       planId: z.string().optional(),
       status: z.enum(['TRIAL', 'ACTIVE', 'SUSPENDED', 'CHURNED', 'PENDING_SETUP']).optional(),
+      // The trial deadline decides whether a workspace can use the product at
+      // all -- past it, every tenant request is refused with 402 -- and there
+      // was no way to move it from the panel. The only available remedy was
+      // flipping status to ACTIVE, which says "this is a paying customer" about
+      // someone who is not, and loses the distinction for good.
+      trialEndsAt: z.string().datetime().nullable().optional(),
+      /** Convenience: push the deadline on from today. */
+      extendTrialDays: z.number().int().min(1).max(365).optional(),
     }).parse(request.body);
+
+    const { extendTrialDays, trialEndsAt, ...rest } = body;
+    const data: any = { ...rest };
+
+    if (trialEndsAt !== undefined) data.trialEndsAt = trialEndsAt ? new Date(trialEndsAt) : null;
+
+    if (extendTrialDays) {
+      // Extended from today, not from the old deadline: a trial that lapsed
+      // three weeks ago and is given "7 more days" should be usable for seven
+      // days, not expire again two weeks before the extension was granted.
+      const until = new Date();
+      until.setDate(until.getDate() + extendTrialDays);
+      data.trialEndsAt = until;
+    }
 
     const tenant = await app.prisma.tenant.update({
       where: { id: tenantId },
-      data: body,
+      data,
       include: { plan: true },
     });
 
@@ -807,7 +829,7 @@ export async function registerSuperadminRoutes(app: FastifyInstance): Promise<vo
       action: 'UPDATE',
       resource: 'tenants',
       resourceId: tenant.id,
-      metadata: body,
+      metadata: data,
       ipAddress: request.ip,
       userAgent: request.headers['user-agent'],
     });
