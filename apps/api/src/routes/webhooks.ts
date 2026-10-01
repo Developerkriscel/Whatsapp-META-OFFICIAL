@@ -29,14 +29,41 @@ export async function registerWebhookRoutes(app: FastifyInstance): Promise<void>
 
   // POST /webhook - Incoming events
   app.post('/webhook', async (request, reply) => {
-    // Verify X-Hub-Signature-256 to ensure request is from Meta
+    // Verify X-Hub-Signature-256 to ensure the request is really from Meta.
+    //
+    // The signature is an HMAC over the exact bytes Meta sent. This used to
+    // hash JSON.stringify(request.body) -- the parsed object serialised again,
+    // which is a different byte string: Meta escapes non-ASCII as \uXXXX and
+    // picks its own whitespace, and neither survives a parse/stringify round
+    // trip. So the comparison could essentially never succeed. Every status
+    // callback had been answered with 403 since META_APP_SECRET was set, Meta
+    // gave up retrying, and the product stopped learning that anything was
+    // delivered, read or failed -- campaigns sat at 0% delivered for ever, and
+    // nothing settled or refunded, because that all hangs off these callbacks.
     const appSecret = process.env.META_APP_SECRET;
     if (appSecret) {
       const signature = (request.headers['x-hub-signature-256'] as string) || '';
-      const rawBody = JSON.stringify(request.body);
-      const { createHmac } = await import('crypto');
-      const expected = 'sha256=' + createHmac('sha256', appSecret).update(rawBody).digest('hex');
-      if (signature !== expected) {
+      const raw = (request as any).rawBody;
+
+      if (!raw) {
+        // Fail closed, but say why: a silent 403 is indistinguishable from a
+        // forged request, and that ambiguity is what hid this for weeks.
+        console.error(
+          '[Webhook] rawBody missing -- cannot verify Meta signature. ' +
+          "Is '/webhook' still in the fastify-raw-body routes list in app.ts?",
+        );
+        return reply.code(403).send('Forbidden');
+      }
+
+      const { createHmac, timingSafeEqual } = await import('crypto');
+      const expected = 'sha256=' + createHmac('sha256', appSecret).update(raw).digest('hex');
+
+      const a = Buffer.from(signature);
+      const b = Buffer.from(expected);
+      if (a.length !== b.length || !timingSafeEqual(a, b)) {
+        console.error(
+          `[Webhook] signature mismatch -- rejecting. header=${signature ? 'present' : 'ABSENT'}`,
+        );
         return reply.code(403).send('Forbidden');
       }
     }

@@ -97,11 +97,14 @@ export async function buildApp(): Promise<FastifyInstance> {
   // Register security middleware (XSS, SQL injection, headers)
   await app.register(securityMiddleware);
 
-  // Register raw-body plugin for Stripe webhook signature verification
+  // Raw body for every endpoint that verifies a provider's signature.
   await app.register(rawBody, {
     field: 'rawBody',
     global: false,
-    routes: ['/api/v1/stripe/webhook', '/webhooks/razorpay'],
+    // '/webhook' is Meta's callback. Its signature is an HMAC over the exact
+    // bytes Meta sent, so the handler needs those bytes -- re-serialising the
+    // parsed body produces different ones and the comparison always fails.
+    routes: ['/api/v1/stripe/webhook', '/webhooks/razorpay', '/webhook'],
   });
 
   /**
