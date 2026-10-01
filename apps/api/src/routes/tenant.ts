@@ -4974,6 +4974,50 @@ async function cleanUpCampaignMedia(app: FastifyInstance, campaignId: string): P
   }
 }
 
+/**
+ * Recomputes a campaign's counters from its message rows.
+ *
+ * The counters used to be maintained by two writers that did not know about
+ * each other: the send loop wrote absolute totals for sent and failed, and the
+ * status webhook incremented delivered/read/failed by one. A message that was
+ * handed to Meta and later failed was therefore counted in both, which is how
+ * campaign 01-10-2026 came to claim 250 sent and 6 failed out of 250
+ * recipients while its rows actually read 232 sent and 18 failed.
+ *
+ * Nothing needs to be counted twice, because the message rows already record
+ * every transition. These columns are a cache of that, so they are derived
+ * from it rather than accumulated alongside it.
+ *
+ * The categories are cumulative, which is what the words mean to someone
+ * reading a campaign card: a message that was read was also delivered, and one
+ * that was delivered was also sent. That also keeps sent + failed equal to the
+ * number of recipients actually attempted, which the old arithmetic did not.
+ */
+export async function recountCampaign(
+  app: FastifyInstance,
+  campaignId: string,
+): Promise<{ sent: number; delivered: number; read: number; failed: number }> {
+  const rows = await app.prisma.message.groupBy({
+    by: ['status'],
+    where: { campaignId },
+    _count: { _all: true },
+  });
+
+  const n = (st: string) => rows.find((r) => r.status === st)?._count._all ?? 0;
+
+  const read = n('READ');
+  const delivered = n('DELIVERED') + read;
+  const sent = n('SENT') + delivered;
+  const failed = n('FAILED');
+
+  await app.prisma.campaign.update({
+    where: { id: campaignId },
+    data: { totalSent: sent, totalDelivered: delivered, totalRead: read, totalFailed: failed },
+  }).catch(() => {});
+
+  return { sent, delivered, read, failed };
+}
+
 export async function sendCampaignMessages(
   app: FastifyInstance,
   campaignId: string,
@@ -5427,8 +5471,9 @@ async function sendCampaignMessagesInner(
     // the resume-safety check above has real data to dedupe against.
     await app.prisma.campaign.update({
       where: { id: campaignId },
-      data: { totalSent: sent, totalFailed: failed, lastSentAt: new Date() },
+      data: { lastSentAt: new Date() },
     });
+    await recountCampaign(app, campaignId);
 
     // Stop as soon as the balance runs out. Continuing would attempt every
     // remaining recipient and fail each one the same way.

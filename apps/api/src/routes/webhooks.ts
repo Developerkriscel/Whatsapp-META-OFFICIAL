@@ -503,22 +503,17 @@ async function processStatusUpdate(
     }
   }
 
-  // Campaign cards showed 0% delivered/read forever — the per-message
-  // status was updated above, but nothing ever rolled that back up into
-  // the campaign's own totalDelivered/totalRead/totalFailed counters that
-  // the Campaigns page actually reads for its stats.
+  // Roll the new status up into the campaign card. This used to increment one
+  // counter by one, which quietly double-counted: a message already tallied as
+  // sent by the send loop stayed in that total after failing here, so sent plus
+  // failed could exceed the number of recipients. The row we just wrote is the
+  // record of what happened, so the counters are recomputed from the rows
+  // rather than nudged alongside them.
   if (existing.campaignId && isNewTransition) {
-    const campaignField =
-      ourStatus === 'DELIVERED' ? 'totalDelivered' :
-      ourStatus === 'READ' ? 'totalRead' :
-      ourStatus === 'FAILED' ? 'totalFailed' :
-      null;
-    if (campaignField) {
-      await app.prisma.campaign.update({
-        where: { id: existing.campaignId },
-        data: { [campaignField]: { increment: 1 } },
-      }).catch(() => {});
-    }
+    const { recountCampaign } = await import('./tenant.js');
+    await recountCampaign(app, existing.campaignId).catch((err: any) =>
+      console.error(`[Webhook] recount failed for campaign ${existing.campaignId}:`, err?.message),
+    );
   }
 
   // Broadcast status update to connected clients
