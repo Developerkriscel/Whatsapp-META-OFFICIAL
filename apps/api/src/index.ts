@@ -74,6 +74,12 @@ async function main() {
       // file after accepting the message, and retries for up to 24 hours.
       // Deleting it when the campaign finished is what 404'd every recipient of
       // one campaign eight seconds after it reported Completed.
+      // Scheduled campaigns had no runner at all -- setting a date moved one to
+      // SCHEDULED and nothing ever looked at it again.
+      const { startCampaignScheduler } = await import('./services/campaignScheduler.js');
+      startCampaignScheduler(app);
+      console.log('[Scheduler] campaign scheduler started');
+
       const { sweepCampaignMedia } = await import('./routes/tenant.js');
       const MEDIA_SWEEP_MS = 60 * 60 * 1000;
       const runMediaSweep = () =>

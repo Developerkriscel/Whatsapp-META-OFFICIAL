@@ -80,6 +80,18 @@ export function detectCountryFromPhone(phone: string | null | undefined, fallbac
   // Too short to carry a country code and a subscriber number.
   if (digits.length < 8) return fallback;
 
+  // A number has to be long enough to hold a country code *and* a national
+  // number before its leading digits can be read as a dial code. Ten digits is
+  // a bare national number in most of the world, India included, and matching
+  // prefixes against one reads the subscriber's own digits as a country:
+  // 7428967686 became Russia and was billed at Rs 9.23 instead of Rs 1.14,
+  // 9711100816 became the UAE, 9211441626 became Pakistan. All three are
+  // ordinary Delhi mobiles. The shortest real E.164 numbers run to about 11
+  // digits with their country code, so anything at or below 10 is treated as
+  // local and takes the caller's fallback -- which is the tenant's own market,
+  // and is where a bare local number almost always comes from.
+  if (digits.length <= 10) return fallback;
+
   for (const [code, iso] of SORTED) {
     if (digits.startsWith(code)) return iso;
   }
