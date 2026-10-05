@@ -129,7 +129,15 @@ export async function registerAutomationRoutes(app: FastifyInstance): Promise<vo
         businessHoursMode: body.businessHoursMode ?? true,
         offHoursMessage: body.offHoursMessage,
         enableHumanHandoff: body.enableHumanHandoff ?? true,
-        handoffKeywords: body.handoffKeywords || ['human', 'agent', 'person', 'help'],
+        // Phrases that mean "stop answering and fetch someone", not words a
+        // customer uses while asking the bot a perfectly ordinary question.
+        // 'help' and 'person' were in this list, and handing off switches the
+        // bot off for that conversation for good -- so "I need help choosing a
+        // colour" silenced it, which is the single most likely thing anyone
+        // says to a shop's chatbot.
+        handoffKeywords: body.handoffKeywords || [
+          'human', 'agent', 'representative', 'talk to someone', 'speak to someone', 'customer care',
+        ],
         phoneNumberIds: body.phoneNumberIds || [],
         flowData: body.flowData || { steps: [], variables: [] },
       },
@@ -482,12 +490,29 @@ export async function triggerFlowForConversation(
     return { success: false, error: { code: 'NO_ACTIVE_FLOW', message: 'No active bot flow found' } };
   }
 
-  // Check for human handoff keywords
+  // Check for human handoff keywords.
+  //
+  // Matched as whole words. This was a substring test, which meant a keyword
+  // of "help" fired on "helpful", "helpline" and "I need help choosing a
+  // colour", and "person" fired on "personal". Handing off switches the bot
+  // off for that conversation permanently, so an ordinary question -- or a
+  // compliment, in the case of "that was helpful" -- silenced it for good, and
+  // from the outside that looks like the chatbot simply stopping after a few
+  // replies.
   if (flow.enableHumanHandoff && opts.keyword) {
-    const keyword = opts.keyword.toLowerCase();
-    const hasHandoffKeyword = (flow.handoffKeywords as string[]).some((kw) =>
-      keyword.includes(kw.toLowerCase())
-    );
+    const text = opts.keyword.toLowerCase();
+    const hasHandoffKeyword = (flow.handoffKeywords as string[]).some((kw) => {
+      const needle = String(kw || '').trim().toLowerCase();
+      if (!needle) return false;
+      // Escaped so a keyword containing regex punctuation matches literally.
+      const escaped = needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      // A word boundary only works next to a word character, so apply it at
+      // each end only where the keyword actually has one. Without this a
+      // keyword like "call us!" would never match anything.
+      const left = /^\w/.test(needle) ? '\\b' : '';
+      const right = /\w$/.test(needle) ? '\\b' : '';
+      return new RegExp(`${left}${escaped}${right}`, 'i').test(text);
+    });
 
     if (hasHandoffKeyword) {
       await app.prisma.conversation.update({
