@@ -3,7 +3,7 @@
  * List, create, edit, delete contacts + CSV import with column mapping + export.
  */
 
-import { useState, useRef, useCallback } from 'react';
+import { useState, useRef, useCallback, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../api/client';
 import {
@@ -125,16 +125,33 @@ export default function ContactsPage() {
   const [importError, setImportError] = useState<string | null>(null);
   const [importResults, setImportResults] = useState<{ created: number; skipped: number; errors: string[] } | null>(null);
   const [dragOver, setDragOver] = useState(false);
+  // The list asked for no page at all, so it always received the API's default
+  // first 20 and had no way to reach the rest. A tenant with 371 contacts could
+  // see 20 of them, and could only delete from those 20.
+  const [page, setPage] = useState(1);
+  const PAGE_SIZE = 50;
 
   // ── Queries ──────────────────────────────────────────
 
   const { data, isLoading } = useQuery({
-    queryKey: ['contacts', search],
+    queryKey: ['contacts', search, page],
     queryFn: async () => {
-      const response = await api.get('/contacts', { params: { search } });
+      const response = await api.get('/contacts', {
+        params: { search, page, limit: PAGE_SIZE },
+      });
       return response.data;
     },
+    // Keeps the current rows on screen while the next page loads, instead of
+    // flashing the empty state between pages.
+    placeholderData: (prev: any) => prev,
   });
+
+  // A search narrows the result set, so page 5 of the old results is usually
+  // past the end of the new ones.
+  useEffect(() => { setPage(1); }, [search]);
+
+  const totalContacts: number = data?.meta?.total ?? 0;
+  const totalPages: number = Math.max(1, Math.ceil(totalContacts / PAGE_SIZE));
 
   // ── Mutations ─────────────────────────────────────────
 
@@ -403,7 +420,15 @@ export default function ContactsPage() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold text-ios-dark">Contacts</h1>
-          <p className="text-ios-secondary mt-1">{contacts.length} total contacts</p>
+          <p className="text-ios-secondary mt-1">
+            {totalContacts.toLocaleString('en-IN')} total contact{totalContacts === 1 ? '' : 's'}
+            {totalPages > 1 && (
+              <span className="text-ios-muted">
+                {' '}· showing {((page - 1) * PAGE_SIZE + 1).toLocaleString('en-IN')}–
+                {Math.min(page * PAGE_SIZE, totalContacts).toLocaleString('en-IN')}
+              </span>
+            )}
+          </p>
         </div>
         <div className="flex items-center gap-2">
           <button onClick={handleExport} className="btn-apple btn-apple-outline flex items-center gap-2 text-sm">
@@ -547,6 +572,32 @@ export default function ContactsPage() {
             )}
           </div>
         )}
+
+      {/* Pager. Only shown when there is more than one page, so a small
+          contact list stays uncluttered. */}
+      {totalPages > 1 && (
+        <div className="flex items-center justify-between gap-4 px-1">
+          <p className="text-sm text-ios-muted">
+            Page {page} of {totalPages}
+          </p>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setPage((n) => Math.max(1, n - 1))}
+              disabled={page <= 1}
+              className="btn-apple btn-apple-outline text-sm disabled:opacity-40"
+            >
+              Previous
+            </button>
+            <button
+              onClick={() => setPage((n) => Math.min(totalPages, n + 1))}
+              disabled={page >= totalPages}
+              className="btn-apple btn-apple-outline text-sm disabled:opacity-40"
+            >
+              Next
+            </button>
+          </div>
+        </div>
+      )}
       </div>
 
       {/* ── ADD CONTACT MODAL ─────────────────────────── */}
