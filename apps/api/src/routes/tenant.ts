@@ -934,6 +934,36 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
       },
     });
 
+    // A deleted contact is not a duplicate the person can do anything about.
+    // Deleting is a soft delete -- the row stays with isActive false -- and the
+    // contact list filters on isActive, so the blocking record is invisible.
+    // Someone who deleted a contact and then tried to add it again was told it
+    // already exists while looking at a list that plainly did not contain it,
+    // with no way to reach it and nothing to undo.
+    //
+    // Adding a contact that only a deleted row stands in the way of simply
+    // restores that row, with whatever details were just supplied. The history
+    // attached to it -- conversations, messages, campaign results -- comes back
+    // with it, which is better than the alternative of a second row carrying
+    // the same number.
+    if (existingContact && !existingContact.isActive) {
+      const restored = await app.prisma.contact.update({
+        where: { id: existingContact.id },
+        data: {
+          isActive: true,
+          name: rest.name ?? existingContact.name,
+          email: email ?? existingContact.email,
+          company: rest.company ?? existingContact.company,
+          country: rest.country ?? existingContact.country,
+        },
+      });
+      return reply.status(200).send({
+        success: true,
+        data: restored,
+        meta: { restored: true, message: 'This contact had been deleted and has been restored.' },
+      });
+    }
+
     if (existingContact) {
       return reply.status(409).send({
         success: false,
@@ -1087,7 +1117,10 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
     const phones = contacts.map((c) => c.phone);
     const existing = await app.prisma.contact.findMany({
       where: { tenantId, phone: { in: phones } },
-      select: { id: true, phone: true, name: true, email: true, company: true },
+      // isActive matters here: a soft-deleted row still matches by phone, but
+      // it is invisible in the contact list, so treating it as an existing
+      // contact means an import silently does nothing a user can see.
+      select: { id: true, phone: true, name: true, email: true, company: true, isActive: true },
     });
     const existingByPhone = new Map(existing.map((e) => [e.phone, e]));
 
@@ -1100,6 +1133,30 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
       const prior = existingByPhone.get(contact.phone);
 
       if (prior) {
+        // A previously deleted contact is restored in either mode. SKIP means
+        // "leave contacts I already have alone", and a row the list does not
+        // show is not one the person has -- skipping it would make the import
+        // report success while the number stayed missing. Counted as created,
+        // because that is what it is from the outside: a contact that was not
+        // there and now is.
+        if (!prior.isActive) {
+          try {
+            await app.prisma.contact.update({
+              where: { id: prior.id },
+              data: {
+                isActive: true,
+                name: contact.name || prior.name,
+                email: contact.email || prior.email,
+                company: contact.company || prior.company,
+              },
+            });
+            results.created++;
+          } catch (err) {
+            results.errors.push(`Could not restore ${contact.phone}: ${(err as Error).message}`);
+          }
+          continue;
+        }
+
         if (duplicateHandling === 'SKIP') {
           results.skipped++;
           continue;

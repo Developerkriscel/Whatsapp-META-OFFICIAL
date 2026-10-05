@@ -160,12 +160,15 @@ export default function ContactsPage() {
       const response = await api.post('/contacts', contact);
       return response.data;
     },
-    onSuccess: () => {
+    onSuccess: (res: any) => {
       queryClient.invalidateQueries({ queryKey: ['contacts'] });
       setShowAdd(false);
       setForm({ name: '', phone: '', email: '', company: '', tags: '' });
       setCreateError(null);
-      toast.success('Contact added');
+      // Adding a number that only a deleted record stood in the way of brings
+      // that record back, along with its conversations and history. Say so,
+      // rather than reporting it as a new contact.
+      toast.success(res?.meta?.restored ? 'Contact restored, with its history' : 'Contact added');
     },
     onError: (err: any) => {
       setCreateError(
