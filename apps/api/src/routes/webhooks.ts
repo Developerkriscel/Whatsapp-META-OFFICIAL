@@ -239,10 +239,16 @@ async function processIncomingMessage(
     return;
   }
 
-  // Get or create contact
-  let contact = await app.prisma.contact.findFirst({
-    where: { tenantId, phone: from },
-  });
+  // Get or create contact.
+  //
+  // Matched on digits rather than on the exact string. Meta sends bare
+  // international digits while contacts are stored in whatever shape they
+  // arrived in, so an exact match routinely missed someone already in the list
+  // and created a duplicate -- and a duplicate contact means a duplicate
+  // conversation, which is why replies from one number kept landing in a
+  // different thread from their own history.
+  const { findContactByPhone } = await import('../services/contactLookup.js');
+  let contact: any = await findContactByPhone(app.prisma, tenantId, from);
 
   if (!contact) {
     // Contact initiated conversation - they are opted in by default
