@@ -7,7 +7,7 @@
  */
 import { z } from 'zod';
 import { requireSuperadmin, createAuditLog } from '../middleware/auth.js';
-import { META_RATES } from '../services/creditService.js';
+import { META_RATES, creditsToUsd } from '../services/creditService.js';
 let systemAnnouncements = [
     {
         id: 'ann-1',
@@ -87,9 +87,9 @@ export async function registerSuperadminAdvancedRoutes(app) {
             return {
                 countryCode: code,
                 currency: rate.currency,
-                metaCostUsd: (rate.marketing / 10000).toFixed(4),
+                metaCostUsd: creditsToUsd(rate.marketing).toFixed(4),
                 chargedMarketingCredits: Math.ceil(rate.marketing * markupMultiplier),
-                chargedMarketingUsd: ((rate.marketing * markupMultiplier) / 10000).toFixed(4),
+                chargedMarketingUsd: creditsToUsd(rate.marketing * markupMultiplier).toFixed(4),
             };
         });
         return {

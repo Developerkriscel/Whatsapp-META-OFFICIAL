@@ -1,9 +1,13 @@
 /**
  * AI Assist — rule-based Meta template compliance checking (always on, no
- * network) plus optional Mistral-powered rewrite/suggestion calls (only when
- * MISTRAL_API_KEY is configured). The rule engine is the real prevention
- * mechanism; the AI call is an enhancement layered on top of it.
+ * network) plus optional model-powered rewrite/suggestion calls.
+ *
+ * The rule engine is the real prevention mechanism; the model call is an
+ * enhancement layered on top of it, and returns null whenever no provider is
+ * configured or the call fails. Which provider answers is decided in
+ * aiProvider.ts, not here.
  */
+import type { PrismaClient } from '@prisma/client';
 export type TemplateCategory = 'MARKETING' | 'UTILITY' | 'AUTHENTICATION';
 export interface TemplateCheckInput {
     category: TemplateCategory;
@@ -38,8 +42,14 @@ export interface AISuggestionResult {
     rationale: string;
     raw?: any;
 }
+/**
+ * Synchronous best-effort check, kept for callers that cannot await. It only
+ * sees environment keys, so a key stored from the panel does not register here
+ * -- prefer isAIConfigured(prisma) from aiProvider.ts where a prisma client is
+ * available.
+ */
 export declare function isAIAvailable(): boolean;
-export declare function getAISuggestion(input: AISuggestionInput): Promise<AISuggestionResult | null>;
+export declare function getAISuggestion(input: AISuggestionInput, prisma?: PrismaClient, tenantId?: string | null): Promise<AISuggestionResult | null>;
 /**
  * Simple-mode AI Reply: a direct system-prompt + user-message call with no
  * retrieval step — the "just describe your business" alternative to the
@@ -49,5 +59,5 @@ export declare function getAISuggestion(input: AISuggestionInput): Promise<AISug
 export declare function generateSimpleReply(params: {
     systemPrompt: string;
     userMessage: string;
-}): Promise<string | null>;
+}, prisma?: PrismaClient, tenantId?: string | null): Promise<string | null>;
 //# sourceMappingURL=aiAssist.d.ts.map

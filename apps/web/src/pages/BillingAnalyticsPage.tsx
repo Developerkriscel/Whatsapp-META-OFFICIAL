@@ -27,14 +27,12 @@ interface BillingStats {
 
 interface RevenueData {
   month: string;
-  mrr: number;
-  newRevenue: number;
-  churned: number;
+  revenue: number;
 }
 
 export default function BillingAnalyticsPage() {
   const fx = useCurrency();
-  const { data: billingData } = useQuery({
+  const { data: billingData, isLoading: isBillingLoading, isError: isBillingError } = useQuery({
     queryKey: ['superadmin', 'billing'],
     queryFn: async () => {
       const response = await api.get('/superadmin/billing');
@@ -62,12 +60,13 @@ export default function BillingAnalyticsPage() {
 
   const revenueData: RevenueData[] = (stats?.monthlyRevenue || []).map((m: any) => ({
     month: m.month,
-    mrr: m.mrr,
-    newRevenue: 0,
-    churned: 0,
+    revenue: Number(m.revenue ?? 0),
   }));
 
-  const maxMRR = revenueData.length > 0 ? (Math.max(...revenueData.map(d => d.mrr)) || 1) : 1;
+  const maxRevenue = revenueData.length > 0
+    ? Math.max(...revenueData.map((data) => data.revenue), 1)
+    : 1;
+  const hasRevenue = revenueData.some((data) => data.revenue > 0);
 
   const cards = [
     {
@@ -172,34 +171,54 @@ export default function BillingAnalyticsPage() {
         <div className="flex items-center justify-between mb-6">
           <div>
             <h2 className="text-lg font-semibold text-ios-dark">Revenue Growth</h2>
-            <p className="text-sm text-ios-muted">Monthly recurring revenue over time</p>
+            <p className="text-sm text-ios-muted">Paid invoice revenue by month</p>
           </div>
           <div className="flex items-center gap-4 text-sm">
             <div className="flex items-center gap-2">
               <div className="w-3 h-3 bg-wa-green rounded-full" />
-              <span className="text-ios-secondary">MRR</span>
+              <span className="text-ios-secondary">Revenue collected</span>
             </div>
           </div>
         </div>
 
-        {/* Simple Bar Chart */}
-        <div className="space-y-3">
-          {revenueData.map((data) => (
-            <div key={data.month} className="flex items-center gap-3">
-              <span className="w-12 text-sm text-ios-muted">{data.month}</span>
-              <div className="flex-1 bg-ios-gray rounded-full h-8 relative overflow-hidden">
-                <div
-                  className="h-full bg-gradient-to-r from-wa-green/60 to-wa-green rounded-full flex items-center justify-end px-3 transition-all"
-                  style={{ width: `${(data.mrr / maxMRR) * 100}%` }}
-                >
-                  <span className="text-xs text-white font-medium">
-                    ${(data.mrr / 1000).toFixed(1)}k
+        {isBillingLoading ? (
+          <p className="py-8 text-center text-sm text-ios-muted">Loading revenue data...</p>
+        ) : isBillingError ? (
+          <p className="py-8 text-center text-sm text-apple-red">Unable to load revenue data. Please try again.</p>
+        ) : revenueData.length === 0 ? (
+          <p className="py-8 text-center text-sm text-ios-muted">No monthly revenue data is available yet.</p>
+        ) : (
+          <div className="space-y-3">
+            {!hasRevenue && (
+              <p className="mb-4 text-sm text-ios-muted">
+                No paid invoices were recorded in the last six months.
+              </p>
+            )}
+            {revenueData.map((data) => {
+              const [year, month] = data.month.split('-').map(Number);
+              const label = new Date(year, month - 1, 1).toLocaleString('en-US', {
+                month: 'short',
+                year: '2-digit',
+              });
+              const width = data.revenue > 0 ? Math.max((data.revenue / maxRevenue) * 100, 2) : 0;
+
+              return (
+                <div key={data.month} className="flex items-center gap-3">
+                  <span className="w-14 shrink-0 text-sm text-ios-muted">{label}</span>
+                  <div className="flex-1 bg-ios-gray rounded-full h-8 relative overflow-hidden">
+                    <div
+                      className="h-full bg-gradient-to-r from-wa-green/60 to-wa-green rounded-full transition-all"
+                      style={{ width: `${width}%` }}
+                    />
+                  </div>
+                  <span className="w-24 shrink-0 text-right text-xs font-medium text-ios-secondary">
+                    {formatMoney(data.revenue, fx, { decimals: 0 })}
                   </span>
                 </div>
-              </div>
-            </div>
-          ))}
-        </div>
+              );
+            })}
+          </div>
+        )}
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">

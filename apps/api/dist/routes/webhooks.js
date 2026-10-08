@@ -21,14 +21,34 @@ export async function registerWebhookRoutes(app) {
     });
     // POST /webhook - Incoming events
     app.post('/webhook', async (request, reply) => {
-        // Verify X-Hub-Signature-256 to ensure request is from Meta
+        // Verify X-Hub-Signature-256 to ensure the request is really from Meta.
+        //
+        // The signature is an HMAC over the exact bytes Meta sent. This used to
+        // hash JSON.stringify(request.body) -- the parsed object serialised again,
+        // which is a different byte string: Meta escapes non-ASCII as \uXXXX and
+        // picks its own whitespace, and neither survives a parse/stringify round
+        // trip. So the comparison could essentially never succeed. Every status
+        // callback had been answered with 403 since META_APP_SECRET was set, Meta
+        // gave up retrying, and the product stopped learning that anything was
+        // delivered, read or failed -- campaigns sat at 0% delivered for ever, and
+        // nothing settled or refunded, because that all hangs off these callbacks.
         const appSecret = process.env.META_APP_SECRET;
         if (appSecret) {
             const signature = request.headers['x-hub-signature-256'] || '';
-            const rawBody = JSON.stringify(request.body);
-            const { createHmac } = await import('crypto');
-            const expected = 'sha256=' + createHmac('sha256', appSecret).update(rawBody).digest('hex');
-            if (signature !== expected) {
+            const raw = request.rawBody;
+            if (!raw) {
+                // Fail closed, but say why: a silent 403 is indistinguishable from a
+                // forged request, and that ambiguity is what hid this for weeks.
+                console.error('[Webhook] rawBody missing -- cannot verify Meta signature. ' +
+                    "Is '/webhook' still in the fastify-raw-body routes list in app.ts?");
+                return reply.code(403).send('Forbidden');
+            }
+            const { createHmac, timingSafeEqual } = await import('crypto');
+            const expected = 'sha256=' + createHmac('sha256', appSecret).update(raw).digest('hex');
+            const a = Buffer.from(signature);
+            const b = Buffer.from(expected);
+            if (a.length !== b.length || !timingSafeEqual(a, b)) {
+                console.error(`[Webhook] signature mismatch -- rejecting. header=${signature ? 'present' : 'ABSENT'}`);
                 return reply.code(403).send('Forbidden');
             }
         }
@@ -168,10 +188,16 @@ async function processIncomingMessage(app, message, phoneNumber, tenantId) {
         });
         return;
     }
-    // Get or create contact
-    let contact = await app.prisma.contact.findFirst({
-        where: { tenantId, phone: from },
-    });
+    // Get or create contact.
+    //
+    // Matched on digits rather than on the exact string. Meta sends bare
+    // international digits while contacts are stored in whatever shape they
+    // arrived in, so an exact match routinely missed someone already in the list
+    // and created a duplicate -- and a duplicate contact means a duplicate
+    // conversation, which is why replies from one number kept landing in a
+    // different thread from their own history.
+    const { findContactByPhone } = await import('../services/contactLookup.js');
+    let contact = await findContactByPhone(app.prisma, tenantId, from);
     if (!contact) {
         // Contact initiated conversation - they are opted in by default
         // Meta gives us the number in full international form, so the country is
@@ -262,7 +288,7 @@ async function processIncomingMessage(app, message, phoneNumber, tenantId) {
     });
     // Broadcast unread count update
     const unreadCount = await app.prisma.conversation.count({
-        where: { tenantId, status: 'OPEN', unreadCount: { gt: 0 } },
+        where: { tenantId, status: { not: 'CLOSED' }, unreadCount: { gt: 0 } },
     });
     broadcastToTenant(tenantId, {
         event: 'unread_count',
@@ -297,12 +323,27 @@ async function processIncomingMessage(app, message, phoneNumber, tenantId) {
             }).catch((err) => console.error('Failed to auto-trigger bot flow:', err));
         }
     }
-    // Mark as read
+    // Mark as read.
+    //
+    // This used to run on whatsappConfig — the module-level config built from the
+    // platform's own META_ACCESS_TOKEN env var — while addressing the *tenant's*
+    // phone number, so every inbound message failed with an OAuthException. The
+    // token has to be the one that owns the number, exactly as the send path
+    // resolves it; falling back to a platform env token would also mean acting on
+    // a tenant's number under the platform's identity.
     if (!whatsappConfig.mockMode) {
         try {
             const { WhatsAppAPIClient } = await import('@whatsapp-saas/config/guards');
-            const client = new WhatsAppAPIClient(whatsappConfig);
-            await client.markAsRead(messageId, phoneNumber.metaPhoneId);
+            const { resolveAccessToken } = await import('../services/credentialEncryption.js');
+            const creds = await app.prisma.whatsAppCredentials.findUnique({ where: { tenantId } });
+            const accessToken = resolveAccessToken(phoneNumber.accessToken, creds?.accessToken);
+            if (!accessToken) {
+                console.warn(`[Webhook] no access token for tenant ${tenantId} — skipping mark-as-read`);
+            }
+            else {
+                const client = new WhatsAppAPIClient({ ...whatsappConfig, accessToken });
+                await client.markAsRead(messageId, phoneNumber.metaPhoneId);
+            }
         }
         catch (err) {
             console.error('Failed to mark message as read:', err);
@@ -348,7 +389,11 @@ async function processStatusUpdate(app, status, tenantId) {
     // webhook) and its campaignId (to know which campaign to credit at all).
     const existing = await app.prisma.message.findFirst({
         where: { metaMessageId: messageId, tenantId },
-        select: { id: true, status: true, campaignId: true, conversationId: true },
+        select: {
+            id: true, status: true, campaignId: true, conversationId: true,
+            metaCostUsd: true,
+            contact: { select: { country: true } },
+        },
     });
     if (!existing) {
         await logWebhookEvent(app, tenantId, null, 'message_statuses', messageId, null, { status }, 'COMPLETED');
@@ -359,21 +404,47 @@ async function processStatusUpdate(app, status, tenantId) {
         where: { id: existing.id },
         data: updateData,
     });
-    // Campaign cards showed 0% delivered/read forever — the per-message
-    // status was updated above, but nothing ever rolled that back up into
-    // the campaign's own totalDelivered/totalRead/totalFailed counters that
-    // the Campaigns page actually reads for its stats.
-    if (existing.campaignId && isNewTransition) {
-        const campaignField = ourStatus === 'DELIVERED' ? 'totalDelivered' :
-            ourStatus === 'READ' ? 'totalRead' :
-                ourStatus === 'FAILED' ? 'totalFailed' :
-                    null;
-        if (campaignField) {
-            await app.prisma.campaign.update({
-                where: { id: existing.campaignId },
-                data: { [campaignField]: { increment: 1 } },
-            }).catch(() => { });
+    // Meta states what it billed in a `pricing` block on the status webhook, and
+    // that is the only authoritative source: it decides the category itself, and
+    // marks free service-window messages non-billable. This was being discarded,
+    // so nothing in the product could say what a message, a campaign or a tenant
+    // actually cost. Recorded once — the same message reports sent, delivered and
+    // read, and all three carry the block.
+    if (status.pricing && existing.metaCostUsd == null) {
+        const { recordMessageCost } = await import('../services/messageCosting.js');
+        await recordMessageCost(app.prisma, existing.id, status.pricing, existing.contact?.country);
+    }
+    // Settle the hold taken when this message was sent. A tenant is charged for
+    // messages that reach a handset, not for messages we handed to Meta — so a
+    // terminal failure returns the money, and delivery simply lets the charge
+    // stand. Guarded on isNewTransition because Meta retries webhooks and a retry
+    // must not refund twice (refundUndelivered is idempotent as well; this just
+    // avoids the query).
+    if (ourStatus === 'FAILED' && isNewTransition) {
+        const { refundUndelivered } = await import('../services/settlement.js');
+        const reason = updateData.errorMessage
+            ? `Not delivered: ${String(updateData.errorMessage).slice(0, 120)}`
+            : 'Not delivered — Meta reported the message failed';
+        const returned = await refundUndelivered(app.prisma, existing.id, reason).catch((err) => {
+            console.error(`[Settlement] refund failed for message ${existing.id}:`, err?.message);
+            return 0;
+        });
+        if (returned > 0) {
+            broadcastToTenant(tenantId, {
+                event: 'balance_changed',
+                data: { messageId: existing.id, refundedPaise: returned },
+            });
         }
+    }
+    // Roll the new status up into the campaign card. This used to increment one
+    // counter by one, which quietly double-counted: a message already tallied as
+    // sent by the send loop stayed in that total after failing here, so sent plus
+    // failed could exceed the number of recipients. The row we just wrote is the
+    // record of what happened, so the counters are recomputed from the rows
+    // rather than nudged alongside them.
+    if (existing.campaignId && isNewTransition) {
+        const { recountCampaign } = await import('./tenant.js');
+        await recountCampaign(app, existing.campaignId).catch((err) => console.error(`[Webhook] recount failed for campaign ${existing.campaignId}:`, err?.message));
     }
     // Broadcast status update to connected clients
     broadcastMessageStatus(tenantId, messageId, existing.conversationId, ourStatus);

@@ -21,6 +21,13 @@ const PUBLIC_ROUTES = [
     '/webhook',
     '/api/v1/webhooks/whatsapp',
     '/api/v1/stripe/webhook',
+    // Razorpay authenticates itself by signing the body; a bearer token would
+    // be meaningless here and would only stop the webhook arriving.
+    '/webhooks/razorpay',
+    // Served straight into <img> tags, which cannot carry a bearer token. Keys
+    // contain a uuid, so they are unguessable, and this matches how
+    // /uploads/campaign-media already works for the media Meta fetches.
+    '/api/v1/files/',
     '/api/v1/whatsapp/oauth/callback',
     '/api/v1/meta/data-deletion',
     '/api/v1/meta/data-deletion-status',

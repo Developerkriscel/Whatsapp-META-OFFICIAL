@@ -24,9 +24,15 @@ interface Contact {
   email?: string;
   company?: string;
   tags: string[];
-  status: 'active' | 'inactive' | 'blocked';
+  isActive: boolean;
+  blocked: boolean;
   lastMessage?: string;
   createdAt: string;
+}
+
+function getContactStatus(contact: Pick<Contact, 'isActive' | 'blocked'>): 'active' | 'inactive' | 'blocked' {
+  if (contact.blocked) return 'blocked';
+  return contact.isActive ? 'active' : 'inactive';
 }
 
 type ImportStep = 'upload' | 'map' | 'preview' | 'done';
@@ -129,7 +135,7 @@ export default function ContactsPage() {
   // first 20 and had no way to reach the rest. A tenant with 371 contacts could
   // see 20 of them, and could only delete from those 20.
   const [page, setPage] = useState(1);
-  const PAGE_SIZE = 50;
+  const PAGE_SIZE = 10;
 
   // ── Queries ──────────────────────────────────────────
 
@@ -506,7 +512,9 @@ export default function ContactsPage() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-black/5">
-                {filtered.map((contact) => (
+                {filtered.map((contact) => {
+                  const status = getContactStatus(contact);
+                  return (
                   <tr key={contact.id} className="hover:bg-ios-gray/30 transition">
                     <td className="px-4 py-3">
                       <input
@@ -541,11 +549,11 @@ export default function ContactsPage() {
                     </td>
                     <td className="px-4 py-3">
                       <span className={`text-xs px-2.5 py-1 rounded-apple-full font-medium ${
-                        contact.status === 'active' ? 'bg-apple-green/20 text-apple-green' :
-                        contact.status === 'blocked' ? 'bg-apple-red/20 text-apple-red' :
+                        status === 'active' ? 'bg-apple-green/20 text-apple-green' :
+                        status === 'blocked' ? 'bg-apple-red/20 text-apple-red' :
                         'bg-ios-gray text-ios-muted'
                       }`}>
-                        {contact.status}
+                        {status}
                       </span>
                     </td>
                     <td className="px-4 py-3">
@@ -557,7 +565,8 @@ export default function ContactsPage() {
                       </button>
                     </td>
                   </tr>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
             {filtered.length === 0 && (
@@ -579,11 +588,11 @@ export default function ContactsPage() {
       {/* Pager. Only shown when there is more than one page, so a small
           contact list stays uncluttered. */}
       {totalPages > 1 && (
-        <div className="flex items-center justify-between gap-4 px-1">
+        <div className="flex items-center justify-between gap-4 px-4">
           <p className="text-sm text-ios-muted">
             Page {page} of {totalPages}
           </p>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 mb-2 ml-2">
             <button
               onClick={() => setPage((n) => Math.max(1, n - 1))}
               disabled={page <= 1}

@@ -75,6 +75,311 @@ export async function registerSuperadminRoutes(app) {
      * refresh that number, not that this endpoint should start fanning out live
      * Graph requests per tenant.
      */
+    /**
+     * GET /billing-reality — what Meta bills the platform against what the
+     * platform bills its tenants, in money rather than credits.
+     *
+     * The rate card carries an assumed Meta cost per country that somebody has to
+     * keep current by hand. This reports what Meta actually said, per message, so
+     * the assumption can be checked instead of trusted — including the traffic
+     * Meta did not bill for at all, which is pure margin when a tenant is charged
+     * for it anyway.
+     */
+    app.get('/billing-reality', async (request, reply) => {
+        const { days } = z.object({ days: z.coerce.number().min(1).max(365).default(30) })
+            .parse(request.query ?? {});
+        const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+        const where = { direction: 'OUTGOING', createdAt: { gte: since } };
+        const num = (v) => (v == null ? 0 : Number(v));
+        const [totals, perTenant, byCategory, byBillable, tenants] = await Promise.all([
+            app.prisma.message.aggregate({
+                where: { ...where, metaCostUsd: { not: null } },
+                _sum: { metaCostUsd: true, platformCostUsd: true },
+                _count: true,
+            }),
+            app.prisma.message.groupBy({
+                by: ['tenantId'],
+                where: { ...where, metaCostUsd: { not: null } },
+                _sum: { metaCostUsd: true, platformCostUsd: true },
+                _count: true,
+            }),
+            app.prisma.message.groupBy({
+                by: ['metaCategory'],
+                where: { ...where, metaCategory: { not: null } },
+                _sum: { metaCostUsd: true, platformCostUsd: true },
+                _count: true,
+            }),
+            app.prisma.message.groupBy({
+                by: ['metaBillable'],
+                where: { ...where, metaBillable: { not: null } },
+                _count: true,
+            }),
+            app.prisma.tenant.findMany({ select: { id: true, name: true } }),
+        ]);
+        const nameOf = new Map(tenants.map((t) => [t.id, t.name]));
+        const metaCost = num(totals._sum.metaCostUsd);
+        const charged = num(totals._sum.platformCostUsd);
+        const totalOutgoing = await app.prisma.message.count({ where });
+        const { getCurrencyContext, toMoney, toUnitMoney } = await import('../services/currency.js');
+        const fx = await getCurrencyContext(app.prisma);
+        // Spend by recipient country. Meta prices per country, so this is the view
+        // that shows where the money actually goes.
+        const costedRows = await app.prisma.message.findMany({
+            where: { ...where, metaCostUsd: { not: null } },
+            select: { metaCostUsd: true, platformCostUsd: true, contact: { select: { country: true } } },
+        });
+        const perCountry = new Map();
+        for (const r of costedRows) {
+            const key = r.contact?.country || 'unknown';
+            const cur = perCountry.get(key) || { messages: 0, meta: 0, charged: 0 };
+            cur.messages++;
+            cur.meta += num(r.metaCostUsd);
+            cur.charged += num(r.platformCostUsd);
+            perCountry.set(key, cur);
+        }
+        return {
+            success: true,
+            data: {
+                windowDays: days,
+                currency: {
+                    code: fx.currency, symbol: fx.symbol,
+                    fxRateFromUsd: fx.fxRate, fxSource: fx.fxSource, fxUpdatedAt: fx.fxUpdatedAt,
+                },
+                platform: {
+                    messagesPriced: totals._count,
+                    messagesTotal: totalOutgoing,
+                    // Traffic Meta has not reported on is excluded rather than guessed,
+                    // so this is a floor on spend and not an estimate.
+                    awaitingPricing: Math.max(0, totalOutgoing - totals._count),
+                    metaBilled: toMoney(metaCost, fx),
+                    tenantsCharged: toMoney(charged, fx),
+                    grossMargin: toMoney(charged - metaCost, fx),
+                    grossMarginPct: metaCost > 0 ? Math.round(((charged - metaCost) / metaCost) * 1000) / 10 : null,
+                },
+                billableSplit: byBillable.map((b) => ({ billable: b.metaBillable, messages: b._count })),
+                byCategory: byCategory.map((c) => ({
+                    category: c.metaCategory,
+                    messages: c._count,
+                    metaBilled: toMoney(num(c._sum.metaCostUsd), fx),
+                    charged: toMoney(num(c._sum.platformCostUsd), fx),
+                })),
+                byCountry: [...perCountry.entries()]
+                    .map(([country, v]) => ({
+                    country,
+                    messages: v.messages,
+                    metaBilled: toMoney(v.meta, fx),
+                    charged: toMoney(v.charged, fx),
+                    margin: toMoney(v.charged - v.meta, fx),
+                    avgPerMessage: toUnitMoney(v.messages > 0 ? v.charged / v.messages : 0, fx),
+                }))
+                    .sort((a, b) => b.charged.usd - a.charged.usd),
+                byTenant: perTenant
+                    .map((t) => {
+                    const cost = num(t._sum.metaCostUsd);
+                    const rev = num(t._sum.platformCostUsd);
+                    return {
+                        tenantId: t.tenantId,
+                        tenantName: nameOf.get(t.tenantId) || t.tenantId,
+                        messages: t._count,
+                        metaBilled: toMoney(cost, fx),
+                        charged: toMoney(rev, fx),
+                        margin: toMoney(rev - cost, fx),
+                        marginPct: cost > 0 ? Math.round(((rev - cost) / cost) * 1000) / 10 : null,
+                    };
+                })
+                    .sort((a, b) => b.charged.usd - a.charged.usd),
+            },
+        };
+    });
+    /**
+     * Reporting currency and its FX rate, changeable without a deploy.
+     *
+     * Meta's own billing currency is not readable through the API — the WABA
+     * currency field needs Business Solution Provider access — so the rate is
+     * stated here rather than inferred, and every figure that uses it reports
+     * which rate it used.
+     */
+    /**
+     * POST /credit-rates/calibrate — set Meta's cost from Meta's own invoice.
+     *
+     * Meta's real cost is not readable through the API without Business Solution
+     * Provider access, so the rate card's cost side has been a hand-entered
+     * figure that nothing ever checked. It drifted 21% high for India: the card
+     * said Rs 1.0443 per marketing message while WhatsApp Manager billed
+     * Rs 152.77 for 177 billable deliveries, which is Rs 0.8631. Every margin
+     * figure in the product was understated by that much.
+     *
+     * WhatsApp Manager does show the invoice, so this takes those numbers —
+     * deliveries, free deliveries, total charged — and derives the true rate.
+     * Dry run unless `apply` is true.
+     */
+    app.post('/credit-rates/calibrate', async (request, reply) => {
+        const body = z.object({
+            countryCode: z.string().length(2),
+            category: z.enum(['MARKETING', 'UTILITY', 'AUTHENTICATION']).default('MARKETING'),
+            /** "All message deliveries" from WhatsApp Manager. */
+            deliveries: z.number().int().positive(),
+            /** "Free customer service deliveries" — not billed, so excluded. */
+            freeDeliveries: z.number().int().min(0).default(0),
+            /** "Approximate charges", in the currency Meta shows them in. */
+            charges: z.number().positive(),
+            /** Currency of `charges`. Converted to the USD basis costs are stored in. */
+            currency: z.string().length(3).default('INR'),
+            apply: z.boolean().default(false),
+        }).parse(request.body);
+        const billable = body.deliveries - body.freeDeliveries;
+        if (billable <= 0) {
+            return reply.status(400).send({
+                success: false,
+                error: { code: 'NO_BILLABLE', message: 'Free deliveries cannot equal or exceed total deliveries.' },
+            });
+        }
+        const { getCurrencyContext } = await import('../services/currency.js');
+        const fx = await getCurrencyContext(app.prisma);
+        // charges are in `currency`; costs are stored in USD.
+        const rateInCurrency = body.charges / billable;
+        const rateUsd = body.currency.toUpperCase() === 'USD' ? rateInCurrency : rateInCurrency / fx.fxRate;
+        const { usdToCredits } = await import('../services/creditService.js');
+        const derivedCredits = usdToCredits(rateUsd);
+        const rate = await app.prisma.creditRate.findUnique({ where: { countryCode: body.countryCode.toUpperCase() } });
+        if (!rate) {
+            return reply.status(404).send({
+                success: false,
+                error: { code: 'RATE_NOT_FOUND', message: `No rate card entry for ${body.countryCode}.` },
+            });
+        }
+        const costField = body.category === 'MARKETING' ? 'metaMarketingCredits'
+            : body.category === 'AUTHENTICATION' ? 'metaAuthCredits'
+                : 'metaUtilityCredits';
+        const sellField = body.category === 'MARKETING' ? 'marketingCredits'
+            : body.category === 'AUTHENTICATION' ? 'authCredits'
+                : 'utilityCredits';
+        const storedCredits = rate[costField];
+        const sellCredits = rate[sellField];
+        const variancePct = storedCredits > 0
+            ? Math.round(((storedCredits - derivedCredits) / derivedCredits) * 1000) / 10
+            : null;
+        const marginOn = (cost) => (cost > 0 ? Math.round(((sellCredits - cost) / cost) * 1000) / 10 : null);
+        if (body.apply) {
+            await app.prisma.creditRate.update({
+                where: { countryCode: body.countryCode.toUpperCase() },
+                data: { [costField]: derivedCredits },
+            });
+            const { refreshRateCache } = await import('../services/creditService.js');
+            await refreshRateCache(app.prisma);
+        }
+        return {
+            success: true,
+            data: {
+                applied: body.apply,
+                countryCode: body.countryCode.toUpperCase(),
+                category: body.category,
+                invoice: {
+                    deliveries: body.deliveries,
+                    freeDeliveries: body.freeDeliveries,
+                    billable,
+                    charges: body.charges,
+                    currency: body.currency.toUpperCase(),
+                },
+                derived: {
+                    perMessage: Math.round(rateInCurrency * 10000) / 10000,
+                    currency: body.currency.toUpperCase(),
+                    perMessageUsd: Math.round(rateUsd * 1000000) / 1000000,
+                    credits: derivedCredits,
+                },
+                previous: { credits: storedCredits, variancePct },
+                margin: {
+                    reportedBefore: marginOn(storedCredits),
+                    actualAfter: marginOn(derivedCredits),
+                    sellCredits,
+                },
+            },
+        };
+    });
+    /**
+     * GET /meta-reconciliation — our billing against Meta's own figures.
+     *
+     * Volumes, countries, categories and delivery counts come from Meta's API and
+     * are real. Amounts do not: Meta refuses COST for accounts that bill through a
+     * partner, saying so explicitly, and that refusal is passed through here
+     * rather than hidden, so it is clear which half of this is invoice-grade.
+     *
+     * The drift line is the point. We record a message when its pricing webhook
+     * arrives; Meta bills on delivery. Charging for more messages than Meta
+     * billed is money taken from a tenant for nothing.
+     */
+    app.get('/meta-reconciliation', async (request, reply) => {
+        const { tenantId, days } = z.object({
+            tenantId: z.string().optional(),
+            days: z.coerce.number().min(1).max(90).default(30),
+        }).parse(request.query ?? {});
+        const to = new Date();
+        const from = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+        // Default to whichever tenant actually sends, so the endpoint is useful
+        // without having to look up an id first.
+        let target = tenantId;
+        if (!target) {
+            const busiest = await app.prisma.message.groupBy({
+                by: ['tenantId'],
+                where: { direction: 'OUTGOING', createdAt: { gte: from } },
+                _count: true,
+                orderBy: { _count: { tenantId: 'desc' } },
+                take: 1,
+            });
+            target = busiest[0]?.tenantId;
+        }
+        if (!target) {
+            return reply.status(404).send({
+                success: false,
+                error: { code: 'NO_TENANT', message: 'No tenant has sent messages in this window.' },
+            });
+        }
+        const { reconcileWithMeta } = await import('../services/metaUsage.js');
+        const result = await reconcileWithMeta(app.prisma, target, from, to);
+        if ('error' in result) {
+            return reply.status(502).send({ success: false, error: { code: 'META_UNAVAILABLE', message: result.error } });
+        }
+        const tenant = await app.prisma.tenant.findUnique({ where: { id: target }, select: { name: true } });
+        return { success: true, data: { tenantId: target, tenantName: tenant?.name, ...result } };
+    });
+    app.get('/settings/currency', async (_request, _reply) => {
+        const { getCurrencyContext, DEFAULT_FX } = await import('../services/currency.js');
+        const fx = await getCurrencyContext(app.prisma);
+        return {
+            success: true,
+            data: { ...fx, suggested: DEFAULT_FX },
+        };
+    });
+    app.patch('/settings/currency', async (request, reply) => {
+        const body = z.object({
+            currency: z.string().length(3).optional(),
+            fxRateFromUsd: z.number().positive().max(100000).optional(),
+        }).parse(request.body);
+        if (!body.currency && body.fxRateFromUsd === undefined) {
+            return reply.status(400).send({
+                success: false,
+                error: { code: 'NOTHING_TO_UPDATE', message: 'Provide a currency, an FX rate, or both.' },
+            });
+        }
+        const writes = [];
+        if (body.currency) {
+            writes.push(app.prisma.platformSetting.upsert({
+                where: { key: 'display_currency' },
+                create: { key: 'display_currency', value: body.currency.toUpperCase() },
+                update: { value: body.currency.toUpperCase() },
+            }));
+        }
+        if (body.fxRateFromUsd !== undefined) {
+            writes.push(app.prisma.platformSetting.upsert({
+                where: { key: 'fx_usd_rate' },
+                create: { key: 'fx_usd_rate', value: String(body.fxRateFromUsd) },
+                update: { value: String(body.fxRateFromUsd) },
+            }));
+        }
+        await app.prisma.$transaction(writes);
+        const { getCurrencyContext } = await import('../services/currency.js');
+        return { success: true, data: await getCurrencyContext(app.prisma) };
+    });
     app.get('/whatsapp-health', async (request, reply) => {
         const since24h = new Date(Date.now() - 24 * 60 * 60 * 1000);
         // Six aggregate queries regardless of tenant count, rather than a per-tenant
@@ -409,10 +714,30 @@ export async function registerSuperadminRoutes(app) {
             name: z.string().optional(),
             planId: z.string().optional(),
             status: z.enum(['TRIAL', 'ACTIVE', 'SUSPENDED', 'CHURNED', 'PENDING_SETUP']).optional(),
+            // The trial deadline decides whether a workspace can use the product at
+            // all -- past it, every tenant request is refused with 402 -- and there
+            // was no way to move it from the panel. The only available remedy was
+            // flipping status to ACTIVE, which says "this is a paying customer" about
+            // someone who is not, and loses the distinction for good.
+            trialEndsAt: z.string().datetime().nullable().optional(),
+            /** Convenience: push the deadline on from today. */
+            extendTrialDays: z.number().int().min(1).max(365).optional(),
         }).parse(request.body);
+        const { extendTrialDays, trialEndsAt, ...rest } = body;
+        const data = { ...rest };
+        if (trialEndsAt !== undefined)
+            data.trialEndsAt = trialEndsAt ? new Date(trialEndsAt) : null;
+        if (extendTrialDays) {
+            // Extended from today, not from the old deadline: a trial that lapsed
+            // three weeks ago and is given "7 more days" should be usable for seven
+            // days, not expire again two weeks before the extension was granted.
+            const until = new Date();
+            until.setDate(until.getDate() + extendTrialDays);
+            data.trialEndsAt = until;
+        }
         const tenant = await app.prisma.tenant.update({
             where: { id: tenantId },
-            data: body,
+            data,
             include: { plan: true },
         });
         await createAuditLog(app.prisma, {
@@ -422,7 +747,7 @@ export async function registerSuperadminRoutes(app) {
             action: 'UPDATE',
             resource: 'tenants',
             resourceId: tenant.id,
-            metadata: body,
+            metadata: data,
             ipAddress: request.ip,
             userAgent: request.headers['user-agent'],
         });
@@ -874,11 +1199,11 @@ export async function registerSuperadminRoutes(app) {
         const monthlyRevenue = [];
         for (let i = 5; i >= 0; i--) {
             const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
-            const label = d.toLocaleString('en-US', { month: 'short' });
+            const month = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
             const total = paidInvoices
                 .filter((inv) => inv.paidAt && inv.paidAt.getFullYear() === d.getFullYear() && inv.paidAt.getMonth() === d.getMonth())
                 .reduce((sum, inv) => sum + Number(inv.amount), 0);
-            monthlyRevenue.push({ month: label, mrr: total });
+            monthlyRevenue.push({ month, revenue: total });
         }
         const mrr = activeTenants.reduce((sum, t) => {
             const raw = t.plan?.monthlyPrice;

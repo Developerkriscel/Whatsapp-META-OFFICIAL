@@ -5,6 +5,7 @@
  */
 import { z } from 'zod';
 import { chunkText, embedBatch, generateRagReply } from '../services/knowledgeBase.js';
+import { isAIConfigured } from '../services/aiProvider.js';
 export async function registerKnowledgeBaseRoutes(app) {
     app.get('/knowledge-bases', { preHandler: [app.requirePermission('flows', 'read')] }, async (request, reply) => {
         if (!request.authUser.tenantId) {
@@ -97,16 +98,16 @@ export async function registerKnowledgeBaseRoutes(app) {
             });
             return { success: true, data: updated };
         }
-        const embeddings = await embedBatch(chunks);
+        const embeddings = await embedBatch(app.prisma, chunks);
         const failedCount = embeddings.filter((e) => e === null).length;
         if (failedCount === embeddings.length) {
             const updated = await app.prisma.knowledgeDocument.update({
                 where: { id: document.id },
                 data: {
                     status: 'FAILED',
-                    errorMessage: process.env.MISTRAL_API_KEY
+                    errorMessage: (await isAIConfigured(app.prisma))
                         ? 'Embedding failed for all chunks — check server logs'
-                        : 'AI is not configured for this deployment (missing MISTRAL_API_KEY)',
+                        : 'AI is not configured — choose a provider and add an API key in Superadmin → System → AI.',
                 },
             });
             return { success: true, data: updated };

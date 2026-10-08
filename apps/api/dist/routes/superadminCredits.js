@@ -74,6 +74,12 @@ export async function registerSuperadminCreditRoutes(app) {
             utilityCredits: z.number().int().min(0).optional(),
             authCredits: z.number().int().min(0).optional(),
             serviceCredits: z.number().int().min(0).optional(),
+            // The cost side was previously reachable only through invoice
+            // calibration, so a country Meta has not billed yet could not be given a
+            // cost at all — and every margin for it read as unknown.
+            metaMarketingCredits: z.number().int().min(0).optional(),
+            metaUtilityCredits: z.number().int().min(0).optional(),
+            metaAuthCredits: z.number().int().min(0).optional(),
             isActive: z.boolean().optional(),
         }).parse(request.body);
         const rate = await app.prisma.creditRate.update({ where: { id: rateId }, data: body });
@@ -462,6 +468,237 @@ export async function registerSuperadminCreditRoutes(app) {
             });
         }
         return { success: true, data: { message: 'Credit packs seeded', count: packs.length } };
+    });
+    // ============================================
+    // CREDIT SETTINGS -- the knobs that used to require a deploy
+    // ============================================
+    /**
+     * GET /credit-settings -- every number that governs credit pricing, in one
+     * place, with what each currently implies.
+     *
+     * The peg in particular was hardcoded, which made it the one pricing decision
+     * that could not be changed from the panel -- and it is the decision that
+     * determines whether a credit pack and the rate card agree with each other.
+     */
+    app.get('/credit-settings', async (_request, _reply) => {
+        const { getCreditsPerUsd, DEFAULT_CREDITS_PER_USD, DEFAULT_MARKUP } = await import('../services/creditService.js');
+        const { getCurrencyContext } = await import('../services/currency.js');
+        const fx = await getCurrencyContext(app.prisma);
+        const peg = getCreditsPerUsd();
+        const rate = await app.prisma.creditRate.findUnique({ where: { countryCode: 'IN' } });
+        const pack = await app.prisma.creditPackage.findFirst({
+            where: { isActive: true }, orderBy: { sortOrder: 'asc' },
+        });
+        // What the current settings actually mean, so a change can be judged
+        // against the thing it affects rather than in the abstract.
+        //
+        // creditWorth is the whole model: the rate card is stored in credits, so
+        // one number turns credits into money. It is reported in the platform's
+        // reporting currency, not USD -- the dollar is an implementation detail of
+        // how the peg happens to be stored, and putting it in front of an admin
+        // pricing an Indian product just adds a conversion to do in your head.
+        let implications = null;
+        if (rate) {
+            const creditWorth = (1 / peg) * fx.fxRate;
+            const sellPerMsg = rate.marketingCredits * creditWorth;
+            const costPerMsg = rate.metaMarketingCredits * creditWorth;
+            implications = {
+                creditWorth,
+                creditsPerUnit: creditWorth > 0 ? 1 / creditWorth : null,
+                marketingSellPerMessage: Math.round(sellPerMsg * 10000) / 10000,
+                marketingCostPerMessage: Math.round(costPerMsg * 10000) / 10000,
+                marginPct: costPerMsg > 0 ? Math.round(((sellPerMsg - costPerMsg) / costPerMsg) * 1000) / 10 : null,
+            };
+        }
+        // Every active pack, and what each one implies a credit is worth. A pack
+        // is a price for a quantity of credits, so it states a credit's worth on
+        // its own -- and packs that disagree with each other, or with the peg, are
+        // the actual defect. The previous version read one pack (the first by sort
+        // order) and derived a suggested peg from the *current* peg, so once the
+        // peg went wrong the suggestion could only ever repeat it.
+        const allPacks = await app.prisma.creditPackage.findMany({
+            where: { isActive: true },
+            orderBy: { sortOrder: 'asc' },
+        });
+        const packImplications = allPacks.map((k) => {
+            const price = k.priceMinor / 100;
+            const impliedWorth = k.credits > 0 ? price / k.credits : 0;
+            const messages = rate?.marketingCredits ? Math.floor(k.credits / rate.marketingCredits) : 0;
+            return {
+                id: k.id,
+                name: k.name,
+                price,
+                credits: k.credits,
+                impliedCreditWorth: impliedWorth,
+                messages,
+                perMessage: messages > 0 ? price / messages : 0,
+            };
+        });
+        // The value the packs themselves agree on. Consensus rather than first-by-
+        // sort-order: one mispriced pack should not redefine the platform's peg.
+        let consensusWorth = null;
+        let consensusPacks = [];
+        if (packImplications.length) {
+            const buckets = new Map();
+            for (const k of packImplications) {
+                if (!(k.impliedCreditWorth > 0))
+                    continue;
+                // Round to 4 significant figures so packs priced consistently land in
+                // the same bucket despite rounding in their stored prices.
+                const key = k.impliedCreditWorth.toPrecision(4);
+                const b = buckets.get(key) || { worth: k.impliedCreditWorth, names: [] };
+                b.names.push(k.name);
+                buckets.set(key, b);
+            }
+            let best = null;
+            for (const b of buckets.values()) {
+                if (!best || b.names.length > best.names.length)
+                    best = b;
+            }
+            if (best && best.names.length > 0) {
+                consensusWorth = best.worth;
+                consensusPacks = best.names;
+            }
+        }
+        return {
+            success: true,
+            data: {
+                creditsPerUsd: peg,
+                creditsPerUsdDefault: DEFAULT_CREDITS_PER_USD,
+                defaultMarkup: DEFAULT_MARKUP,
+                currency: fx,
+                implications,
+                packs: packImplications,
+                consensus: consensusWorth != null ? { creditWorth: consensusWorth, packs: consensusPacks } : null,
+            },
+        };
+    });
+    /**
+     * PATCH /credit-settings
+     *
+     * Changing the peg rescales what every existing credit balance is worth, so
+     * the response says what it did rather than only that it succeeded.
+     */
+    app.patch('/credit-settings', async (request, reply) => {
+        const body = z.object({
+            creditsPerUsd: z.number().positive().max(10000000).optional(),
+            /**
+             * What one credit is worth, in the reporting currency. This is the field
+             * the panel sends: the peg is stored per-USD for historical reasons, but
+             * an admin pricing an Indian product should set a rupee value and never
+             * see a dollar. The conversion happens here, once, instead of in the UI.
+             */
+            creditWorth: z.number().positive().max(1000).optional(),
+            currency: z.string().length(3).optional(),
+            fxRateFromUsd: z.number().positive().max(100000).optional(),
+        }).parse(request.body);
+        if (Object.keys(body).length === 0) {
+            return reply.status(400).send({
+                success: false,
+                error: { code: 'NOTHING_TO_UPDATE', message: 'Provide at least one setting to change.' },
+            });
+        }
+        if (body.creditWorth !== undefined && body.creditsPerUsd !== undefined) {
+            return reply.status(400).send({
+                success: false,
+                error: {
+                    code: 'CONFLICTING_PEG',
+                    message: 'Send creditWorth or creditsPerUsd, not both — they set the same thing.',
+                },
+            });
+        }
+        const { getCreditsPerUsd, refreshRateCache } = await import('../services/creditService.js');
+        const before = getCreditsPerUsd();
+        // A rupee-per-credit value has to be converted against the rate that will
+        // be in force after this same request, or saving a new exchange rate and a
+        // new credit worth together would apply the old rate to the new worth.
+        if (body.creditWorth !== undefined) {
+            const { getCurrencyContext } = await import('../services/currency.js');
+            const current = await getCurrencyContext(app.prisma);
+            const effectiveFx = body.fxRateFromUsd ?? current.fxRate;
+            body.creditsPerUsd = effectiveFx / body.creditWorth;
+        }
+        const writes = [];
+        if (body.creditsPerUsd !== undefined) {
+            writes.push(app.prisma.platformSetting.upsert({
+                where: { key: 'credits_per_usd' },
+                create: { key: 'credits_per_usd', value: String(body.creditsPerUsd) },
+                update: { value: String(body.creditsPerUsd) },
+            }));
+        }
+        if (body.currency) {
+            writes.push(app.prisma.platformSetting.upsert({
+                where: { key: 'display_currency' },
+                create: { key: 'display_currency', value: body.currency.toUpperCase() },
+                update: { value: body.currency.toUpperCase() },
+            }));
+        }
+        if (body.fxRateFromUsd !== undefined) {
+            writes.push(app.prisma.platformSetting.upsert({
+                where: { key: 'fx_usd_rate' },
+                create: { key: 'fx_usd_rate', value: String(body.fxRateFromUsd) },
+                update: { value: String(body.fxRateFromUsd) },
+            }));
+        }
+        await app.prisma.$transaction(writes);
+        // Billing reads a cache; a setting change is inert until it reloads.
+        await refreshRateCache(app.prisma);
+        const after = getCreditsPerUsd();
+        const totalBalance = await app.prisma.tenantCredit.aggregate({ _sum: { balance: true } });
+        const credits = totalBalance._sum.balance ?? 0;
+        // Report the effect in the reporting currency. What every balance is now
+        // worth is the thing an admin is deciding about; making them multiply by
+        // an exchange rate to find out is the same USD detour the panel just
+        // removed from its inputs.
+        const { getCurrencyContext } = await import('../services/currency.js');
+        const fxAfter = await getCurrencyContext(app.prisma);
+        const worthBefore = (1 / before) * fxAfter.fxRate;
+        const worthAfter = (1 / after) * fxAfter.fxRate;
+        return {
+            success: true,
+            data: {
+                creditsPerUsd: after,
+                creditWorth: worthAfter,
+                currency: fxAfter.currency,
+                symbol: fxAfter.symbol,
+                pegChanged: before !== after,
+                // Outstanding balances are unchanged in credits and therefore changed
+                // in value. Stated plainly, because it is easy to miss.
+                outstandingCredits: credits,
+                outstandingBefore: Math.round(credits * worthBefore * 100) / 100,
+                outstandingAfter: Math.round(credits * worthAfter * 100) / 100,
+            },
+        };
+    });
+    /**
+     * POST /credit-rates -- add a country the rate card does not cover yet.
+     * Without this a new market could not be priced without a database edit.
+     */
+    app.post('/credit-rates', async (request, reply) => {
+        const body = z.object({
+            countryCode: z.string().length(2),
+            countryName: z.string().min(1).max(60),
+            currency: z.string().length(3).default('INR'),
+            marketingCredits: z.number().int().min(0),
+            utilityCredits: z.number().int().min(0),
+            authCredits: z.number().int().min(0),
+            serviceCredits: z.number().int().min(0).default(0),
+            metaMarketingCredits: z.number().int().min(0).default(0),
+            metaUtilityCredits: z.number().int().min(0).default(0),
+            metaAuthCredits: z.number().int().min(0).default(0),
+        }).parse(request.body);
+        const code = body.countryCode.toUpperCase();
+        const clash = await app.prisma.creditRate.findUnique({ where: { countryCode: code } });
+        if (clash) {
+            return reply.status(409).send({
+                success: false,
+                error: { code: 'ALREADY_EXISTS', message: code + ' is already on the rate card.' },
+            });
+        }
+        const created = await app.prisma.creditRate.create({ data: { ...body, countryCode: code } });
+        const { refreshRateCache } = await import('../services/creditService.js');
+        await refreshRateCache(app.prisma);
+        return reply.status(201).send({ success: true, data: created });
     });
 }
 //# sourceMappingURL=superadminCredits.js.map

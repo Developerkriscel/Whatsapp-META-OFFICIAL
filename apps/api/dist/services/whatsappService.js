@@ -41,7 +41,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
  * Updates message status in database to SENT or FAILED.
  */
 export async function dispatchOutboundMessage(params) {
-    const { app, messageId, tenantId, contactPhone, phoneNumberId, body, type, template } = params;
+    const { app, messageId, tenantId, contactPhone, phoneNumberId, body, type, template, media } = params;
     // Tracked so a throw between reserving and completing the send (a network
     // error mid-fetch, say) doesn't permanently consume quota.
     let slotReserved = false;
@@ -79,25 +79,45 @@ export async function dispatchOutboundMessage(params) {
             }
             slotReserved = true;
             const url = `https://graph.facebook.com/v18.0/${metaPhoneId}/messages`;
-            const payload = type === 'template' && template
+            const payload = type === 'media' && media
                 ? {
                     messaging_product: 'whatsapp',
                     recipient_type: 'individual',
                     to: formattedTo,
-                    type: 'template',
-                    template: {
-                        name: template.name.toLowerCase().replace(/[^a-z0-9_]/g, '_'),
-                        language: { code: template.language },
-                        components: template.components,
+                    type: media.kind,
+                    [media.kind]: {
+                        link: media.link,
+                        // Audio takes neither a caption nor a filename; documents are
+                        // the only kind that shows a filename to the recipient.
+                        ...(media.kind !== 'audio' && media.caption ? { caption: media.caption } : {}),
+                        ...(media.kind === 'document' && media.filename ? { filename: media.filename } : {}),
                     },
                 }
-                : {
-                    messaging_product: 'whatsapp',
-                    recipient_type: 'individual',
-                    to: formattedTo,
-                    type: 'text',
-                    text: { body },
-                };
+                : type === 'template' && template
+                    ? {
+                        messaging_product: 'whatsapp',
+                        recipient_type: 'individual',
+                        to: formattedTo,
+                        type: 'template',
+                        template: {
+                            name: template.name.toLowerCase().replace(/[^a-z0-9_]/g, '_'),
+                            language: { code: template.language },
+                            // Omit `components` entirely when there are no parameters,
+                            // which is the shape Meta's own docs use for a template with no
+                            // variables. Meta does also accept an empty array -- verified
+                            // against the live API -- so this is tidiness, not a fix.
+                            ...(template.components && template.components.length > 0
+                                ? { components: template.components }
+                                : {}),
+                        },
+                    }
+                    : {
+                        messaging_product: 'whatsapp',
+                        recipient_type: 'individual',
+                        to: formattedTo,
+                        type: 'text',
+                        text: { body },
+                    };
             // Retry transient failures. Without this a momentary rate limit or a 5xx
             // permanently failed that recipient, which during a large campaign meant
             // losing everything in flight at that instant.
@@ -146,8 +166,19 @@ export async function dispatchOutboundMessage(params) {
                 return { success: true, status: 'SENT', metaMessageId, data: updated };
             }
             else {
-                const errMessage = responseData?.error?.message || responseData?.message || 'Meta API call failed';
-                const errCode = responseData?.error?.code?.toString() || 'META_API_ERROR';
+                // Meta's top-level `message` is often the generic headline -- 132018 is
+                // literally "There's an issue with the parameters in your template",
+                // which says nothing about which parameter or why. The specific reason
+                // lives in error_data.details, and dropping it is what made these
+                // failures impossible to diagnose from the campaign view.
+                const metaError = responseData?.error;
+                const details = metaError?.error_data?.details;
+                const headline = metaError?.message || responseData?.message || 'Meta API call failed';
+                const errMessage = details ? `${headline} — ${details}` : headline;
+                const errCode = metaError?.code?.toString() || 'META_API_ERROR';
+                if (details) {
+                    console.error(`[Meta ${errCode}] ${details}`);
+                }
                 // Meta didn't accept it, so it shouldn't count against the day's quota.
                 await releaseSendSlot(app.prisma, phoneNumberId);
                 slotReserved = false;

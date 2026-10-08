@@ -1,5 +1,5 @@
 /**
- * Credit Service — WhatsApp Business API Cost Management
+ * Credit Service â€” WhatsApp Business API Cost Management
  *
  * Rates match exact Meta WhatsApp Business Platform pricing
  * Source: https://developers.facebook.com/documentation/business-messaging/whatsapp/pricing
@@ -62,8 +62,18 @@ export declare function getRateCredits(country: string, category: MessageCategor
  */
 export declare function getRateUsd(country: string, category: MessageCategory): number;
 /**
- * Convert credits to USD
- * 10,000 credits = $1.00
+ * How many credits one dollar buys.
+ *
+ * This was a hardcoded 10,000 in two directions, which made the peg the one
+ * pricing decision that could not be changed without a deploy — and it is the
+ * decision that determines whether a credit pack and the rate card agree with
+ * each other. Held in the same cache as the rates and refreshed with them, so
+ * conversion stays synchronous for the thirty-odd call sites that rely on it.
+ */
+export declare const DEFAULT_CREDITS_PER_USD = 10000;
+export declare function getCreditsPerUsd(): number;
+/**
+ * Convert credits to USD at the configured peg.
  */
 export declare function creditsToUsd(credits: number): number;
 /**
@@ -103,11 +113,11 @@ export declare function maybeAutoRecharge(prisma: PrismaClient, tenantId: string
  * batch dispatched in parallel then opened that many transactions at once and
  * exhausted the pool, which capped safe concurrency at about three sends and
  * made bulk campaigns unusably slow. One reservation per batch removes that
- * ceiling entirely — the transaction count stops scaling with recipients.
+ * ceiling entirely â€” the transaction count stops scaling with recipients.
  *
  * Partial reservation is deliberate: a tenant with enough credits for 800 of
  * 1,000 recipients gets 800 messages sent and a clear shortfall, rather than the
- * whole campaign refused or — worse — 800 sent free because each per-message
+ * whole campaign refused or â€” worse â€” 800 sent free because each per-message
  * check was ignored.
  */
 export declare function reserveCreditsForBatch(prisma: PrismaClient, tenantId: string, unitCosts: number[], referenceId: string, description?: string): Promise<{
@@ -117,13 +127,13 @@ export declare function reserveCreditsForBatch(prisma: PrismaClient, tenantId: s
     balanceAfter: number;
 }>;
 /**
- * Returns the unused part of a batch reservation — the recipients Meta refused.
+ * Returns the unused part of a batch reservation â€” the recipients Meta refused.
  * One transaction for the batch, matching how the credits were taken.
  */
 export declare function releaseUnusedReservation(prisma: PrismaClient, tenantId: string, amount: number, referenceId: string, description?: string): Promise<void>;
 /**
  * Returns credits charged for a message the provider then refused. Named
- * separately from addCredits so the ledger reads honestly — a refund is not a
+ * separately from addCredits so the ledger reads honestly â€” a refund is not a
  * purchase, and the two should be distinguishable when reconciling.
  */
 export declare function refundCredits(prisma: PrismaClient, tenantId: string, amount: number, referenceId?: string, _referenceType?: string, description?: string): Promise<{
@@ -152,7 +162,7 @@ export declare function recordMessageCredit(prisma: PrismaClient, data: {
  * Default markup applied when seeding a country for the first time.
  *
  * 1.0 would mean reselling at exactly Meta's price and earning nothing on
- * messages. 1.30 is a starting point, not a recommendation — the whole purpose
+ * messages. 1.30 is a starting point, not a recommendation â€” the whole purpose
  * of moving rates into the database is that this becomes the operator's call,
  * per country and category, from the panel.
  */
@@ -169,9 +179,4 @@ export declare function seedCreditRates(prisma: PrismaClient, markup?: number): 
  * Get all available country codes
  */
 export declare function getAvailableCountries(): string[];
-/**
- * Detect country from phone number
- * Returns country code or 'US' as fallback
- */
-export declare function detectCountryFromPhone(phoneNumber: string): string;
 //# sourceMappingURL=creditService.d.ts.map

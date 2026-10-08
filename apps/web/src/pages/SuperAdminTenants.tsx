@@ -138,7 +138,7 @@ export default function SuperAdminTenantsPage() {
           <select
             value={status}
             onChange={(e) => setStatus(e.target.value)}
-            className="input-apple text-sm"
+            className="input-apple text-sm sm:w-40"
           >
             <option value="">All Status</option>
             <option value="ACTIVE">Active</option>

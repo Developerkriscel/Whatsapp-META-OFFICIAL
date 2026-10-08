@@ -1,9 +1,28 @@
 // TENANT ROUTES -- Dashboard, Contacts, Conversations, Messages, Campaigns, etc.
 import { z } from 'zod';
-import { syncTemplatesFromMeta, submitTemplateToMeta, fetchMetaTemplates, resolveEffectiveWabaId } from '../services/metaTemplate.js';
+import { syncTemplatesFromMeta, submitTemplateToMeta, fetchMetaTemplates, resolveEffectiveWabaId, uploadTemplateHeaderSample } from '../services/metaTemplate.js';
 import { decryptSecret } from '../services/credentialEncryption.js';
 import { detectCountryFromPhone } from '../services/phoneCountry.js';
 import { checkTemplateContent, getAISuggestion } from '../services/aiAssist.js';
+import { broadcastToTenant } from './sse.js';
+import { mediaHeaderFromId } from '../services/metaMedia.js';
+/**
+ * Confirms every id in `ids` belongs to `tenantId` for the given model.
+ *
+ * Scoping the record you fetch by id is not enough on its own: a foreign key
+ * that arrives in a request *body* is just as much a handle on someone else's
+ * row. A campaign, for instance, is created inside the caller's own tenant --
+ * but nothing stopped it from carrying another tenant's phoneNumberId, and the
+ * send path then dispatched from that tenant's WhatsApp number using their
+ * access token. Every body-supplied FK goes through here first.
+ */
+async function assertTenantOwns(prisma, model, ids, tenantId) {
+    const wanted = [...new Set(ids.filter((id) => !!id))];
+    if (wanted.length === 0)
+        return true;
+    const found = await prisma[model].count({ where: { id: { in: wanted }, tenantId } });
+    return found === wanted.length;
+}
 /**
  * Turns a segment's saved conditions + match type into a live Prisma Contact where-clause.
  * Segments are evaluated live (not materialized) so campaigns always see current data
@@ -79,6 +98,47 @@ const paginationSchema = z.object({
     sort: z.string().default('createdAt'),
     order: z.enum(['asc', 'desc']).default('desc'),
 });
+/** Columns the contact picker is allowed to sort by. Free-text sort would let a
+ *  caller order by any column Prisma knows about, including ones we do not
+ *  expose. */
+const CONTACT_SORT_FIELDS = ['name', 'phone', 'country', 'consentStatus', 'createdAt', 'company', 'email'];
+const contactFilterSchema = z.object({
+    page: z.coerce.number().min(1).default(1),
+    limit: z.coerce.number().min(1).max(100).default(20),
+    sort: z.enum(CONTACT_SORT_FIELDS).default('createdAt'),
+    order: z.enum(['asc', 'desc']).default('desc'),
+    search: z.string().optional(),
+    consentStatus: z.enum(['OPTED_IN', 'OPTED_OUT', 'UNKNOWN']).optional(),
+    country: z.string().optional(),
+    tag: z.string().optional(),
+});
+/**
+ * The one place contact filtering is defined.
+ *
+ * The picker's table and its "select everything that matches" action have to
+ * agree exactly. If they each built their own where-clause, a filter handled by
+ * one and not the other would silently select a different set of people than
+ * the table is showing -- and the user would only find out after the campaign
+ * had gone out.
+ */
+function buildContactWhere(tenantId, f) {
+    const where = { tenantId, isActive: true };
+    if (f.search) {
+        where.OR = [
+            { name: { contains: f.search, mode: 'insensitive' } },
+            { phone: { contains: f.search, mode: 'insensitive' } },
+            { email: { contains: f.search, mode: 'insensitive' } },
+            { company: { contains: f.search, mode: 'insensitive' } },
+        ];
+    }
+    if (f.consentStatus)
+        where.consentStatus = f.consentStatus;
+    if (f.country)
+        where.country = f.country;
+    if (f.tag)
+        where.tags = { some: { tag: { name: f.tag } } };
+    return where;
+}
 /**
  * Register tenant routes
  */
@@ -122,6 +182,203 @@ export async function registerTenantRoutes(app) {
     // DASHBOARD
     // ============================================
     // Main dashboard overview endpoint (alias)
+    /**
+     * GET /settings/currency — the platform's reporting currency and FX rate.
+     *
+     * Readable by any signed-in user because every page that shows money needs
+     * it. Previously each page carried its own conversion table, which is how
+     * CreditsPage ended up converting at 83.85 while the rate card used 88.5:
+     * the same spend rendered differently depending on which screen you were on.
+     */
+    /**
+     * GET /credit-packages — what a tenant can actually buy, priced from the
+     * database with the fee breakdown itemised.
+     *
+     * The Credits page used to carry its own pack list and its own fee formula,
+     * both hardcoded, and priced credits at 11x the rate the billing engine
+     * consumes them at. Packs, fees and the messages-per-pack figure now all come
+     * from the same tables that do the billing.
+     */
+    app.get('/credit-packages', async (request, reply) => {
+        if (!request.authUser.tenantId) {
+            return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
+        }
+        const tenant = await app.prisma.tenant.findUnique({
+            where: { id: request.authUser.tenantId },
+            select: { defaultCountry: true },
+        });
+        const country = tenant?.defaultCountry || 'IN';
+        const packages = await app.prisma.creditPackage.findMany({
+            where: { isActive: true },
+            orderBy: { sortOrder: 'asc' },
+        });
+        const { quotePackage } = await import('../services/pricing.js');
+        const priced = await Promise.all(packages.map(async (p) => {
+            const q = await quotePackage(app.prisma, p, country);
+            return {
+                id: p.id,
+                name: p.name,
+                description: p.description,
+                credits: p.credits,
+                isPopular: p.isPopular,
+                currency: q.currency,
+                baseMinor: q.baseMinor,
+                totalMinor: q.totalMinor,
+                // Only what the operator chose to itemise for the buyer.
+                fees: q.fees.filter((f) => f.visible),
+                messages: q.messages,
+                perMessageMinor: q.perMessageMinor,
+            };
+        }));
+        return { success: true, data: { country, packages: priced } };
+    });
+    /**
+     * GET /billing/summary — the whole Credits page in one call, in rupees.
+     *
+     * The page used to assemble this itself from four endpoints plus a hardcoded
+     * table of Meta's USD prices and its own exchange rate, which is how it ended
+     * up disagreeing with the rate card that does the actual billing. Everything
+     * here comes from the same tables and the same margin the send path uses.
+     *
+     * What a tenant pays is theirs to see; how it splits between Meta's charge
+     * and our margin is not. Those figures are deliberately absent from this
+     * response rather than merely hidden by the page -- a column the browser
+     * never renders is still a number in the network tab. The full split stays
+     * on the superadmin side.
+     */
+    app.get('/billing/summary', async (request, reply) => {
+        const tenantId = request.authUser.tenantId;
+        if (!tenantId) {
+            return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
+        }
+        const { priceMessage, toRupees, metaCostPaise } = await import('../services/billing.js');
+        const tenant = await app.prisma.tenant.findUnique({
+            where: { id: tenantId },
+            select: { defaultCountry: true },
+        });
+        const country = tenant?.defaultCountry || 'IN';
+        const account = await app.prisma.tenantCredit.findUnique({ where: { tenantId } });
+        const balancePaise = account?.balance ?? 0;
+        // What has actually been earned: holds that were taken and never returned.
+        // A refunded hold is money that went back, so counting it as revenue would
+        // bill for messages nobody received — the exact thing delivery settlement
+        // exists to prevent.
+        // A period, because a bill is always for a period. Defaults to this
+        // calendar month, which is how Meta itself bills.
+        const q = z.object({ period: z.enum(['month', 'all']).default('month') }).parse(request.query || {});
+        const monthStart = new Date();
+        monthStart.setDate(1);
+        monthStart.setHours(0, 0, 0, 0);
+        const periodWhere = q.period === 'month' ? { createdAt: { gte: monthStart } } : {};
+        const [settled, refunded, byCategory] = await Promise.all([
+            app.prisma.messageCredit.aggregate({
+                where: { tenantId, refunded: false, ...periodWhere },
+                _sum: { cost: true },
+                _count: { _all: true },
+            }),
+            app.prisma.messageCredit.aggregate({
+                where: { tenantId, refunded: true, ...periodWhere },
+                _sum: { refundAmount: true },
+                _count: { _all: true },
+            }),
+            // Grouped by country as well as category: what Meta charged depends on
+            // both, so summing a category across countries and pricing it at one
+            // country's rate would misstate the cost side of the bill.
+            app.prisma.messageCredit.groupBy({
+                by: ['category', 'countryCode'],
+                where: { tenantId, refunded: false, ...periodWhere },
+                _sum: { cost: true },
+                _count: { _all: true },
+            }),
+        ]);
+        const toppedUp = await app.prisma.tenantCreditTransaction.aggregate({
+            where: { credit: { tenantId }, type: { in: ['PURCHASE', 'BONUS', 'ADJUSTMENT'] }, amount: { gt: 0 } },
+            _sum: { amount: true },
+        });
+        const rates = ['MARKETING', 'UTILITY', 'AUTHENTICATION'].map((c) => {
+            const pr = priceMessage(country, c);
+            return {
+                category: c,
+                yourPrice: toRupees(pr.chargePaise),
+                chargePaise: pr.chargePaise,
+            };
+        });
+        // The bill, itemised the way Meta itemises it: one line per message
+        // category, with what Meta charged and what we added kept separate.
+        const lines = new Map();
+        for (const row of byCategory) {
+            const cat = String(row.category || 'UTILITY').toUpperCase();
+            const line = lines.get(cat) || { category: cat, messages: 0, metaPaise: 0, billedPaise: 0 };
+            line.messages += row._count._all;
+            line.billedPaise += row._sum.cost ?? 0;
+            // Meta's side is priced from the rate for the country those messages
+            // actually went to, not the tenant's default.
+            line.metaPaise += row._count._all * metaCostPaise(row.countryCode, cat);
+            lines.set(cat, line);
+        }
+        const ORDER = ['MARKETING', 'UTILITY', 'AUTHENTICATION', 'SESSION'];
+        const breakdown = ORDER
+            .filter((c) => lines.has(c))
+            .map((c) => {
+            const l = lines.get(c);
+            return {
+                category: c,
+                messages: l.messages,
+                total: toRupees(l.billedPaise),
+            };
+        });
+        const marketing = rates.find((r) => r.category === 'MARKETING');
+        const utility = rates.find((r) => r.category === 'UTILITY');
+        return {
+            success: true,
+            data: {
+                country,
+                currency: 'INR',
+                symbol: '₹',
+                balance: toRupees(balancePaise),
+                balancePaise,
+                toppedUp: toRupees(toppedUp._sum.amount ?? 0),
+                // The bill: delivered messages only.
+                billed: toRupees(settled._sum.cost ?? 0),
+                billedMessages: settled._count._all,
+                refunded: toRupees(refunded._sum.refundAmount ?? 0),
+                refundedMessages: refunded._count._all,
+                period: q.period,
+                periodLabel: q.period === 'month'
+                    ? monthStart.toLocaleDateString('en-IN', { month: 'long', year: 'numeric' })
+                    : 'All time',
+                breakdown,
+                rates,
+                // Range rather than an average: the two categories differ by an order
+                // of magnitude, so a single "messages remaining" number would be wrong
+                // for whichever kind the tenant actually sends.
+                canSend: {
+                    marketing: marketing.chargePaise > 0 ? Math.floor(balancePaise / marketing.chargePaise) : 0,
+                    utility: utility.chargePaise > 0 ? Math.floor(balancePaise / utility.chargePaise) : 0,
+                },
+            },
+        };
+    });
+    app.get('/settings/currency', async (_request, _reply) => {
+        const { getCurrencyContext } = await import('../services/currency.js');
+        const { getCreditsPerUsd } = await import('../services/creditService.js');
+        const fx = await getCurrencyContext(app.prisma);
+        // The peg was hardcoded here at 10,000, so every credits-to-money figure in
+        // the web app ignored the configured value entirely -- the superadmin panel
+        // could change the peg and no page that spent credits would agree with it.
+        const creditsPerUsd = getCreditsPerUsd();
+        return {
+            success: true,
+            data: {
+                ...fx,
+                creditsPerUsd,
+                // What one credit is worth in the reporting currency. Sent so the web
+                // app can price a balance without dividing by a dollar peg and
+                // multiplying by an exchange rate to get back to rupees.
+                creditWorth: creditsPerUsd > 0 ? fx.fxRate / creditsPerUsd : 0,
+            },
+        };
+    });
     app.get('/dashboard/overview', async (request, reply) => {
         const tenantId = request.authUser.tenantId;
         if (!tenantId) {
@@ -147,9 +404,14 @@ export async function registerTenantRoutes(app) {
             where: { tenantId, direction: 'OUTGOING', createdAt: { gte: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) } },
             _count: true,
         });
+        // status is terminal, not cumulative: a message that was read is READ, not
+        // DELIVERED. Counting only DELIVERED excluded every message that had been
+        // read, which is why the dashboard could show a read rate higher than its
+        // delivery rate — impossible, since reading requires delivery.
+        const countOf = (...wanted) => messageStats.filter((m) => wanted.includes(m.status)).reduce((n, m) => n + m._count, 0);
         const totalSent = messageStats.reduce((sum, s) => sum + s._count, 0);
-        const delivered = messageStats.find(s => s.status === 'DELIVERED')?._count || 0;
-        const read = messageStats.find(s => s.status === 'READ')?._count || 0;
+        const delivered = countOf('DELIVERED', 'READ');
+        const read = countOf('READ');
         return {
             success: true,
             data: {
@@ -160,6 +422,117 @@ export async function registerTenantRoutes(app) {
                 activeAgents,
                 deliveryRate: totalSent > 0 ? Math.round((delivered / totalSent) * 100) : 0,
                 readRate: delivered > 0 ? Math.round((read / delivered) * 100) : 0,
+            },
+        };
+    });
+    /**
+     * GET /dashboard/messaging — delivery funnel and real spend, in money.
+     *
+     * The overview reports counts and percentages, which say nothing about what
+     * the messaging cost. Everything the tenant sees elsewhere is denominated in
+     * credits, an internal unit that has to be mentally divided by 10,000 to mean
+     * anything. This reports actual currency, from what Meta said it billed.
+     *
+     * Spend covers only messages Meta has reported on. A message still in flight
+     * has no cost yet, and guessing one would misstate the number.
+     */
+    app.get('/dashboard/messaging', async (request, reply) => {
+        const tenantId = request.authUser.tenantId;
+        if (!tenantId) {
+            return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
+        }
+        const { days } = z.object({ days: z.coerce.number().min(1).max(365).default(30) })
+            .parse(request.query ?? {});
+        const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+        const where = { tenantId, direction: 'OUTGOING', createdAt: { gte: since } };
+        const { getCurrencyContext, toMoney, toUnitMoney } = await import('../services/currency.js');
+        const fx = await getCurrencyContext(app.prisma);
+        const [byStatus, costed, byCategory, inbound] = await Promise.all([
+            app.prisma.message.groupBy({ by: ['status'], where, _count: true }),
+            app.prisma.message.aggregate({
+                where: { ...where, metaCostUsd: { not: null } },
+                _sum: { metaCostUsd: true, platformCostUsd: true },
+                _count: true,
+            }),
+            app.prisma.message.groupBy({
+                by: ['metaCategory'],
+                where: { ...where, metaCategory: { not: null } },
+                _count: true,
+                _sum: { metaCostUsd: true, platformCostUsd: true },
+            }),
+            app.prisma.message.count({ where: { tenantId, direction: 'INCOMING', createdAt: { gte: since } } }),
+        ]);
+        const countOf = (...wanted) => byStatus.filter((m) => wanted.includes(m.status)).reduce((n, m) => n + m._count, 0);
+        const total = byStatus.reduce((n, m) => n + m._count, 0);
+        // Cumulative funnel: each stage implies the ones before it.
+        const sent = countOf('SENT', 'DELIVERED', 'READ');
+        const delivered = countOf('DELIVERED', 'READ');
+        const read = countOf('READ');
+        const failed = countOf('FAILED');
+        const pending = countOf('PENDING', 'QUEUED');
+        const num = (v) => (v == null ? 0 : Number(v));
+        const metaSpend = num(costed._sum.metaCostUsd);
+        const charged = num(costed._sum.platformCostUsd);
+        const priced = costed._count;
+        const freeCount = await app.prisma.message.count({ where: { ...where, metaBillable: false } });
+        // Spend by recipient country. Meta's rate is per country, so this is where
+        // an expensive audience actually shows up — an identical campaign to two
+        // countries can differ several-fold in cost.
+        const costedRows = await app.prisma.message.findMany({
+            where: { ...where, metaCostUsd: { not: null } },
+            select: { metaCostUsd: true, platformCostUsd: true, contact: { select: { country: true } } },
+        });
+        const perCountry = new Map();
+        for (const r of costedRows) {
+            const key = r.contact?.country || 'unknown';
+            const cur = perCountry.get(key) || { messages: 0, meta: 0, charged: 0 };
+            cur.messages++;
+            cur.meta += num(r.metaCostUsd);
+            cur.charged += num(r.platformCostUsd);
+            perCountry.set(key, cur);
+        }
+        const pct = (a, b) => (b > 0 ? Math.round((a / b) * 1000) / 10 : 0);
+        return {
+            success: true,
+            data: {
+                windowDays: days,
+                currency: {
+                    code: fx.currency, symbol: fx.symbol,
+                    // Amounts are held in USD and converted for display, so the rate used
+                    // travels with the numbers rather than being invisible.
+                    fxRateFromUsd: fx.fxRate, fxSource: fx.fxSource, fxUpdatedAt: fx.fxUpdatedAt,
+                },
+                funnel: {
+                    total, sent, delivered, read, failed, pending, inbound,
+                    deliveryRate: pct(delivered, sent),
+                    readRate: pct(read, delivered),
+                    failureRate: pct(failed, total),
+                },
+                // What the tenant paid, not how it splits. metaCost, margin and
+                // marginPct used to ride along here as well, which handed every tenant
+                // our cost base and markup in a response their own dashboard fetches.
+                spend: {
+                    charged: toMoney(charged, fx), // what the tenant paid
+                    avgPerMessage: toUnitMoney(priced > 0 ? charged / priced : 0, fx),
+                    freeMessages: freeCount,
+                    // Costing covers only what Meta has reported on. Stating the gap keeps
+                    // this a floor rather than something that looks like total spend.
+                    pricedMessages: priced,
+                    awaitingPricing: Math.max(0, total - priced),
+                },
+                byCategory: byCategory.map((c) => ({
+                    category: c.metaCategory,
+                    messages: c._count,
+                    charged: toMoney(num(c._sum.platformCostUsd), fx),
+                })),
+                byCountry: [...perCountry.entries()]
+                    .map(([country, v]) => ({
+                    country,
+                    messages: v.messages,
+                    charged: toMoney(v.charged, fx),
+                    avgPerMessage: toUnitMoney(v.messages > 0 ? v.charged / v.messages : 0, fx),
+                }))
+                    .sort((a, b) => b.charged.usd - a.charged.usd),
             },
         };
     });
@@ -188,9 +561,14 @@ export async function registerTenantRoutes(app) {
             where: { tenantId, direction: 'OUTGOING', createdAt: { gte: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) } },
             _count: true,
         });
+        // status is terminal, not cumulative: a message that was read is READ, not
+        // DELIVERED. Counting only DELIVERED excluded every message that had been
+        // read, which is why the dashboard could show a read rate higher than its
+        // delivery rate — impossible, since reading requires delivery.
+        const countOf = (...wanted) => messageStats.filter((m) => wanted.includes(m.status)).reduce((n, m) => n + m._count, 0);
         const totalSent = messageStats.reduce((sum, s) => sum + s._count, 0);
-        const delivered = messageStats.find(s => s.status === 'DELIVERED')?._count || 0;
-        const read = messageStats.find(s => s.status === 'READ')?._count || 0;
+        const delivered = countOf('DELIVERED', 'READ');
+        const read = countOf('READ');
         return {
             success: true,
             data: {
@@ -315,20 +693,10 @@ export async function registerTenantRoutes(app) {
         if (!request.authUser.tenantId) {
             return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
         }
-        const query = paginationSchema.extend({
-            search: z.string().optional(),
-        }).parse(request.query);
-        const { page, limit, sort, order, search } = query;
+        const query = contactFilterSchema.parse(request.query);
+        const { page, limit, sort, order } = query;
         const skip = (page - 1) * limit;
-        const where = { tenantId: request.authUser.tenantId, isActive: true };
-        if (search) {
-            where.OR = [
-                { name: { contains: search, mode: 'insensitive' } },
-                { phone: { contains: search, mode: 'insensitive' } },
-                { email: { contains: search, mode: 'insensitive' } },
-                { company: { contains: search, mode: 'insensitive' } },
-            ];
-        }
+        const where = buildContactWhere(request.authUser.tenantId, query);
         const [contacts, total] = await Promise.all([
             app.prisma.contact.findMany({
                 where,
@@ -346,6 +714,85 @@ export async function registerTenantRoutes(app) {
                 tags: c.tags.map(t => t.tag.name),
             })),
             meta: { page, limit, total, totalPages: Math.ceil(total / limit) },
+        };
+    });
+    /**
+     * GET /contacts/select-ids — resolve a filter into an ordered list of ids.
+     *
+     * The picker shows one page at a time, but "select all 370 matching" and
+     * "select the first 250" need the ids the user cannot see. Returning ids only
+     * keeps that cheap: the full rows stay paginated.
+     *
+     * Order matters here. "First 250" means first in the order on screen, so this
+     * takes the same sort the table is using.
+     */
+    app.get('/contacts/select-ids', async (request, reply) => {
+        if (!request.authUser.tenantId) {
+            return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
+        }
+        const query = contactFilterSchema.extend({
+            // How many ids to return. Distinct from the table's page size.
+            take: z.coerce.number().min(1).max(20000).optional(),
+        }).parse(request.query);
+        const where = buildContactWhere(request.authUser.tenantId, query);
+        const [ids, total] = await Promise.all([
+            app.prisma.contact.findMany({
+                where,
+                orderBy: { [query.sort]: query.order },
+                take: query.take ?? 20000,
+                select: { id: true },
+            }),
+            app.prisma.contact.count({ where }),
+        ]);
+        return {
+            success: true,
+            data: {
+                ids: ids.map((c) => c.id),
+                returned: ids.length,
+                total,
+                // True when the cap cut the list short, so the UI can say so rather
+                // than quietly selecting fewer people than the user asked for.
+                truncated: ids.length < total,
+            },
+        };
+    });
+    /**
+     * GET /contacts/filter-options — the distinct values worth filtering on.
+     * Populates the picker's country and tag dropdowns with what this tenant
+     * actually has, rather than a hardcoded list.
+     */
+    app.get('/contacts/filter-options', async (request, reply) => {
+        if (!request.authUser.tenantId) {
+            return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
+        }
+        const tenantId = request.authUser.tenantId;
+        const [countries, tags, consent] = await Promise.all([
+            app.prisma.contact.groupBy({
+                by: ['country'],
+                where: { tenantId, isActive: true },
+                _count: { country: true },
+                orderBy: { _count: { country: 'desc' } },
+            }),
+            app.prisma.tag.findMany({
+                where: { tenantId },
+                select: { name: true },
+                orderBy: { name: 'asc' },
+            }),
+            app.prisma.contact.groupBy({
+                by: ['consentStatus'],
+                where: { tenantId, isActive: true },
+                _count: { consentStatus: true },
+            }),
+        ]);
+        return {
+            success: true,
+            data: {
+                countries: countries
+                    .filter((c) => c.country)
+                    .map((c) => ({ value: c.country, count: c._count.country })),
+                tags: tags.map((t) => t.name),
+                consentStatus: consent.map((c) => ({ value: c.consentStatus, count: c._count.consentStatus })),
+            },
         };
     });
     app.post('/contacts', { preHandler: [app.requirePermission('contacts', 'create')] }, async (request, reply) => {
@@ -371,6 +818,35 @@ export async function registerTenantRoutes(app) {
                 phone: normalizedPhone,
             },
         });
+        // A deleted contact is not a duplicate the person can do anything about.
+        // Deleting is a soft delete -- the row stays with isActive false -- and the
+        // contact list filters on isActive, so the blocking record is invisible.
+        // Someone who deleted a contact and then tried to add it again was told it
+        // already exists while looking at a list that plainly did not contain it,
+        // with no way to reach it and nothing to undo.
+        //
+        // Adding a contact that only a deleted row stands in the way of simply
+        // restores that row, with whatever details were just supplied. The history
+        // attached to it -- conversations, messages, campaign results -- comes back
+        // with it, which is better than the alternative of a second row carrying
+        // the same number.
+        if (existingContact && !existingContact.isActive) {
+            const restored = await app.prisma.contact.update({
+                where: { id: existingContact.id },
+                data: {
+                    isActive: true,
+                    name: rest.name ?? existingContact.name,
+                    email: email ?? existingContact.email,
+                    company: rest.company ?? existingContact.company,
+                    country: rest.country ?? existingContact.country,
+                },
+            });
+            return reply.status(200).send({
+                success: true,
+                data: restored,
+                meta: { restored: true, message: 'This contact had been deleted and has been restored.' },
+            });
+        }
         if (existingContact) {
             return reply.status(409).send({
                 success: false,
@@ -503,7 +979,10 @@ export async function registerTenantRoutes(app) {
         const phones = contacts.map((c) => c.phone);
         const existing = await app.prisma.contact.findMany({
             where: { tenantId, phone: { in: phones } },
-            select: { id: true, phone: true, name: true, email: true, company: true },
+            // isActive matters here: a soft-deleted row still matches by phone, but
+            // it is invisible in the contact list, so treating it as an existing
+            // contact means an import silently does nothing a user can see.
+            select: { id: true, phone: true, name: true, email: true, company: true, isActive: true },
         });
         const existingByPhone = new Map(existing.map((e) => [e.phone, e]));
         // Duplicates inside the file itself would otherwise race each other and
@@ -513,6 +992,30 @@ export async function registerTenantRoutes(app) {
         for (const contact of contacts) {
             const prior = existingByPhone.get(contact.phone);
             if (prior) {
+                // A previously deleted contact is restored in either mode. SKIP means
+                // "leave contacts I already have alone", and a row the list does not
+                // show is not one the person has -- skipping it would make the import
+                // report success while the number stayed missing. Counted as created,
+                // because that is what it is from the outside: a contact that was not
+                // there and now is.
+                if (!prior.isActive) {
+                    try {
+                        await app.prisma.contact.update({
+                            where: { id: prior.id },
+                            data: {
+                                isActive: true,
+                                name: contact.name || prior.name,
+                                email: contact.email || prior.email,
+                                company: contact.company || prior.company,
+                            },
+                        });
+                        results.created++;
+                    }
+                    catch (err) {
+                        results.errors.push(`Could not restore ${contact.phone}: ${err.message}`);
+                    }
+                    continue;
+                }
                 if (duplicateHandling === 'SKIP') {
                     results.skipped++;
                     continue;
@@ -805,7 +1308,7 @@ export async function registerTenantRoutes(app) {
             return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
         }
         const query = paginationSchema.extend({
-            filter: z.enum(['all', 'open', 'closed', 'pending', 'mine', 'bot']).optional(),
+            filter: z.enum(['all', 'open', 'closed', 'pending', 'mine', 'bot', 'unread']).optional(),
             search: z.string().optional(),
         }).parse(request.query);
         const { page, limit, sort, order, filter, search } = query;
@@ -825,6 +1328,13 @@ export async function registerTenantRoutes(app) {
         }
         else if (filter === 'bot') {
             where.isBotActive = true;
+        }
+        else if (filter === 'unread') {
+            // Anything a customer has said that nobody has opened yet. Closed threads
+            // are excluded: a closed conversation with a stale unread count is not
+            // something anyone still needs to answer.
+            where.unreadCount = { gt: 0 };
+            where.status = { not: 'CLOSED' };
         }
         if (search) {
             where.contact = {
@@ -862,6 +1372,58 @@ export async function registerTenantRoutes(app) {
                 messages: undefined,
             })),
             meta: { page, limit, total, totalPages: Math.ceil(total / limit) },
+        };
+    });
+    /**
+     * POST /conversations/:conversationId/read
+     *
+     * Clears the unread counter for one thread. Nothing did this before: the
+     * webhook incremented conversation.unreadCount on every inbound message and
+     * no code path ever brought it back down, so the Unread tab and the bell
+     * accumulated forever. POST /messages/:messageId/read exists but only ever
+     * touched the message row — it never went near the conversation counter, and
+     * the web app never called it.
+     */
+    app.post('/conversations/:conversationId/read', async (request, reply) => {
+        const { conversationId } = z.object({ conversationId: z.string() }).parse(request.params);
+        const tenantId = request.authUser.tenantId;
+        if (!tenantId) {
+            return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
+        }
+        // findFirst with the tenant in the filter, not findUnique by id — the id
+        // comes from the caller, and a bare lookup would read another tenant's row.
+        const conversation = await app.prisma.conversation.findFirst({
+            where: { id: conversationId, tenantId },
+            select: { id: true },
+        });
+        if (!conversation) {
+            return reply.status(404).send({
+                success: false,
+                error: { code: 'CONVERSATION_NOT_FOUND', message: 'Conversation not found' },
+            });
+        }
+        const [, marked] = await app.prisma.$transaction([
+            app.prisma.conversation.update({
+                where: { id: conversationId },
+                data: { unreadCount: 0 },
+            }),
+            // readAt is what tells a later audit which inbound messages a human
+            // actually opened. Only incoming ones: an outgoing message being "read"
+            // is the recipient's act, reported by Meta on the status webhook.
+            app.prisma.message.updateMany({
+                where: { conversationId, tenantId, direction: 'INCOMING', readAt: null },
+                data: { readAt: new Date() },
+            }),
+        ]);
+        // Same event and shape the webhook broadcasts, so an open tab's badge
+        // drops without waiting for the next poll.
+        const unreadConversations = await app.prisma.conversation.count({
+            where: { tenantId, status: { not: 'CLOSED' }, unreadCount: { gt: 0 } },
+        });
+        broadcastToTenant(tenantId, { event: 'unread_count', data: { count: unreadConversations } });
+        return {
+            success: true,
+            data: { conversationId, messagesMarkedRead: marked.count, unreadConversations },
         };
     });
     app.get('/conversations/:conversationId', async (request, reply) => {
@@ -911,6 +1473,12 @@ export async function registerTenantRoutes(app) {
             assignedToId: z.string().optional(),
             isBotActive: z.boolean().optional(),
         }).parse(request.body);
+        if (!(await assertTenantOwns(app.prisma, 'user', [body.assignedToId], request.authUser.tenantId))) {
+            return reply.status(404).send({
+                success: false,
+                error: { code: 'NOT_FOUND', message: 'Assignee not found' },
+            });
+        }
         const conversation = await app.prisma.conversation.update({
             where: { id: conversationId, tenantId: request.authUser.tenantId },
             data: body,
@@ -931,6 +1499,18 @@ export async function registerTenantRoutes(app) {
             userId: z.string().optional(),
             teamId: z.string().optional(),
         }).parse(request.body);
+        // An assignee from another tenant would surface that person's name through
+        // the assignedTo/assignedTeam includes below.
+        const ownsAssignees = await Promise.all([
+            assertTenantOwns(app.prisma, 'user', [userId], request.authUser.tenantId),
+            assertTenantOwns(app.prisma, 'team', [teamId], request.authUser.tenantId),
+        ]);
+        if (ownsAssignees.some((ok) => !ok)) {
+            return reply.status(404).send({
+                success: false,
+                error: { code: 'NOT_FOUND', message: 'Assignee not found' },
+            });
+        }
         const updateData = { status: 'OPEN' };
         if (userId)
             updateData.assignedToId = userId;
@@ -1031,12 +1611,33 @@ export async function registerTenantRoutes(app) {
             phone: z.string().optional(),
             body: z.string().optional(),
             message: z.string().optional(),
-            type: z.enum(['text', 'template']).default('text'),
+            type: z.enum(['text', 'template', 'media']).default('text'),
+            // An attachment sent inside the 24-hour service window. Meta fetches the
+            // URL itself, so it has to be publicly reachable — the upload endpoint
+            // returns exactly such a URL.
+            mediaUrl: z.string().url().optional(),
+            mediaKind: z.enum(['image', 'video', 'document', 'audio']).optional(),
+            mediaFilename: z.string().optional(),
         });
         const parsed = schema.parse(request.body);
         let contactId = parsed.contactId;
         let phoneNumberId = parsed.phoneNumberId;
         const messageText = parsed.body || parsed.message || '';
+        const isMedia = parsed.type === 'media';
+        if (isMedia && (!parsed.mediaUrl || !parsed.mediaKind)) {
+            return reply.status(400).send({
+                success: false,
+                error: { code: 'MEDIA_REQUIRED', message: 'An attachment needs both a media URL and its kind.' },
+            });
+        }
+        // A text message with no text is nothing; an attachment may legitimately
+        // carry no caption.
+        if (!isMedia && !messageText.trim()) {
+            return reply.status(400).send({
+                success: false,
+                error: { code: 'EMPTY_MESSAGE', message: 'Message text is required.' },
+            });
+        }
         // Auto-resolve contactId by phone if not explicitly provided
         if (!contactId && parsed.phone) {
             let contactObj = await app.prisma.contact.findFirst({
@@ -1120,20 +1721,25 @@ export async function registerTenantRoutes(app) {
             body: messageText,
             type: parsed.type,
         };
-        const countryCode = contact?.country || 'US';
+        // Default to the home market, not the US -- an unknown country was being
+        // priced at US rates on an Indian platform.
+        const countryCode = contact?.country || 'IN';
         const category = 'UTILITY'; // Default for text messages (free within session window)
-        // Check and deduct credits
-        const { deductCredits, getRateCredits } = await import('../services/creditService.js');
-        const costCredits = getRateCredits(countryCode, category);
-        const creditsResult = await deductCredits(app.prisma, request.authUser.tenantId, costCredits, `message-send-${Date.now()}`, 'MESSAGE', `Message to ${countryCode}`);
+        // Hold the money for this message. The balance moves now so an empty
+        // account cannot send, but the charge is only earned once Meta reports
+        // delivery -- a terminal failure returns it (services/settlement.ts).
+        const { deductCredits } = await import('../services/creditService.js');
+        const { chargePaise, formatRupees } = await import('../services/billing.js');
+        const costPaise = chargePaise(countryCode, category);
+        const creditsResult = await deductCredits(app.prisma, request.authUser.tenantId, costPaise, `message-send-${Date.now()}`, 'MESSAGE', `Message to ${countryCode}`);
         if (!creditsResult.success) {
             return reply.status(402).send({
                 success: false,
                 error: {
-                    code: 'INSUFFICIENT_CREDITS',
-                    message: `Not enough credits. You need ${costCredits} credits to send this message. Please purchase more credits.`,
-                    required: costCredits,
-                    current: creditsResult.balanceAfter,
+                    code: 'INSUFFICIENT_BALANCE',
+                    message: `Not enough balance. This message costs ${formatRupees(costPaise)}. Please top up.`,
+                    requiredPaise: costPaise,
+                    currentPaise: creditsResult.balanceAfter,
                 },
             });
         }
@@ -1170,10 +1776,22 @@ export async function registerTenantRoutes(app) {
                 senderId: request.authUser.id,
                 phoneNumberId: body.phoneNumberId,
                 direction: 'OUTGOING',
-                type: 'TEXT',
+                // The stored type mirrors what Meta was asked to send, so the thread
+                // renders an attachment as an attachment rather than as empty text.
+                type: isMedia ? parsed.mediaKind.toUpperCase() : 'TEXT',
                 body: body.body,
+                mediaUrl: isMedia ? parsed.mediaUrl : undefined,
                 status: 'PENDING',
             },
+        });
+        // The hold has to name a message before that message can be refunded.
+        const { holdForMessage } = await import('../services/settlement.js');
+        await holdForMessage(app.prisma, {
+            tenantId: request.authUser.tenantId,
+            messageId: message.id,
+            country: countryCode,
+            category,
+            paise: costPaise,
         });
         // Fetch target contact phone for Meta dispatch
         const targetContact = await app.prisma.contact.findUnique({
@@ -1189,7 +1807,18 @@ export async function registerTenantRoutes(app) {
             contactPhone: targetContact?.phone || '',
             phoneNumberId: body.phoneNumberId,
             body: body.body || '',
-            type: 'text',
+            type: isMedia ? 'media' : 'text',
+            ...(isMedia
+                ? {
+                    media: {
+                        kind: parsed.mediaKind,
+                        link: parsed.mediaUrl,
+                        // Text typed alongside an attachment rides as its caption.
+                        caption: body.body || undefined,
+                        filename: parsed.mediaFilename,
+                    },
+                }
+                : {}),
         });
         const finalMessage = dispatchResult.data || message;
         // Update conversation
@@ -1209,8 +1838,8 @@ export async function registerTenantRoutes(app) {
             success: true,
             data: {
                 ...finalMessage,
-                creditsCost: costCredits,
-                creditsRemaining: creditsResult.balanceAfter,
+                costPaise,
+                balancePaise: creditsResult.balanceAfter,
             },
         });
     });
@@ -1331,8 +1960,66 @@ export async function registerTenantRoutes(app) {
             audienceDescription: z.string().optional(),
             existingText: z.string().optional(),
         }).parse(request.body);
-        const result = await getAISuggestion({ module: 'campaign', context: body });
+        const result = await getAISuggestion({ module: 'campaign', context: body }, app.prisma, request.authUser.tenantId);
         return { success: true, data: result };
+    });
+    /**
+     * GET /campaigns/tier-capacity — how many more unique people this number may
+     * message in the current rolling 24 hours.
+     *
+     * Until now this only surfaced as a 429 *after* the user had built the whole
+     * campaign and pressed send. The picker needs it up front so "select the
+     * first N" can mean the number Meta will actually accept.
+     *
+     * phoneNumberId is optional: early in the wizard no number has been chosen
+     * yet, and if the tenant has exactly one there is nothing to choose.
+     */
+    app.get('/campaigns/tier-capacity', async (request, reply) => {
+        if (!request.authUser.tenantId) {
+            return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
+        }
+        const tenantId = request.authUser.tenantId;
+        const { phoneNumberId } = z.object({ phoneNumberId: z.string().optional() }).parse(request.query ?? {});
+        let phone = null;
+        if (phoneNumberId) {
+            phone = await app.prisma.phoneNumber.findFirst({
+                where: { id: phoneNumberId, tenantId },
+                select: { id: true },
+            });
+            if (!phone) {
+                return reply.status(404).send({ success: false, error: { code: 'PHONE_NOT_FOUND' } });
+            }
+        }
+        else {
+            const phones = await app.prisma.phoneNumber.findMany({
+                where: { tenantId },
+                select: { id: true },
+                take: 2,
+            });
+            // Only auto-pick when there is no ambiguity. Guessing between several
+            // numbers would report headroom for one and send from another.
+            if (phones.length === 1)
+                phone = phones[0];
+        }
+        if (!phone) {
+            return {
+                success: true,
+                data: { known: false, reason: phoneNumberId ? 'NOT_FOUND' : 'PHONE_NOT_SELECTED' },
+            };
+        }
+        const { getTierUsage } = await import('../services/sendQuota.js');
+        const usage = await getTierUsage(app.prisma, phone.id);
+        return {
+            success: true,
+            data: {
+                known: true,
+                phoneNumberId: phone.id,
+                tier: usage.tier,
+                limit: usage.limit,
+                uniqueCustomers24h: usage.uniqueCustomers24h,
+                remaining: usage.remaining,
+            },
+        };
     });
     app.post('/campaigns', { preHandler: [app.requirePermission('campaigns', 'create')] }, async (request, reply) => {
         const schema = z.object({
@@ -1358,6 +2045,22 @@ export async function registerTenantRoutes(app) {
             return reply.status(400).send({
                 success: false,
                 error: { code: 'MISSING_CONTACTS', message: 'At least one contact is required for contact-based campaigns' },
+            });
+        }
+        // Every id here arrived from the client, so each one is checked against the
+        // caller's tenant before it is stored. A campaign row that references
+        // another tenant's phone number or template would otherwise send from their
+        // WhatsApp number, on their quality rating, with their access token.
+        const ownsRefs = await Promise.all([
+            assertTenantOwns(app.prisma, 'template', [body.templateId], request.authUser.tenantId),
+            assertTenantOwns(app.prisma, 'phoneNumber', [body.phoneNumberId], request.authUser.tenantId),
+            assertTenantOwns(app.prisma, 'segment', body.segmentIds || [], request.authUser.tenantId),
+            assertTenantOwns(app.prisma, 'contact', body.contactIds || [], request.authUser.tenantId),
+        ]);
+        if (ownsRefs.some((ok) => !ok)) {
+            return reply.status(404).send({
+                success: false,
+                error: { code: 'NOT_FOUND', message: 'One or more selected items could not be found' },
             });
         }
         // Calculate total recipients for tracking
@@ -1439,6 +2142,39 @@ export async function registerTenantRoutes(app) {
             return reply.status(400).send({
                 success: false,
                 error: { code: 'NO_PHONE', message: 'Campaign has no connected WhatsApp phone number' },
+            });
+        }
+        // Media can only ride on a template whose approved definition has a header
+        // to put it in. Attaching an image to a body-only template makes the send
+        // loop add a header parameter, and Meta rejects every single recipient with
+        // "(#132018) ... header: Template does not contain title component, no
+        // parameters allowed". That is how a 248-recipient campaign failed 248
+        // times for one reason nobody could see. Refuse up front instead.
+        if (campaign.mediaUrl && !campaign.template.header) {
+            return reply.status(400).send({
+                success: false,
+                error: {
+                    code: 'TEMPLATE_HAS_NO_HEADER',
+                    message: `The template "${campaign.template.name}" has no image or video header, so the attached media cannot be sent with it. Remove the media, or use a template that was approved with a media header.`,
+                },
+            });
+        }
+        // The other direction, which the first version of this check missed. A
+        // template approved WITH a media header requires that header on every
+        // send: omitting it means Meta is handed a template expecting an image and
+        // given nothing, and refuses every recipient with "expected IMAGE,
+        // received UNKNOWN". A 250-recipient campaign failed 250 times that way.
+        const templateHeader = campaign.template.header;
+        const headerFormat = String(templateHeader?.format || templateHeader?.type || '').toUpperCase();
+        const headerNeedsMedia = ['IMAGE', 'VIDEO', 'DOCUMENT'].includes(headerFormat);
+        if (headerNeedsMedia && !campaign.mediaUrl) {
+            return reply.status(400).send({
+                success: false,
+                error: {
+                    code: 'TEMPLATE_NEEDS_MEDIA',
+                    message: `The template "${campaign.template.name}" was approved with ${headerFormat === 'IMAGE' ? 'an image' : 'a ' + headerFormat.toLowerCase()} header, so every message must carry one. Attach ${headerFormat === 'IMAGE' ? 'an image' : 'a ' + headerFormat.toLowerCase()} on the Message step.`,
+                    requiredFormat: headerFormat,
+                },
             });
         }
         // Meta rejects every send attempt against a template that isn't APPROVED
@@ -1619,6 +2355,18 @@ export async function registerTenantRoutes(app) {
         if (!campaign) {
             return reply.status(404).send({ success: false, error: { code: 'NOT_FOUND' } });
         }
+        // Same rule as create: owning the campaign does not entitle you to point it
+        // at another tenant's template or phone number.
+        const patchOwnsRefs = await Promise.all([
+            assertTenantOwns(app.prisma, 'template', [body.templateId], request.authUser.tenantId),
+            assertTenantOwns(app.prisma, 'phoneNumber', [body.phoneNumberId], request.authUser.tenantId),
+        ]);
+        if (patchOwnsRefs.some((ok) => !ok)) {
+            return reply.status(404).send({
+                success: false,
+                error: { code: 'NOT_FOUND', message: 'One or more selected items could not be found' },
+            });
+        }
         const updated = await app.prisma.campaign.update({
             where: { id: campaignId },
             data: {
@@ -1727,9 +2475,10 @@ export async function registerTenantRoutes(app) {
         return { success: true, data: result };
     });
     /**
-     * POST /templates/ai-rewrite - Optional Mistral-powered rewrite targeting the
+     * POST /templates/ai-rewrite - Optional model-powered rewrite targeting the
      * compliance issues found by /templates/analyze. Returns data: null when no
-     * MISTRAL_API_KEY is configured, or when the AI call fails for any reason.
+     * AI provider is configured, or when the call fails for any reason. Which
+     * provider answers is set in Superadmin -> System -> AI.
      */
     app.post('/templates/ai-rewrite', { preHandler: [app.requirePermission('templates', 'create')] }, async (request, reply) => {
         const body = z.object({
@@ -1748,7 +2497,7 @@ export async function registerTenantRoutes(app) {
             module: 'template',
             context: { category: body.category, bodyText: body.bodyText },
             ruleIssues: body.issues,
-        });
+        }, app.prisma, request.authUser.tenantId);
         return { success: true, data: result };
     });
     app.post('/templates', { preHandler: [app.requirePermission('templates', 'create')] }, async (request, reply) => {
@@ -1757,7 +2506,16 @@ export async function registerTenantRoutes(app) {
             category: z.enum(['MARKETING', 'UTILITY', 'AUTHENTICATION']),
             language: z.string().default('en_US'),
             body: z.object({ text: z.string() }),
-            header: z.object({ type: z.string(), text: z.string().optional() }).optional(),
+            // A header is either text or a piece of media. For media, Meta needs a
+            // sample file to review, so we keep the uploaded file's path and turn it
+            // into a header_handle at submit time.
+            header: z.object({
+                type: z.string(),
+                format: z.enum(['TEXT', 'IMAGE', 'VIDEO', 'DOCUMENT']).optional(),
+                text: z.string().optional(),
+                sampleUrl: z.string().optional(),
+                samplePath: z.string().optional(),
+            }).optional(),
             footer: z.string().optional(),
             buttons: z.array(z.object({ type: z.string(), text: z.string() })).optional(),
             // Which connected number's WABA to submit this under — required to
@@ -1810,6 +2568,47 @@ export async function registerTenantRoutes(app) {
         });
         return { success: true, data: template };
     });
+    /**
+     * POST /templates/:templateId/tidy-body
+     *
+     * Collapses runs of blank lines to the two Meta allows. Separate from submit
+     * and explicit, because it edits the user's copy — silently rewriting what
+     * someone typed is not a fix, it is a surprise.
+     */
+    app.post('/templates/:templateId/tidy-body', { preHandler: [app.requirePermission('templates', 'update')] }, async (request, reply) => {
+        const { templateId } = z.object({ templateId: z.string() }).parse(request.params);
+        const template = await app.prisma.template.findFirst({
+            where: { id: templateId, tenantId: request.authUser.tenantId },
+        });
+        if (!template) {
+            return reply.status(404).send({ success: false, error: { code: 'NOT_FOUND' } });
+        }
+        if (template.status !== 'DRAFT' && template.status !== 'REJECTED') {
+            return reply.status(400).send({
+                success: false,
+                error: { code: 'NOT_EDITABLE', message: `A template with status ${template.status} cannot be edited.` },
+            });
+        }
+        const { normaliseTemplateBody, checkTemplateBody } = await import('../services/metaTemplate.js');
+        const before = template.body?.text || '';
+        const after = normaliseTemplateBody(before);
+        if (after === before) {
+            return { success: true, data: { changed: false, remainingIssues: checkTemplateBody(after) } };
+        }
+        await app.prisma.template.update({
+            where: { id: templateId },
+            data: { body: { ...template.body, text: after } },
+        });
+        return {
+            success: true,
+            data: {
+                changed: true,
+                removedCharacters: before.length - after.length,
+                // Anything the tidy cannot fix is still worth naming.
+                remainingIssues: checkTemplateBody(after),
+            },
+        };
+    });
     app.post('/templates/:templateId/submit', { preHandler: [app.requirePermission('templates', 'update')] }, async (request, reply) => {
         const { templateId } = z.object({ templateId: z.string() }).parse(request.params);
         const template = await app.prisma.template.findFirst({
@@ -1843,6 +2642,59 @@ export async function registerTenantRoutes(app) {
                 },
             });
         }
+        // Meta's formatting rules are fixed and documented, so failing them is
+        // worth catching here rather than spending a round trip to be told
+        // "Invalid parameter". This exact template failed on three consecutive
+        // newlines and the UI could only show a 400.
+        const { checkTemplateBody } = await import('../services/metaTemplate.js');
+        const bodyIssues = checkTemplateBody(template.body?.text || '');
+        if (bodyIssues.length > 0) {
+            return reply.status(400).send({
+                success: false,
+                error: {
+                    code: 'TEMPLATE_BODY_INVALID',
+                    message: bodyIssues.map((i) => i.message).join(' '),
+                    issues: bodyIssues,
+                    // The newline case is mechanical, so the UI can offer to do it.
+                    autoFixable: bodyIssues.every((i) => i.fixable),
+                },
+            });
+        }
+        // Meta refuses a name that already carries content in this language, and
+        // says so only after the submit. The name can be held by a template that
+        // was deleted here but not there, so it is invisible from this side —
+        // checking first turns an unexplainable rejection into a clear one.
+        {
+            const credentials = await app.prisma.whatsAppCredentials.findUnique({
+                where: { tenantId: request.authUser.tenantId },
+            });
+            const wabaId = await resolveEffectiveWabaId(app.prisma, request.authUser.tenantId, credentials?.wabaId, template.phoneNumberId);
+            if (credentials?.accessToken && wabaId) {
+                try {
+                    const token = decryptSecret(credentials.accessToken);
+                    const normalised = template.name.toLowerCase().replace(/[^a-z0-9_]/g, '_');
+                    const res = await fetch(`https://graph.facebook.com/v21.0/${wabaId}/message_templates?name=${encodeURIComponent(normalised)}&access_token=${encodeURIComponent(token)}`);
+                    if (res.ok) {
+                        const body = await res.json();
+                        const clash = (body.data || []).find((t) => t.name === normalised && t.language === template.language);
+                        if (clash && clash.id !== template.metaTemplateId) {
+                            return reply.status(409).send({
+                                success: false,
+                                error: {
+                                    code: 'NAME_TAKEN_ON_META',
+                                    message: `Meta already has a template called "${normalised}" in ${template.language} (currently ${clash.status}). Rename this one, or delete the existing template first.`,
+                                    existing: { name: clash.name, status: clash.status, language: clash.language, id: clash.id },
+                                },
+                            });
+                        }
+                    }
+                }
+                catch {
+                    // A failed check is not a reason to block the submit — Meta will
+                    // still refuse the collision, just less helpfully.
+                }
+            }
+        }
         // Update template to PENDING
         const updated = await app.prisma.template.update({
             where: { id: templateId },
@@ -1864,13 +2716,55 @@ export async function registerTenantRoutes(app) {
                 const variableNumbers = (text) => Array.from(new Set([...text.matchAll(/\{\{(\d+)\}\}/g)].map((m) => parseInt(m[1], 10)))).sort((a, b) => a - b);
                 const components = [];
                 if (template.header) {
-                    const headerText = template.header.text || '';
-                    const headerVars = variableNumbers(headerText);
-                    components.push({
-                        type: 'HEADER',
-                        ...template.header,
-                        ...(headerVars.length ? { example: { header_text: headerVars.map(exampleFor) } } : {}),
-                    });
+                    const hdr = template.header;
+                    const format = (hdr.format || 'TEXT').toUpperCase();
+                    if (format === 'TEXT') {
+                        const headerText = hdr.text || '';
+                        const headerVars = variableNumbers(headerText);
+                        components.push({
+                            type: 'HEADER',
+                            format: 'TEXT',
+                            text: headerText,
+                            ...(headerVars.length ? { example: { header_text: headerVars.map(exampleFor) } } : {}),
+                        });
+                    }
+                    else {
+                        // Media header. Meta will not take a URL here — it wants the sample
+                        // bytes through the resumable upload API and identifies them by an
+                        // opaque handle. The handle is minted fresh at submit time rather
+                        // than stored, because a stale one fails the submission with an
+                        // error that says nothing about staleness.
+                        if (!hdr.samplePath) {
+                            throw new Error(`This template has a ${format} header but no sample file to show Meta. Upload one before submitting.`);
+                        }
+                        const appId = process.env.META_APP_ID;
+                        if (!appId) {
+                            throw new Error('META_APP_ID is not configured, so sample media cannot be uploaded to Meta.');
+                        }
+                        const { readFile } = await import('fs/promises');
+                        const { campaignMediaDir } = await import('./uploads.js');
+                        const pathMod = await import('path');
+                        // Resolve inside the upload directory only, so a tampered
+                        // samplePath cannot read arbitrary files off the server.
+                        const dir = campaignMediaDir();
+                        const resolved = pathMod.resolve(dir, pathMod.basename(hdr.samplePath));
+                        if (pathMod.dirname(resolved) !== pathMod.resolve(dir)) {
+                            throw new Error('The header sample file could not be located.');
+                        }
+                        const buffer = await readFile(resolved);
+                        const ext = pathMod.extname(resolved).toLowerCase();
+                        const MIME = {
+                            '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png',
+                            '.mp4': 'video/mp4', '.3gp': 'video/3gpp', '.pdf': 'application/pdf',
+                        };
+                        const mimeType = MIME[ext] || 'application/octet-stream';
+                        const handle = await uploadTemplateHeaderSample(decryptSecret(credentials.accessToken), appId, { buffer, mimeType, fileName: pathMod.basename(resolved) });
+                        components.push({
+                            type: 'HEADER',
+                            format,
+                            example: { header_handle: [handle] },
+                        });
+                    }
                 }
                 const bodyText = template.body.text || '';
                 const bodyVars = variableNumbers(bodyText);
@@ -1991,12 +2885,61 @@ export async function registerTenantRoutes(app) {
         }
         return { success: true, data: template };
     });
+    /**
+     * DELETE /templates/:templateId
+     *
+     * Also removes it from Meta when it exists there. Deleting only our row left
+     * the template on Meta holding its name, and the next submit under the same
+     * name was refused with "There is already English (US) content for this
+     * template" — which reads as a bug in the app, because the thing it names is
+     * invisible from here.
+     */
     app.delete('/templates/:templateId', { preHandler: [app.requirePermission('templates', 'delete')] }, async (request, reply) => {
         const { templateId } = z.object({ templateId: z.string() }).parse(request.params);
+        const template = await app.prisma.template.findFirst({
+            where: { id: templateId, tenantId: request.authUser.tenantId },
+        });
+        if (!template) {
+            return reply.status(404).send({ success: false, error: { code: 'NOT_FOUND' } });
+        }
+        let removedFromMeta = null;
+        if (template.metaTemplateId) {
+            const credentials = await app.prisma.whatsAppCredentials.findUnique({
+                where: { tenantId: request.authUser.tenantId },
+            });
+            const wabaId = await resolveEffectiveWabaId(app.prisma, request.authUser.tenantId, credentials?.wabaId, template.phoneNumberId);
+            if (credentials?.accessToken && wabaId) {
+                try {
+                    const token = decryptSecret(credentials.accessToken);
+                    // Meta deletes by name, which removes every language for it.
+                    const res = await fetch(`https://graph.facebook.com/v21.0/${wabaId}/message_templates?name=${encodeURIComponent(template.name)}&access_token=${encodeURIComponent(token)}`, { method: 'DELETE' });
+                    removedFromMeta = res.ok;
+                    if (!res.ok) {
+                        const body = await res.json().catch(() => ({}));
+                        console.error(`[templates] Meta refused to delete ${template.name}:`, body?.error?.message);
+                    }
+                }
+                catch (err) {
+                    removedFromMeta = false;
+                    console.error(`[templates] could not delete ${template.name} from Meta:`, err?.message);
+                }
+            }
+        }
         await app.prisma.template.deleteMany({
             where: { id: templateId, tenantId: request.authUser.tenantId },
         });
-        return { success: true, data: { message: 'Template deleted' } };
+        return {
+            success: true,
+            data: {
+                message: 'Template deleted',
+                // Said plainly: a name still held on Meta cannot be reused, and the
+                // user is the only one who can see why their next submit fails.
+                removedFromMeta,
+                warning: removedFromMeta === false
+                    ? `Removed here, but Meta still holds the name "${template.name}". Submitting a new template with that name will be refused until it clears.`
+                    : undefined,
+            },
+        };
     });
     // ============================================
     // TEAM
@@ -2773,7 +3716,7 @@ export async function registerTenantRoutes(app) {
         const { goal } = z.object({ goal: z.string().min(1) }).parse(request.body);
         const fields = ['tag', 'city', 'country', 'language', 'company', 'totalMessagesSent', 'lastMessageAt', 'createdAt'];
         const operators = ['equals', 'not_equals', 'contains', 'not_contains', 'starts_with', 'ends_with', 'is_empty', 'is_not_empty', 'greater_than', 'less_than', 'within_days'];
-        const suggestion = await getAISuggestion({ module: 'segment', context: { goal, fields, operators } });
+        const suggestion = await getAISuggestion({ module: 'segment', context: { goal, fields, operators } }, app.prisma, request.authUser.tenantId);
         if (!suggestion) {
             return { success: true, data: null };
         }
@@ -3017,6 +3960,98 @@ export async function registerTenantRoutes(app) {
     /**
      * GET /notifications/unread-count - Get unread notification count
      */
+    /**
+     * GET /notifications/feed
+     *
+     * One list for the bell: unread customer messages alongside system
+     * notifications. They were separate before, and the one that matters most —
+     * a customer waiting for a reply — had no surface at all outside the
+     * Conversations page.
+     *
+     * Waiting conversations come first regardless of age. A notification about a
+     * finished campaign can wait; a customer cannot.
+     */
+    app.get('/notifications/feed', async (request, reply) => {
+        if (!request.authUser.tenantId) {
+            return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
+        }
+        const tenantId = request.authUser.tenantId;
+        const [conversations, conversationCount, notifications, notificationCount] = await Promise.all([
+            app.prisma.conversation.findMany({
+                where: { tenantId, unreadCount: { gt: 0 }, status: { not: 'CLOSED' } },
+                orderBy: { lastMessageAt: 'desc' },
+                take: 15,
+                select: {
+                    id: true, unreadCount: true, lastMessageAt: true,
+                    contact: { select: { name: true, phone: true } },
+                    messages: {
+                        where: { direction: 'INCOMING' },
+                        orderBy: { createdAt: 'desc' },
+                        take: 1,
+                        select: { body: true, type: true, createdAt: true },
+                    },
+                },
+            }),
+            // Counted separately from the list. Deriving the badge from a capped
+            // list made it read 15 when 32 people were waiting — a badge that
+            // undercounts is worse than none, because it looks handled.
+            app.prisma.conversation.count({
+                where: { tenantId, unreadCount: { gt: 0 }, status: { not: 'CLOSED' } },
+            }),
+            app.prisma.notification.findMany({
+                where: {
+                    tenantId, isDeleted: false,
+                    OR: [{ userId: request.authUser.id }, { userId: null }],
+                },
+                orderBy: { createdAt: 'desc' },
+                take: 15,
+            }),
+            app.prisma.notification.count({
+                where: {
+                    tenantId, isRead: false, isDeleted: false,
+                    OR: [{ userId: request.authUser.id }, { userId: null }],
+                },
+            }),
+        ]);
+        const unreadMessages = conversations.reduce((n, c) => n + c.unreadCount, 0);
+        return {
+            success: true,
+            data: {
+                // The badge counts conversations, not individual messages — one
+                // customer with nine unread messages is one thing to deal with.
+                badge: conversationCount + notificationCount,
+                unreadConversations: conversationCount,
+                // The list is capped; the count is not. Say when there is more.
+                conversationsShown: conversations.length,
+                unreadMessages,
+                unreadNotifications: notificationCount,
+                conversations: conversations.map((c) => {
+                    const last = c.messages[0];
+                    return {
+                        id: c.id,
+                        name: c.contact?.name || c.contact?.phone || 'Unknown',
+                        phone: c.contact?.phone,
+                        unreadCount: c.unreadCount,
+                        at: c.lastMessageAt,
+                        // Media has no body text, so say what it is rather than nothing.
+                        preview: last?.body?.slice(0, 90)
+                            || (last?.type && last.type !== 'TEXT' ? `Sent ${String(last.type).toLowerCase()}` : ''),
+                    };
+                }),
+                notifications: notifications.map((n) => ({
+                    id: n.id,
+                    type: n.type,
+                    title: n.title,
+                    message: n.message,
+                    isRead: n.isRead,
+                    priority: n.priority,
+                    referenceType: n.referenceType,
+                    referenceId: n.referenceId,
+                    at: n.createdAt,
+                })),
+            },
+        };
+    });
     app.get('/notifications/unread-count', async (request, reply) => {
         if (!request.authUser.tenantId) {
             return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
@@ -3257,6 +4292,42 @@ function mediaHeaderParameter(mediaUrl) {
  * Meta fetches the file during the send, so this must run only after the
  * campaign reaches a terminal state — never mid-send.
  */
+/**
+ * Deletes campaign media once Meta can no longer need it.
+ *
+ * "No longer need it" is not "the campaign finished". Meta downloads a linked
+ * file after accepting the message, and retries undelivered messages for up to
+ * 24 hours, so the file has to outlive both. This runs on a timer and only
+ * removes media whose campaign finished more than the grace period ago and has
+ * no messages still awaiting a delivery verdict.
+ */
+export async function sweepCampaignMedia(app) {
+    const GRACE_HOURS = 25; // WhatsApp's 24h message TTL, plus an hour's slack.
+    const cutoff = new Date(Date.now() - GRACE_HOURS * 3600 * 1000);
+    const stale = await app.prisma.campaign.findMany({
+        where: {
+            mediaPath: { not: null },
+            completedAt: { not: null, lt: cutoff },
+        },
+        select: { id: true },
+        take: 200,
+    });
+    let removed = 0;
+    for (const c of stale) {
+        // A message still PENDING or SENT has not reached a verdict, which means
+        // Meta may yet fetch the media for a retry.
+        const inFlight = await app.prisma.message.count({
+            where: { campaignId: c.id, status: { in: ['PENDING', 'SENT'] } },
+        });
+        if (inFlight > 0)
+            continue;
+        await cleanUpCampaignMedia(app, c.id);
+        removed++;
+    }
+    if (removed > 0)
+        console.log(`[Campaign] swept media for ${removed} campaign(s)`);
+    return removed;
+}
 async function cleanUpCampaignMedia(app, campaignId) {
     try {
         const campaign = await app.prisma.campaign.findUnique({
@@ -3280,6 +4351,42 @@ async function cleanUpCampaignMedia(app, campaignId) {
         console.error(`[Campaign] ${campaignId} media cleanup failed:`, err?.message);
     }
 }
+/**
+ * Recomputes a campaign's counters from its message rows.
+ *
+ * The counters used to be maintained by two writers that did not know about
+ * each other: the send loop wrote absolute totals for sent and failed, and the
+ * status webhook incremented delivered/read/failed by one. A message that was
+ * handed to Meta and later failed was therefore counted in both, which is how
+ * campaign 01-10-2026 came to claim 250 sent and 6 failed out of 250
+ * recipients while its rows actually read 232 sent and 18 failed.
+ *
+ * Nothing needs to be counted twice, because the message rows already record
+ * every transition. These columns are a cache of that, so they are derived
+ * from it rather than accumulated alongside it.
+ *
+ * The categories are cumulative, which is what the words mean to someone
+ * reading a campaign card: a message that was read was also delivered, and one
+ * that was delivered was also sent. That also keeps sent + failed equal to the
+ * number of recipients actually attempted, which the old arithmetic did not.
+ */
+export async function recountCampaign(app, campaignId) {
+    const rows = await app.prisma.message.groupBy({
+        by: ['status'],
+        where: { campaignId },
+        _count: { _all: true },
+    });
+    const n = (st) => rows.find((r) => r.status === st)?._count._all ?? 0;
+    const read = n('READ');
+    const delivered = n('DELIVERED') + read;
+    const sent = n('SENT') + delivered;
+    const failed = n('FAILED');
+    await app.prisma.campaign.update({
+        where: { id: campaignId },
+        data: { totalSent: sent, totalDelivered: delivered, totalRead: read, totalFailed: failed },
+    }).catch(() => { });
+    return { sent, delivered, read, failed };
+}
 export async function sendCampaignMessages(app, campaignId, tenantId) {
     try {
         await sendCampaignMessagesInner(app, campaignId, tenantId);
@@ -3295,15 +4402,15 @@ export async function sendCampaignMessages(app, campaignId, tenantId) {
             data: { status: 'FAILED', completedAt: new Date() },
         }).catch(() => { });
     }
-    finally {
-        // Runs for both the success and failure paths — a campaign that died
-        // partway through still leaves an uploaded file that nothing will use.
-        await cleanUpCampaignMedia(app, campaignId);
-    }
+    // No cleanup here. "Sent" means Meta accepted the message, not that it has
+    // fetched the image -- it downloads a `link` seconds later, and deleting the
+    // file in between is what failed all 25 recipients of 23-sep with 131053,
+    // eight seconds after the campaign reported Completed. sweepCampaignMedia()
+    // removes it once Meta can no longer want it.
 }
 async function sendCampaignMessagesInner(app, campaignId, tenantId) {
     const campaign = await app.prisma.campaign.findUnique({
-        where: { id: campaignId },
+        where: { id: campaignId, tenantId },
         include: {
             template: true,
             phoneNumber: true,
@@ -3311,12 +4418,27 @@ async function sendCampaignMessagesInner(app, campaignId, tenantId) {
     });
     if (!campaign)
         return;
+    // The routes validate these ids on the way in, but this is the last gate
+    // before real messages go out on a real WhatsApp number, and campaign rows
+    // created before that validation existed may still carry foreign ids.
+    // Sending from another tenant's number is not a recoverable mistake.
+    if ((campaign.template && campaign.template.tenantId !== tenantId) ||
+        (campaign.phoneNumber && campaign.phoneNumber.tenantId !== tenantId)) {
+        console.error(`[Campaign] ${campaignId} references another tenant's template or phone number — refusing to send`);
+        await app.prisma.campaign.update({
+            where: { id: campaignId },
+            data: { status: 'FAILED', completedAt: new Date() },
+        }).catch(() => { });
+        return;
+    }
     // Build audience contacts
     let contactIds = [];
     if (campaign.audienceType === 'contacts' && campaign.contactIds.length > 0) {
-        // Filter out opted-out contacts
+        // Filter out opted-out contacts. Scoped by tenant: an unscoped `id IN (...)`
+        // here would message another tenant's customers and copy their numbers into
+        // this tenant's message log.
         const contacts = await app.prisma.contact.findMany({
-            where: { id: { in: campaign.contactIds }, consentStatus: { not: 'OPTED_OUT' } },
+            where: { id: { in: campaign.contactIds }, tenantId, consentStatus: { not: 'OPTED_OUT' } },
             select: { id: true },
         });
         contactIds = contacts.map(c => c.id);
@@ -3408,7 +4530,7 @@ async function sendCampaignMessagesInner(app, campaignId, tenantId) {
     const { checkTierCapacity } = await import('../services/sendQuota.js');
     let tierExhausted = false;
     const { dispatchOutboundMessage } = await import('../services/whatsappService.js');
-    const { reserveCreditsForBatch, releaseUnusedReservation, getRateCredits } = await import('../services/creditService.js');
+    const { reserveCreditsForBatch, releaseUnusedReservation } = await import('../services/creditService.js');
     const templateCategory = campaign.template?.category || 'UTILITY';
     // The rate fallback used to be 'US' while the schema default was 'IN', so the
     // two disagreed about the same contact. Both now defer to the tenant's own
@@ -3418,6 +4540,29 @@ async function sendCampaignMessagesInner(app, campaignId, tenantId) {
         select: { defaultCountry: true },
     });
     const tenantDefaultCountry = campaignTenant?.defaultCountry || 'IN';
+    // Upload the header media to Meta once, before the loop, and send every
+    // recipient the resulting id. Sending a link instead makes Meta download the
+    // same file once per recipient *after* accepting each message, which is both
+    // wasteful and fragile -- that asynchronous fetch is what 404'd on campaign
+    // 23-sep. Falls back to the link when the upload cannot be done, so a
+    // campaign never fails to go out over this.
+    let uploadedMedia = null;
+    if (campaign.mediaPath && campaign.template?.header && campaign.phoneNumber?.metaPhoneId) {
+        const { uploadToMeta } = await import('../services/metaMedia.js');
+        const { resolveAccessToken } = await import('../services/credentialEncryption.js');
+        const creds = await app.prisma.whatsAppCredentials.findUnique({ where: { tenantId } });
+        const token = resolveAccessToken(campaign.phoneNumber.accessToken, creds?.accessToken);
+        if (token) {
+            uploadedMedia = await uploadToMeta({
+                filePath: campaign.mediaPath,
+                metaPhoneId: campaign.phoneNumber.metaPhoneId,
+                accessToken: token,
+            });
+            console.log(uploadedMedia
+                ? `[Campaign] ${campaignId} media uploaded to Meta as ${uploadedMedia.id}`
+                : `[Campaign] ${campaignId} media upload failed — falling back to link`);
+        }
+    }
     for (let i = 0; i < contactIds.length; i += BATCH_SIZE) {
         const batch = contactIds.slice(i, i + BATCH_SIZE);
         const contacts = await app.prisma.contact.findMany({
@@ -3428,7 +4573,8 @@ async function sendCampaignMessagesInner(app, campaignId, tenantId) {
         // many as the balance allows — a tenant short on credits sends what they can
         // afford instead of the campaign failing wholesale or, before this, sending
         // the remainder free.
-        const unitCosts = contacts.map((c) => getRateCredits(c.country || tenantDefaultCountry, templateCategory));
+        const { chargePaise } = await import('../services/billing.js');
+        const unitCosts = contacts.map((c) => chargePaise(c.country || tenantDefaultCountry, templateCategory));
         const reservation = await reserveCreditsForBatch(app.prisma, tenantId, unitCosts, campaignId, `Campaign: ${campaign.name} (batch of ${contacts.length})`);
         if (reservation.reservedFor === 0) {
             outOfCredits = true;
@@ -3495,12 +4641,21 @@ async function sendCampaignMessagesInner(app, campaignId, tenantId) {
                 const variableCount = new Set([...messageBody.matchAll(/\{\{(\d+)\}\}/g)].map((m) => m[1])).size;
                 const components = [];
                 // A header component only belongs on the payload when the campaign
-                // actually carries media — Meta rejects a header on a template whose
-                // approved definition has none.
-                if (campaign.mediaUrl) {
+                // actually carries media AND the template was approved with a header to
+                // hold it. Sending one to a body-only template fails every recipient
+                // with #132018 ("Template does not contain title component"). The send
+                // route refuses this combination up front; this covers the paths that
+                // do not go through it, such as a scheduled or resumed campaign.
+                if (campaign.mediaUrl && campaign.template.header) {
                     components.push({
                         type: 'header',
-                        parameters: [mediaHeaderParameter(campaign.mediaUrl)],
+                        // Prefer the id Meta already holds. A link makes Meta fetch our
+                        // server once per recipient, after accepting the message, and any
+                        // failure in that window is reported as a delivery failure the
+                        // sender cannot see the cause of.
+                        parameters: [uploadedMedia
+                                ? mediaHeaderFromId(uploadedMedia)
+                                : mediaHeaderParameter(campaign.mediaUrl)],
                     });
                 }
                 if (variableCount > 0) {
@@ -3531,12 +4686,13 @@ async function sendCampaignMessagesInner(app, campaignId, tenantId) {
                     },
                 });
                 createdMessageId = message.id;
-                // Credits for this recipient were already taken as part of the batch
+                // The money for this recipient was already held as part of the batch
                 // reservation above, so there is no per-message transaction here — that
                 // is what makes bulk throughput possible. Only what Meta accepts is
                 // counted as consumed; the balance of the reservation is returned once
-                // the batch settles.
-                const costCredits = getRateCredits(contact.country || tenantDefaultCountry, templateCategory);
+                // the batch settles, and each accepted message's hold is returned
+                // individually if it never reaches the handset.
+                const costPaise = chargePaise(contact.country || tenantDefaultCountry, templateCategory);
                 const dispatchResult = await dispatchOutboundMessage({
                     app,
                     messageId: message.id,
@@ -3557,9 +4713,24 @@ async function sendCampaignMessagesInner(app, campaignId, tenantId) {
                     // campaign into the same wall.
                     if (dispatchResult.rateLimited)
                         rateLimitHits++;
-                    throw new Error(dispatchResult.error || 'Dispatch failed');
+                    const dispatchErr = new Error(dispatchResult.error || 'Dispatch failed');
+                    // Carry Meta's code through the throw so the catch does not have to
+                    // guess, and does not flatten every failure into one generic code.
+                    dispatchErr.metaErrorCode = dispatchResult.errorCode;
+                    throw dispatchErr;
                 }
-                consumed += costCredits;
+                consumed += costPaise;
+                // Name the hold so a failure webhook can return it. Without a row here
+                // a campaign message that Meta accepted and then failed to deliver
+                // would be charged for regardless.
+                const { holdForMessage } = await import('../services/settlement.js');
+                await holdForMessage(app.prisma, {
+                    tenantId,
+                    messageId: message.id,
+                    country: contact.country || tenantDefaultCountry,
+                    category: templateCategory,
+                    paise: costPaise,
+                });
                 sent++;
             }
             catch (err) {
@@ -3567,12 +4738,19 @@ async function sendCampaignMessagesInner(app, campaignId, tenantId) {
                 failed++;
                 // Record why on the message itself, so the campaign view shows a reason
                 // instead of a recipient stuck on PENDING with a blank detail column.
+                // The dispatcher has already written Meta's own error code when it was
+                // the dispatcher that failed. Overwriting it with a generic
+                // 'SEND_ERROR' threw away the one field that says what Meta actually
+                // objected to -- every recipient in a failed campaign read SEND_ERROR
+                // while the real code sat in the logs. Only fill in a code when the
+                // failure came from somewhere the dispatcher never reached.
                 if (createdMessageId) {
+                    const dispatchCode = err?.metaErrorCode;
                     await app.prisma.message.update({
                         where: { id: createdMessageId },
                         data: {
                             status: 'FAILED',
-                            errorCode: 'SEND_ERROR',
+                            errorCode: dispatchCode || 'SEND_ERROR',
                             errorMessage: (err?.message || 'Send failed').slice(0, 500),
                             failedAt: new Date(),
                         },
@@ -3603,8 +4781,9 @@ async function sendCampaignMessagesInner(app, campaignId, tenantId) {
         // the resume-safety check above has real data to dedupe against.
         await app.prisma.campaign.update({
             where: { id: campaignId },
-            data: { totalSent: sent, totalFailed: failed, lastSentAt: new Date() },
+            data: { lastSentAt: new Date() },
         });
+        await recountCampaign(app, campaignId);
         // Stop as soon as the balance runs out. Continuing would attempt every
         // remaining recipient and fail each one the same way.
         if (outOfCredits) {

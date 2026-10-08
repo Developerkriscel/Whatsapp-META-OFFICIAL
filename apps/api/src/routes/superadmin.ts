@@ -1357,14 +1357,14 @@ export async function registerSuperadminRoutes(app: FastifyInstance): Promise<vo
       }),
     ]);
 
-    const monthlyRevenue: { month: string; mrr: number }[] = [];
+    const monthlyRevenue: { month: string; revenue: number }[] = [];
     for (let i = 5; i >= 0; i--) {
       const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
-      const label = d.toLocaleString('en-US', { month: 'short' });
+      const month = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
       const total = paidInvoices
         .filter((inv) => inv.paidAt && inv.paidAt.getFullYear() === d.getFullYear() && inv.paidAt.getMonth() === d.getMonth())
         .reduce((sum, inv) => sum + Number(inv.amount), 0);
-      monthlyRevenue.push({ month: label, mrr: total });
+      monthlyRevenue.push({ month, revenue: total });
     }
 
     const mrr = activeTenants.reduce((sum, t) => {

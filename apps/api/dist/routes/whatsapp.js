@@ -10,6 +10,7 @@ import { Prisma } from '@prisma/client';
 import { getMetaAuthUrl, exchangeCodeForToken, exchangeEmbeddedSignupCode, getLongLivedToken, getWhatsAppBusinessAccounts, getPhoneNumbers, verifyPhoneNumber, setupWebhook, } from '../services/metaOAuth.js';
 import { encryptSecret, decryptSecret, decryptIfPresent, resolveAccessToken } from '../services/credentialEncryption.js';
 import { resolveEffectiveWabaId } from '../services/metaTemplate.js';
+import { detectCountryFromPhone } from '../services/phoneCountry.js';
 /**
  * Registers a freshly connected number with Cloud API. Until this runs the
  * number exists on the WABA but cannot send anything.
@@ -385,7 +386,17 @@ export async function registerWhatsAppRoutes(app) {
                     isConfigured: true,
                 },
             });
+            // metaPhoneId is unique across the whole platform, so this lookup can
+            // return another workspace's row. Reconnecting is only ever in-place for
+            // the current tenant — the manual connect path rejects this same conflict
+            // and signup must not silently rewrite someone else's number instead.
             const existingPhone = await app.prisma.phoneNumber.findUnique({ where: { metaPhoneId: phoneNumberId } });
+            if (existingPhone && existingPhone.tenantId !== request.authUser.tenantId) {
+                return reply.status(400).send({
+                    success: false,
+                    error: { code: 'DUPLICATE', message: 'This phone number is already connected to another workspace' },
+                });
+            }
             const phone = existingPhone
                 ? await app.prisma.phoneNumber.update({
                     where: { id: existingPhone.id },
@@ -1434,7 +1445,12 @@ export async function registerWhatsAppRoutes(app) {
         });
         if (!contact) {
             contact = await app.prisma.contact.create({
-                data: { tenantId, name: body.testPhone, phone: body.testPhone, country: 'IN' },
+                data: {
+                    tenantId,
+                    name: body.testPhone,
+                    phone: body.testPhone,
+                    country: detectCountryFromPhone(body.testPhone, 'IN'),
+                },
             });
         }
         let conversation = await app.prisma.conversation.findUnique({

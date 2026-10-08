@@ -115,7 +115,15 @@ export async function registerAutomationRoutes(app) {
                 businessHoursMode: body.businessHoursMode ?? true,
                 offHoursMessage: body.offHoursMessage,
                 enableHumanHandoff: body.enableHumanHandoff ?? true,
-                handoffKeywords: body.handoffKeywords || ['human', 'agent', 'person', 'help'],
+                // Phrases that mean "stop answering and fetch someone", not words a
+                // customer uses while asking the bot a perfectly ordinary question.
+                // 'help' and 'person' were in this list, and handing off switches the
+                // bot off for that conversation for good -- so "I need help choosing a
+                // colour" silenced it, which is the single most likely thing anyone
+                // says to a shop's chatbot.
+                handoffKeywords: body.handoffKeywords || [
+                    'human', 'agent', 'representative', 'talk to someone', 'speak to someone', 'customer care',
+                ],
                 phoneNumberIds: body.phoneNumberIds || [],
                 flowData: body.flowData || { steps: [], variables: [] },
             },
@@ -309,7 +317,7 @@ export async function registerAutomationRoutes(app) {
         const suggestion = await getAISuggestion({
             module: 'flow',
             context: { intent, stepTypes: FLOW_STEP_TYPES },
-        });
+        }, app.prisma, request.authUser.tenantId);
         if (!suggestion) {
             return { success: true, data: null };
         }
@@ -379,27 +387,51 @@ export async function triggerFlowForConversation(app, tenantId, conversationId, 
     if (!conversation.isBotActive) {
         return { success: false, error: { code: 'BOT_INACTIVE', message: 'Bot is paused for this conversation' } };
     }
-    // Find active flow for this phone number
+    // Find active flow for this phone number. The tenant comes with it because
+    // the AI step needs the business's own name -- a bot that cannot say who it
+    // works for cannot credibly refuse things outside that business either.
     let flow = await app.prisma.botFlow.findFirst({
         where: {
             tenantId,
             isActive: true,
             phoneNumberIds: { has: conversation.phoneNumberId },
         },
+        include: { tenant: { select: { name: true } } },
     });
     // Fall back to default flow
     if (!flow) {
         flow = await app.prisma.botFlow.findFirst({
             where: { tenantId, isActive: true, isDefault: true },
+            include: { tenant: { select: { name: true } } },
         });
     }
     if (!flow) {
         return { success: false, error: { code: 'NO_ACTIVE_FLOW', message: 'No active bot flow found' } };
     }
-    // Check for human handoff keywords
+    // Check for human handoff keywords.
+    //
+    // Matched as whole words. This was a substring test, which meant a keyword
+    // of "help" fired on "helpful", "helpline" and "I need help choosing a
+    // colour", and "person" fired on "personal". Handing off switches the bot
+    // off for that conversation permanently, so an ordinary question -- or a
+    // compliment, in the case of "that was helpful" -- silenced it for good, and
+    // from the outside that looks like the chatbot simply stopping after a few
+    // replies.
     if (flow.enableHumanHandoff && opts.keyword) {
-        const keyword = opts.keyword.toLowerCase();
-        const hasHandoffKeyword = flow.handoffKeywords.some((kw) => keyword.includes(kw.toLowerCase()));
+        const text = opts.keyword.toLowerCase();
+        const hasHandoffKeyword = flow.handoffKeywords.some((kw) => {
+            const needle = String(kw || '').trim().toLowerCase();
+            if (!needle)
+                return false;
+            // Escaped so a keyword containing regex punctuation matches literally.
+            const escaped = needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            // A word boundary only works next to a word character, so apply it at
+            // each end only where the keyword actually has one. Without this a
+            // keyword like "call us!" would never match anything.
+            const left = /^\w/.test(needle) ? '\\b' : '';
+            const right = /\w$/.test(needle) ? '\\b' : '';
+            return new RegExp(`${left}${escaped}${right}`, 'i').test(text);
+        });
         if (hasHandoffKeyword) {
             await app.prisma.conversation.update({
                 where: { id: conversation.id },
@@ -517,12 +549,25 @@ async function executeFlowStep(app, flow, execution, conversation, inboundText) 
             // The bot must never send nothing — if there's no inbound text, or
             // generation fails/finds nothing relevant, fall back to fallbackMessage.
             let generatedReply = null;
+            const fallbackMessage = currentStep.fallbackMessage ||
+                "I'm not sure about that — let me connect you with a member of our team.";
+            // The bot answers the public under the business's own number, so the
+            // scope, the refusal and the screening are built here rather than left to
+            // whatever the operator happened to type in the prompt box.
+            const { buildSystemPrompt, prepareUserMessage, screenReply } = await import('../services/aiGuardrails.js');
+            const guardrails = {
+                businessName: flow.tenant?.name || 'this business',
+                businessDescription: currentStep.businessDescription,
+                allowedTopics: currentStep.allowedTopics,
+                houseRules: currentStep.systemPrompt,
+                fallbackMessage,
+            };
             if (inboundText && currentStep.businessDescription) {
                 const { generateSimpleReply } = await import('../services/aiAssist.js');
                 generatedReply = await generateSimpleReply({
-                    systemPrompt: `${currentStep.systemPrompt || 'You are a helpful, friendly assistant.'}\n\nAbout the business:\n${currentStep.businessDescription}\n\nAnswer naturally and helpfully based on this. If you don't know something specific, offer to connect the customer with a human.`,
-                    userMessage: inboundText,
-                });
+                    systemPrompt: buildSystemPrompt(guardrails),
+                    userMessage: prepareUserMessage(inboundText),
+                }, app.prisma, flow.tenantId);
             }
             else if (inboundText && currentStep.knowledgeBaseId) {
                 const { generateRagReply } = await import('../services/knowledgeBase.js');
@@ -530,14 +575,20 @@ async function executeFlowStep(app, flow, execution, conversation, inboundText) 
                     prisma: app.prisma,
                     tenantId: flow.tenantId,
                     knowledgeBaseId: currentStep.knowledgeBaseId,
-                    systemPrompt: currentStep.systemPrompt || 'You are a helpful business assistant.',
+                    systemPrompt: currentStep.systemPrompt || '',
                     userMessage: inboundText,
+                    guardrails,
                 });
                 generatedReply = result?.reply || null;
             }
-            const replyText = generatedReply ||
-                currentStep.fallbackMessage ||
-                "I'm not sure about that — let me connect you with a member of our team.";
+            // Whatever came back is checked before a real customer sees it. A reply
+            // carrying code, reciting its own instructions, or running away in length
+            // is replaced by the business's fallback line, which is always safe.
+            const screened = screenReply(generatedReply, { fallbackMessage });
+            if (generatedReply && !screened.ok) {
+                console.warn(`[Bot] reply rejected for tenant ${flow.tenantId}: ${screened.reason}`);
+            }
+            const replyText = screened.ok && screened.text ? screened.text : fallbackMessage;
             const message = await app.prisma.message.create({
                 data: {
                     tenantId: flow.tenantId,

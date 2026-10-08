@@ -46,10 +46,11 @@ async function activeProvider(prisma: PrismaClient) {
   if (!provider) throw new Error('No payment provider is active. Configure one in Superadmin → Credits → Commerce.');
 
   const secret = decryptIfPresent(provider.secretKey);
-  if (!provider.publicKey || !secret) {
+  const publicKey = provider.publicKey;
+  if (!publicKey || !secret) {
     throw new Error(`${provider.label} is active but its keys are incomplete.`);
   }
-  return { provider, secret };
+  return { provider, publicKey, secret };
 }
 
 /**
@@ -60,7 +61,7 @@ async function activeProvider(prisma: PrismaClient) {
  * the client claims it bought.
  */
 export async function createOrder(prisma: PrismaClient, input: CreateOrderInput): Promise<CreatedOrder> {
-  const { provider, secret } = await activeProvider(prisma);
+  const { provider, publicKey, secret } = await activeProvider(prisma);
   const { quotePackage, priceWithFees } = await import('./pricing.js');
 
   let credits: number;
@@ -99,7 +100,7 @@ export async function createOrder(prisma: PrismaClient, input: CreateOrderInput)
     throw new Error(`Checkout is implemented for Razorpay. ${provider.label} can be configured but not yet charged through.`);
   }
 
-  const auth = Buffer.from(`${provider.publicKey}:${secret}`).toString('base64');
+  const auth = Buffer.from(`${publicKey}:${secret}`).toString('base64');
   const res = await fetch('https://api.razorpay.com/v1/orders', {
     method: 'POST',
     headers: { Authorization: `Basic ${auth}`, 'Content-Type': 'application/json' },
@@ -131,7 +132,7 @@ export async function createOrder(prisma: PrismaClient, input: CreateOrderInput)
   return {
     orderId: body.id,
     provider: provider.provider,
-    keyId: provider.publicKey,
+    keyId: publicKey,
     amountMinor,
     currency: 'INR',
     credits,
@@ -155,7 +156,7 @@ export async function confirmPayment(
   if (!order) return { credited: false, credits: 0, reason: 'Unknown order.' };
   if (order.status === 'PAID') return { credited: false, credits: order.credits, reason: 'Already credited.' };
 
-  const { provider, secret } = await activeProvider(prisma);
+  const { provider, publicKey, secret } = await activeProvider(prisma);
 
   // The browser callback carries a signature over order|payment. The webhook is
   // verified separately, against the raw body, before it reaches here.
@@ -176,7 +177,7 @@ export async function confirmPayment(
 
   // Ask the gateway what it thinks happened rather than trusting the caller —
   // a valid signature proves the message came from us, not that money moved.
-  const auth = Buffer.from(`${provider.publicKey}:${secret}`).toString('base64');
+  const auth = Buffer.from(`${publicKey}:${secret}`).toString('base64');
   const res = await fetch(`https://api.razorpay.com/v1/payments/${args.paymentId}`, {
     headers: { Authorization: `Basic ${auth}` },
   });

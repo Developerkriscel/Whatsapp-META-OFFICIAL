@@ -98,7 +98,7 @@ export default function SuperAdminTickets() {
         <select
           value={statusFilter}
           onChange={(e) => setStatusFilter(e.target.value)}
-          className="input-apple"
+          className="input-apple sm:w-40"
         >
           <option value="all">All Status</option>
           <option value="OPEN">Open</option>

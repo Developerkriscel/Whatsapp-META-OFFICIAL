@@ -247,12 +247,12 @@ export declare const segmentConditionSchema: z.ZodObject<{
     operator: z.ZodEnum<["equals", "not_equals", "contains", "not_contains", "starts_with", "ends_with", "is_empty", "is_not_empty", "gt", "lt", "within_days"]>;
     value: z.ZodOptional<z.ZodUnion<[z.ZodString, z.ZodNumber]>>;
 }, "strip", z.ZodTypeAny, {
-    field: "createdAt" | "tags" | "company" | "language" | "city" | "country" | "lastMessageAt" | "messagesSent";
-    operator: "gt" | "equals" | "not_equals" | "contains" | "not_contains" | "starts_with" | "ends_with" | "is_empty" | "is_not_empty" | "lt" | "within_days";
+    field: "createdAt" | "tags" | "company" | "language" | "lastMessageAt" | "country" | "city" | "messagesSent";
+    operator: "gt" | "lt" | "equals" | "not_equals" | "contains" | "not_contains" | "starts_with" | "ends_with" | "is_empty" | "is_not_empty" | "within_days";
     value?: string | number | undefined;
 }, {
-    field: "createdAt" | "tags" | "company" | "language" | "city" | "country" | "lastMessageAt" | "messagesSent";
-    operator: "gt" | "equals" | "not_equals" | "contains" | "not_contains" | "starts_with" | "ends_with" | "is_empty" | "is_not_empty" | "lt" | "within_days";
+    field: "createdAt" | "tags" | "company" | "language" | "lastMessageAt" | "country" | "city" | "messagesSent";
+    operator: "gt" | "lt" | "equals" | "not_equals" | "contains" | "not_contains" | "starts_with" | "ends_with" | "is_empty" | "is_not_empty" | "within_days";
     value?: string | number | undefined;
 }>;
 export declare const createSegmentSchema: z.ZodObject<{
@@ -263,20 +263,20 @@ export declare const createSegmentSchema: z.ZodObject<{
         operator: z.ZodEnum<["equals", "not_equals", "contains", "not_contains", "starts_with", "ends_with", "is_empty", "is_not_empty", "gt", "lt", "within_days"]>;
         value: z.ZodOptional<z.ZodUnion<[z.ZodString, z.ZodNumber]>>;
     }, "strip", z.ZodTypeAny, {
-        field: "createdAt" | "tags" | "company" | "language" | "city" | "country" | "lastMessageAt" | "messagesSent";
-        operator: "gt" | "equals" | "not_equals" | "contains" | "not_contains" | "starts_with" | "ends_with" | "is_empty" | "is_not_empty" | "lt" | "within_days";
+        field: "createdAt" | "tags" | "company" | "language" | "lastMessageAt" | "country" | "city" | "messagesSent";
+        operator: "gt" | "lt" | "equals" | "not_equals" | "contains" | "not_contains" | "starts_with" | "ends_with" | "is_empty" | "is_not_empty" | "within_days";
         value?: string | number | undefined;
     }, {
-        field: "createdAt" | "tags" | "company" | "language" | "city" | "country" | "lastMessageAt" | "messagesSent";
-        operator: "gt" | "equals" | "not_equals" | "contains" | "not_contains" | "starts_with" | "ends_with" | "is_empty" | "is_not_empty" | "lt" | "within_days";
+        field: "createdAt" | "tags" | "company" | "language" | "lastMessageAt" | "country" | "city" | "messagesSent";
+        operator: "gt" | "lt" | "equals" | "not_equals" | "contains" | "not_contains" | "starts_with" | "ends_with" | "is_empty" | "is_not_empty" | "within_days";
         value?: string | number | undefined;
     }>, "many">;
     matchType: z.ZodDefault<z.ZodEnum<["ALL", "ANY"]>>;
 }, "strip", z.ZodTypeAny, {
     name: string;
     conditions: {
-        field: "createdAt" | "tags" | "company" | "language" | "city" | "country" | "lastMessageAt" | "messagesSent";
-        operator: "gt" | "equals" | "not_equals" | "contains" | "not_contains" | "starts_with" | "ends_with" | "is_empty" | "is_not_empty" | "lt" | "within_days";
+        field: "createdAt" | "tags" | "company" | "language" | "lastMessageAt" | "country" | "city" | "messagesSent";
+        operator: "gt" | "lt" | "equals" | "not_equals" | "contains" | "not_contains" | "starts_with" | "ends_with" | "is_empty" | "is_not_empty" | "within_days";
         value?: string | number | undefined;
     }[];
     matchType: "ALL" | "ANY";
@@ -284,8 +284,8 @@ export declare const createSegmentSchema: z.ZodObject<{
 }, {
     name: string;
     conditions: {
-        field: "createdAt" | "tags" | "company" | "language" | "city" | "country" | "lastMessageAt" | "messagesSent";
-        operator: "gt" | "equals" | "not_equals" | "contains" | "not_contains" | "starts_with" | "ends_with" | "is_empty" | "is_not_empty" | "lt" | "within_days";
+        field: "createdAt" | "tags" | "company" | "language" | "lastMessageAt" | "country" | "city" | "messagesSent";
+        operator: "gt" | "lt" | "equals" | "not_equals" | "contains" | "not_contains" | "starts_with" | "ends_with" | "is_empty" | "is_not_empty" | "within_days";
         value?: string | number | undefined;
     }[];
     description?: string | undefined;

@@ -60,8 +60,112 @@ export async function submitTemplateToMeta(accessToken, wabaId, template) {
         };
     }
     catch (error) {
+        const err = error.response?.data?.error;
         console.error('Failed to submit template to Meta:', error.response?.data);
-        throw new Error(`Failed to submit template: ${error.response?.data?.error?.message || error.message}`);
+        // Meta's top-level `message` for a rejected template is the useless
+        // "Invalid parameter". What is actually wrong is in error_user_msg, and
+        // discarding it left the UI showing a bare 400 with nothing to act on.
+        const detail = err?.error_user_msg || err?.error_user_title || err?.message || error.message;
+        throw new Error(`Failed to submit template: ${detail}`);
+    }
+}
+export function checkTemplateBody(text) {
+    const issues = [];
+    // More than two consecutive newlines. Easy to introduce by pasting, and
+    // invisible in a textarea.
+    const runs = text.match(/\n{3,}/g);
+    if (runs) {
+        const worst = Math.max(...runs.map((r) => r.length));
+        issues.push({
+            code: 'CONSECUTIVE_NEWLINES',
+            message: `${runs.length} place${runs.length === 1 ? '' : 's'} with ${worst} blank lines in a row. Meta allows at most two.`,
+            fixable: true,
+        });
+    }
+    const emojis = text.match(/\p{Extended_Pictographic}/gu);
+    if (emojis && emojis.length > 10) {
+        issues.push({
+            code: 'TOO_MANY_EMOJIS',
+            message: `${emojis.length} emojis. Meta allows at most 10.`,
+            fixable: false,
+        });
+    }
+    // A body that is nothing but variables is rejected.
+    const withoutVars = text.replace(/\{\{\s*\d+\s*\}\}/g, '').trim();
+    if (text.trim() && withoutVars === '') {
+        issues.push({
+            code: 'ONLY_PARAMETERS',
+            message: 'The body is only variables. Meta needs some literal text around them.',
+            fixable: false,
+        });
+    }
+    if (text.length > 1024) {
+        issues.push({
+            code: 'TOO_LONG',
+            message: `${text.length} characters. Meta allows 1024.`,
+            fixable: false,
+        });
+    }
+    return issues;
+}
+/** Collapses runs of blank lines to the two Meta permits. */
+export function normaliseTemplateBody(text) {
+    return text.replace(/\n{3,}/g, '\n\n');
+}
+/** Meta's header formats that carry a file rather than text. */
+export const MEDIA_HEADER_FORMATS = ['IMAGE', 'VIDEO', 'DOCUMENT'];
+/**
+ * Uploads a sample file to Meta and returns a `header_handle`.
+ *
+ * A template with an image/video/document header cannot be created by pointing
+ * Meta at a URL. Meta wants a sample of the media so a human reviewer can see
+ * what the header will look like, and it only accepts that sample through the
+ * Resumable Upload API, which hands back an opaque handle. That handle is what
+ * goes in the HEADER component's `example.header_handle`.
+ *
+ * Two calls: open a session describing the file, then send the bytes.
+ */
+export async function uploadTemplateHeaderSample(accessToken, appId, file) {
+    const api = 'https://graph.facebook.com/v21.0';
+    let sessionId;
+    try {
+        const session = await axios.post(`${api}/${appId}/uploads`, null, {
+            params: {
+                file_name: file.fileName,
+                file_length: file.buffer.length,
+                file_type: file.mimeType,
+                access_token: accessToken,
+            },
+        });
+        sessionId = session.data?.id;
+        if (!sessionId)
+            throw new Error('Meta did not return an upload session id');
+    }
+    catch (error) {
+        const detail = error.response?.data?.error?.message || error.message;
+        throw new Error(`Could not start the sample upload with Meta: ${detail}`);
+    }
+    try {
+        const upload = await axios.post(`${api}/${sessionId}`, file.buffer, {
+            headers: {
+                // This leg authenticates with the "OAuth <token>" scheme rather than a
+                // Bearer header or an access_token param -- the resumable upload
+                // endpoint rejects the other two.
+                Authorization: `OAuth ${accessToken}`,
+                file_offset: '0',
+                'Content-Type': 'application/octet-stream',
+            },
+            maxBodyLength: Infinity,
+            maxContentLength: Infinity,
+        });
+        const handle = upload.data?.h;
+        if (!handle)
+            throw new Error('Meta accepted the upload but returned no handle');
+        return handle;
+    }
+    catch (error) {
+        const detail = error.response?.data?.error?.message || error.message;
+        throw new Error(`Could not upload the sample to Meta: ${detail}`);
     }
 }
 /**

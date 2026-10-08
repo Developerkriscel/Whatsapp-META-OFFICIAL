@@ -6,7 +6,13 @@ export interface DispatchMessageParams {
     contactPhone: string;
     phoneNumberId: string;
     body: string;
-    type?: 'text' | 'template';
+    type?: 'text' | 'template' | 'media';
+    media?: {
+        kind: 'image' | 'video' | 'document' | 'audio';
+        link: string;
+        caption?: string;
+        filename?: string;
+    };
     template?: {
         name: string;
         language: string;

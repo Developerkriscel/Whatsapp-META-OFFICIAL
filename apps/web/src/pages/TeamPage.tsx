@@ -346,7 +346,7 @@ export default function TeamPage() {
             <select
               value={roleFilter}
               onChange={(e) => setRoleFilter(e.target.value as Role | 'all')}
-              className="input-apple"
+              className="input-apple w-full sm:w-40"
             >
               <option value="all">All Roles</option>
               <option value="OWNER">Owner</option>

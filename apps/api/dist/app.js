@@ -16,11 +16,15 @@ import { registerSuperadminRoutes } from './routes/superadmin.js';
 import { registerWebhookRoutes } from './routes/webhooks.js';
 import { registerBillingRoutes } from './routes/billing.js';
 import { registerStripeWebhook } from './routes/stripe-webhook.js';
+import { registerRazorpayWebhook } from './routes/razorpay-webhook.js';
 import { registerAddOnRoutes } from './routes/tenant-addons.js';
 import { registerInvoiceRoutes } from './routes/invoice.js';
 import { registerWhatsAppRoutes } from './routes/whatsapp.js';
 import { registerCreditRoutes } from './routes/credits.js';
 import { registerSuperadminCreditRoutes } from './routes/superadminCredits.js';
+import { registerSuperadminCommerceRoutes } from './routes/superadminCommerce.js';
+import { registerFileRoutes, registerStorageAdminRoutes } from './routes/files.js';
+import { registerAiAdminRoutes } from './routes/superadminAi.js';
 import { registerSSERoutes } from './routes/sse.js';
 import { registerAutomationRoutes } from './routes/automation.js';
 import { registerTeamRoutes } from './routes/teams.js';
@@ -72,11 +76,37 @@ export async function buildApp() {
     await app.register(rateLimitMiddleware);
     // Register security middleware (XSS, SQL injection, headers)
     await app.register(securityMiddleware);
-    // Register raw-body plugin for Stripe webhook signature verification
+    // Raw body for every endpoint that verifies a provider's signature.
     await app.register(rawBody, {
         field: 'rawBody',
         global: false,
-        routes: ['/api/v1/stripe/webhook'],
+        // '/webhook' is Meta's callback. Its signature is an HMAC over the exact
+        // bytes Meta sent, so the handler needs those bytes -- re-serialising the
+        // parsed body produces different ones and the comparison always fails.
+        routes: ['/api/v1/stripe/webhook', '/webhooks/razorpay', '/webhook'],
+    });
+    /**
+     * A POST with no body but a JSON content-type.
+     *
+     * Several endpoints take no body at all — submit a template, sync, verify a
+     * number. axios still sets Content-Type: application/json on a bodyless
+     * post, and Fastify's default parser rejects that combination outright with
+     * FST_ERR_CTP_EMPTY_JSON_BODY. The button in the UI just showed "400".
+     *
+     * Treating an empty body as {} is what those routes already expect, and their
+     * zod schemas still reject a body that is present but malformed.
+     */
+    app.addContentTypeParser('application/json', { parseAs: 'string' }, (_req, body, done) => {
+        const text = body ?? '';
+        if (text.trim() === '')
+            return done(null, {});
+        try {
+            done(null, JSON.parse(text));
+        }
+        catch (err) {
+            err.statusCode = 400;
+            done(err, undefined);
+        }
     });
     // Meta calls the Data Deletion callback as application/x-www-form-urlencoded
     app.addContentTypeParser('application/x-www-form-urlencoded', { parseAs: 'string' }, (_req, body, done) => {
@@ -161,10 +191,15 @@ export async function buildApp() {
     await app.register(registerInvoiceRoutes, { prefix: '/api/v1' });
     await app.register(registerCreditRoutes, { prefix: '/api/v1' });
     await app.register(registerSuperadminCreditRoutes, { prefix: '/api/v1/superadmin' });
+    await app.register(registerSuperadminCommerceRoutes, { prefix: '/api/v1/superadmin' });
+    await app.register(registerStorageAdminRoutes, { prefix: '/api/v1/superadmin' });
+    await app.register(registerAiAdminRoutes, { prefix: '/api/v1/superadmin' });
+    await app.register(registerFileRoutes, { prefix: '/api/v1' });
     const { registerSuperadminAdvancedRoutes } = await import('./routes/superadminFeatures.js');
     await app.register(registerSuperadminAdvancedRoutes, { prefix: '/api/v1/superadmin' });
     await app.register(registerWebhookRoutes);
     await app.register(registerStripeWebhook);
+    await app.register(registerRazorpayWebhook);
     await app.register(registerSSERoutes, { prefix: '/api/v1' });
     await app.register(registerAutomationRoutes, { prefix: '/api/v1' });
     await app.register(registerTeamRoutes, { prefix: '/api/v1' });

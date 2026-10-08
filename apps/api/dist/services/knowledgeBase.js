@@ -1,11 +1,12 @@
 /**
  * Knowledge Base — RAG (retrieval-augmented generation) support for the
- * `ai_reply` chatbot flow step. Same Mistral integration pattern as
- * aiAssist.ts: every call is wrapped so a missing MISTRAL_API_KEY or a
- * network/API failure returns null instead of throwing, so callers can
- * always fall back to a static message rather than the bot going silent.
+ * `ai_reply` chatbot flow step.
+ *
+ * Embeddings and generation both go through aiProvider.ts, so this follows
+ * whichever provider the panel selects. Every call is wrapped so an
+ * unconfigured or failing provider returns null instead of throwing, and
+ * callers fall back to a static message rather than the bot going silent.
  */
-import axios from 'axios';
 const CHUNK_SIZE = 500;
 const CHUNK_OVERLAP = 50;
 const MIN_SIMILARITY = 0.5;
@@ -31,37 +32,18 @@ export function chunkText(text) {
     }
     return chunks.filter(Boolean);
 }
-async function callEmbeddings(input) {
-    const apiKey = process.env.MISTRAL_API_KEY;
-    if (!apiKey)
-        return input.map(() => null);
-    try {
-        const response = await axios.post('https://api.mistral.ai/v1/embeddings', { model: 'mistral-embed', input }, {
-            headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-            timeout: 15000,
-        });
-        const data = response.data?.data || [];
-        // Mistral returns results in the same order as the input array, each
-        // tagged with its own "index" — sort defensively rather than assume.
-        const byIndex = new Map();
-        for (const item of data) {
-            if (Array.isArray(item?.embedding))
-                byIndex.set(item.index, item.embedding);
-        }
-        return input.map((_, i) => byIndex.get(i) ?? null);
-    }
-    catch (err) {
-        return input.map(() => null);
-    }
+async function callEmbeddings(prisma, input) {
+    const { embed } = await import('./aiProvider.js');
+    return embed(prisma, input);
 }
-export async function embedText(text) {
-    const [result] = await callEmbeddings([text]);
+export async function embedText(prisma, text) {
+    const [result] = await callEmbeddings(prisma, [text]);
     return result;
 }
-export async function embedBatch(texts) {
+export async function embedBatch(prisma, texts) {
     if (texts.length === 0)
         return [];
-    return callEmbeddings(texts);
+    return callEmbeddings(prisma, texts);
 }
 export function cosineSimilarity(a, b) {
     if (a.length !== b.length || a.length === 0)
@@ -83,58 +65,77 @@ export async function retrieveRelevantChunks(prisma, tenantId, knowledgeBaseId, 
         where: { tenantId, knowledgeBaseId },
         select: { id: true, content: true, documentId: true, embedding: true },
     });
-    return chunks
+    // Vectors from different embedding models are not comparable, and
+    // cosineSimilarity returns 0 for a length mismatch rather than throwing. So
+    // after a provider switch every chunk would score zero, the bot would answer
+    // "I don't know" to everything, and nothing would say why. Count the
+    // mismatches and say so.
+    const usable = chunks.filter((c) => c.embedding.length === queryEmbedding.length);
+    const stale = chunks.length - usable.length;
+    if (stale > 0) {
+        console.warn(`[KB] ${stale} of ${chunks.length} chunks in ${knowledgeBaseId} were embedded by a different model ` +
+            `(${queryEmbedding.length} dimensions expected) and cannot be searched until re-indexed.`);
+    }
+    return usable
         .map((c) => ({
         id: c.id,
         content: c.content,
         documentId: c.documentId,
         similarity: cosineSimilarity(queryEmbedding, c.embedding),
     }))
-        .filter((c) => c.similarity >= MIN_SIMILARITY)
+        .filter((c) => c.similarity > 0)
         .sort((a, b) => b.similarity - a.similarity)
         .slice(0, topK);
 }
 /**
+ * How many chunks were embedded by a model other than the current one, and so
+ * are invisible to search until re-indexed.
+ */
+export async function countStaleChunks(prisma, tenantId, knowledgeBaseId) {
+    const { embeddingDimensions } = await import('./aiProvider.js');
+    const expected = await embeddingDimensions(prisma);
+    const chunks = await prisma.knowledgeChunk.findMany({
+        where: { ...(tenantId ? { tenantId } : {}), ...(knowledgeBaseId ? { knowledgeBaseId } : {}) },
+        select: { embedding: true },
+    });
+    return {
+        total: chunks.length,
+        stale: chunks.filter((c) => c.embedding.length !== expected).length,
+        expectedDimensions: expected,
+    };
+}
+/**
  * Full RAG pipeline: embed the query, retrieve relevant chunks, generate a
- * grounded reply. Returns null on any failure (no API key, embedding
- * failure, no relevant chunks, or generation failure) — never throws.
+ * grounded reply. Returns null on any failure (no provider configured,
+ * embedding failure, no relevant chunks, or generation failure) — never throws.
  */
 export async function generateRagReply(params) {
-    const { prisma, tenantId, knowledgeBaseId, systemPrompt, userMessage } = params;
-    const apiKey = process.env.MISTRAL_API_KEY;
-    if (!apiKey)
-        return null;
-    const queryEmbedding = await embedText(userMessage);
+    const { prisma, tenantId, knowledgeBaseId, systemPrompt, userMessage, guardrails } = params;
+    const queryEmbedding = await embedText(prisma, userMessage);
     if (!queryEmbedding)
         return null;
     const chunks = await retrieveRelevantChunks(prisma, tenantId, knowledgeBaseId, queryEmbedding);
     if (chunks.length === 0)
         return null;
     const context = chunks.map((c, i) => `[${i + 1}] ${c.content}`).join('\n\n');
-    const model = process.env.MISTRAL_MODEL || 'mistral-small-latest';
-    try {
-        const response = await axios.post('https://api.mistral.ai/v1/chat/completions', {
-            model,
-            messages: [
-                {
-                    role: 'system',
-                    content: `${systemPrompt}\n\nAnswer only using the context below. If the context doesn't contain the answer, say you're not sure and offer to connect them with a human — never invent information.\n\nContext:\n${context}`,
-                },
-                { role: 'user', content: userMessage },
-            ],
-            max_tokens: 400,
-            temperature: 0.3,
-        }, {
-            headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-            timeout: 15000,
-        });
-        const reply = response.data?.choices?.[0]?.message?.content?.trim();
-        if (!reply)
-            return null;
-        return { reply, chunks };
-    }
-    catch (err) {
+    const { chatCompletion } = await import('./aiProvider.js');
+    const { buildSystemPrompt, prepareUserMessage } = await import('./aiGuardrails.js');
+    const system = guardrails
+        ? buildSystemPrompt({ ...guardrails, context })
+        : `${systemPrompt}\n\nAnswer only using the context below. If the context doesn't contain the answer, ` +
+            `say you're not sure and offer to connect them with a human — never invent information.\n\n` +
+            `Context:\n${context}`;
+    const result = await chatCompletion(prisma, {
+        system,
+        user: guardrails ? prepareUserMessage(userMessage) : userMessage,
+        maxTokens: 400,
+        temperature: 0.3,
+        timeoutMs: 15000,
+        tenantId,
+        feature: 'chatbot-rag',
+    });
+    if (!result)
         return null;
-    }
+    return { reply: result.content, chunks };
 }
 //# sourceMappingURL=knowledgeBase.js.map
