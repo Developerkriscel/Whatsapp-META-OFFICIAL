@@ -355,7 +355,7 @@ export default function TemplatesPage() {
       </div>
 
       {/* Filters */}
-      <div className="card-apple p-4 flex items-center gap-4">
+      {/* <div className="card-apple p-4 flex flex-col sm:flex-row items-stretch sm:items-center gap-4">
         <div className="relative flex-1">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-ios-muted" />
           <input
@@ -369,15 +369,37 @@ export default function TemplatesPage() {
         <select
           value={category}
           onChange={(e) => setCategory(e.target.value)}
-          className="input-apple"
+          className="input-apple w-full sm:w-48 shrink-0"
         >
           <option value="all">All Categories</option>
           <option value="MARKETING">Marketing</option>
           <option value="UTILITY">Utility</option>
           <option value="AUTHENTICATION">Authentication</option>
         </select>
-      </div>
+      </div> */}
+<div className="card-apple p-4 flex flex-col sm:flex-row items-stretch sm:items-center gap-4">
+  <div className="relative flex-1">
+    <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-ios-muted" />
+    <input
+      type="text"
+      placeholder="Search templates..."
+      value={search}
+      onChange={(e) => setSearch(e.target.value)}
+      className="input-apple w-full pl-10"
+    />
+  </div>
 
+  <select
+    value={category}
+    onChange={(e) => setCategory(e.target.value)}
+    className="input-apple w-full sm:w-40"
+  >
+    <option value="all">All Categories</option>
+    <option value="MARKETING">Marketing</option>
+    <option value="UTILITY">Utility</option>
+    <option value="AUTHENTICATION">Authentication</option>
+  </select>
+</div>
       {/* Templates Grid */}
       {isLoading ? (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
