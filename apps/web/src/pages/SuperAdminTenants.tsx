@@ -8,7 +8,7 @@ import {
   Building2, Search, Plus, X, Ban, CheckCircle, Users, CreditCard,
   Settings, ChevronDown, Shield, Coins, Copy, Check, Phone,
   FileText, Send, MessageSquare, UserCheck, ArrowUp, ArrowDown,
-  TrendingDown, Zap, Eye, EyeOff, Minus, AlertTriangle } from 'lucide-react';
+  TrendingDown, Zap, Eye, EyeOff, Minus, AlertTriangle, Pencil } from 'lucide-react';
 
 interface TenantUser {
   id: string;
@@ -1294,6 +1294,15 @@ function BillingTab({ tenantId, tenant }: { tenantId: string; tenant: any }) {
   const fx = useCurrency();
   const queryClient = useQueryClient();
   const [selectedPlanId, setSelectedPlanId] = useState('');
+  const [editingPlan, setEditingPlan] = useState<any>(null);
+  const [planEditForm, setPlanEditForm] = useState({
+    name: '',
+    monthlyPrice: '',
+    annualPrice: '',
+    description: '',
+    sortOrder: '0',
+  });
+  const [planEditError, setPlanEditError] = useState('');
 
   const { data: plansData } = useQuery({
     queryKey: ['superadmin-plans'],
@@ -1324,6 +1333,36 @@ function BillingTab({ tenantId, tenant }: { tenantId: string; tenant: any }) {
       queryClient.invalidateQueries({ queryKey: ['superadmin-tenants'] });
       setSelectedPlanId('');
       alert('Plan changed successfully');
+    },
+  });
+
+  const updatePlanMutation = useMutation({
+    mutationFn: async (form: typeof planEditForm) => {
+      await api.patch(`/superadmin/plans/${editingPlan.id}`, {
+        name: form.name.trim(),
+        monthlyPrice: Number(form.monthlyPrice),
+        annualPrice: Number(form.annualPrice),
+        description: form.description.trim(),
+        sortOrder: Number(form.sortOrder),
+      });
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['superadmin-plans'] });
+      queryClient.invalidateQueries({ queryKey: ['plans'] });
+      queryClient.invalidateQueries({ queryKey: ['public-plans'] });
+      queryClient.invalidateQueries({ queryKey: ['billing', 'plans'] });
+      queryClient.invalidateQueries({ queryKey: ['superadmin-tenant-detail', tenantId] });
+      queryClient.invalidateQueries({ queryKey: ['superadmin-tenants'] });
+      setEditingPlan(null);
+      setPlanEditError('');
+    },
+    onError: (error: any) => {
+      setPlanEditError(
+        error.response?.data?.error?.message ||
+        error.response?.data?.message ||
+        error.message ||
+        'Failed to update plan',
+      );
     },
   });
 
@@ -1454,6 +1493,25 @@ function BillingTab({ tenantId, tenant }: { tenantId: string; tenant: any }) {
                   <p>{plan.maxContacts.toLocaleString()} contacts</p>
                   <p>{plan.maxTeamMembers} team members</p>
                 </div>
+                <button
+                  type="button"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    setEditingPlan(plan);
+                    setPlanEditForm({
+                      name: plan.name,
+                      monthlyPrice: String(plan.monthlyPrice),
+                      annualPrice: String(plan.annualPrice),
+                      description: plan.description || '',
+                      sortOrder: String(plan.sortOrder ?? 0),
+                    });
+                    setPlanEditError('');
+                  }}
+                  className="mt-3 inline-flex items-center gap-1.5 text-xs font-medium text-wa-green hover:underline"
+                >
+                  <Pencil className="w-3.5 h-3.5" />
+                  Edit plan
+                </button>
               </div>
             );
           })}
@@ -1496,6 +1554,107 @@ function BillingTab({ tenantId, tenant }: { tenantId: string; tenant: any }) {
           </div>
         </div>
       </div>
+
+      {editingPlan && createPortal(
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-md flex items-center justify-center z-[9999] p-4">
+          <form
+            onSubmit={(event) => {
+              event.preventDefault();
+              setPlanEditError('');
+              updatePlanMutation.mutate(planEditForm);
+            }}
+            className="bg-white rounded-apple-xl w-full max-w-lg shadow-2xl border border-black/10"
+          >
+            <div className="flex items-center justify-between p-4 border-b border-black/10">
+              <h2 className="text-lg font-semibold text-ios-dark">Edit Plan</h2>
+              <button
+                type="button"
+                onClick={() => setEditingPlan(null)}
+                className="p-2 hover:bg-ios-gray rounded-apple-lg"
+                aria-label="Close"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="p-4 space-y-4">
+              <label className="block text-sm font-medium text-ios-secondary">
+                Plan name
+                <input
+                  required
+                  value={planEditForm.name}
+                  onChange={(event) => setPlanEditForm({ ...planEditForm, name: event.target.value })}
+                  className="input-apple w-full mt-1"
+                />
+              </label>
+              <div className="grid grid-cols-2 gap-4">
+                <label className="block text-sm font-medium text-ios-secondary">
+                  Monthly price
+                  <input
+                    required
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    value={planEditForm.monthlyPrice}
+                    onChange={(event) => setPlanEditForm({ ...planEditForm, monthlyPrice: event.target.value })}
+                    className="input-apple w-full mt-1"
+                  />
+                </label>
+                <label className="block text-sm font-medium text-ios-secondary">
+                  Annual price
+                  <input
+                    required
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    value={planEditForm.annualPrice}
+                    onChange={(event) => setPlanEditForm({ ...planEditForm, annualPrice: event.target.value })}
+                    className="input-apple w-full mt-1"
+                  />
+                </label>
+              </div>
+              <label className="block text-sm font-medium text-ios-secondary">
+                Description
+                <textarea
+                  value={planEditForm.description}
+                  onChange={(event) => setPlanEditForm({ ...planEditForm, description: event.target.value })}
+                  className="input-apple w-full mt-1"
+                  rows={3}
+                />
+              </label>
+              <label className="block text-sm font-medium text-ios-secondary">
+                Display order
+                <input
+                  required
+                  type="number"
+                  value={planEditForm.sortOrder}
+                  onChange={(event) => setPlanEditForm({ ...planEditForm, sortOrder: event.target.value })}
+                  className="input-apple w-full mt-1"
+                />
+              </label>
+              {planEditError && (
+                <p role="alert" className="text-sm text-red-600">{planEditError}</p>
+              )}
+            </div>
+            <div className="flex justify-end gap-2 p-4 border-t border-black/10">
+              <button
+                type="button"
+                onClick={() => setEditingPlan(null)}
+                className="btn-apple btn-apple-outline"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={updatePlanMutation.isPending}
+                className="btn-apple btn-wa-green disabled:opacity-50"
+              >
+                {updatePlanMutation.isPending ? 'Saving...' : 'Save changes'}
+              </button>
+            </div>
+          </form>
+        </div>,
+        document.body,
+      )}
     </div>
   );
 }

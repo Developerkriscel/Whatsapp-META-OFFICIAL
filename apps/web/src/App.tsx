@@ -25,10 +25,13 @@ import BillingAnalyticsPage from './pages/BillingAnalyticsPage';
 import SuperAdminCredits from './pages/SuperAdminCredits';
 import SuperAdminSettings from './pages/SuperAdminSettings';
 import SuperAdminSystem from './pages/SuperAdminSystem';
+import SuperAdminPlans from './pages/SuperAdminPlans';
 import BotFlowsPage from './pages/BotFlowsPage';
 import WhatsAppSettingsPage from './pages/WhatsAppSettingsPage';
 import WhatsAppAccountsPage from './pages/WhatsAppAccountsPage';
 import CreditsPage from './pages/CreditsPage';
+import PolicyPage from './pages/PolicyPage';
+import ContactPage from './pages/ContactPage';
 
 // Components
 import Layout from './components/Layout';
@@ -102,6 +105,7 @@ function SuperadminLayout() {
       <Routes>
         <Route index element={<SuperAdminDashboard />} />
         <Route path="tenants" element={<SuperAdminTenants />} />
+        <Route path="plans" element={<SuperAdminPlans />} />
         <Route path="tickets" element={<SuperAdminTickets />} />
         <Route path="billing" element={<BillingAnalyticsPage />} />
         <Route path="credits" element={<SuperAdminCredits />} />
@@ -138,6 +142,26 @@ function ClientLayout() {
   );
 }
 
+function HomeRoute() {
+  const { user, loading } = useAuth();
+
+  if (loading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center">
+        <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-wa-green" />
+      </div>
+    );
+  }
+
+  return user ? (
+    <Layout variant="client">
+      <DashboardPage />
+    </Layout>
+  ) : (
+    <PricingPage />
+  );
+}
+
 function App() {
   return (
     <ErrorBoundary>
@@ -147,6 +171,11 @@ function App() {
         <Route path="/forgot-password" element={<ForgotPasswordPage />} />
         <Route path="/pricing" element={<PricingPage />} />
         <Route path="/register" element={<RegisterPage />} />
+        <Route path="/contact" element={<ContactPage />} />
+        <Route path="/terms" element={<PolicyPage type="terms" />} />
+        <Route path="/privacy" element={<PolicyPage type="privacy" />} />
+        <Route path="/refund-policy" element={<PolicyPage type="refund" />} />
+        <Route path="/" element={<HomeRoute />} />
 
         {/* Super Admin routes */}
         <Route

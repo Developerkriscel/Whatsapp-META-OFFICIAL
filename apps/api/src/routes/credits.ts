@@ -353,10 +353,20 @@ export async function registerCreditRoutes(app: FastifyInstance): Promise<void> 
 
     try {
       const { createOrder } = await import('../services/payments.js');
+      const customerProfile = await app.prisma.user.findUnique({
+        where: { id: request.authUser.id },
+        select: { name: true, email: true, phone: true },
+      });
       const order = await createOrder(app.prisma, {
         tenantId: request.authUser.tenantId,
         packageId: body.packageId,
         credits: body.credits,
+        customer: {
+          id: request.authUser.tenantId,
+          name: customerProfile?.name || 'WhatsApp customer',
+          email: customerProfile?.email || request.authUser.email,
+          phone: customerProfile?.phone || null,
+        },
       });
       return { success: true, data: order };
     } catch (err: any) {
@@ -365,6 +375,27 @@ export async function registerCreditRoutes(app: FastifyInstance): Promise<void> 
         error: { code: 'CHECKOUT_FAILED', message: err.message },
       });
     }
+  });
+
+  app.post('/credits/checkout/confirm-cashfree', { preHandler: [app.requirePermission('billing', 'update')] }, async (request, reply) => {
+    if (!request.authUser?.tenantId) {
+      return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
+    }
+    const body = z.object({ orderId: z.string().min(1) }).parse(request.body);
+    const order = await app.prisma.paymentOrder.findFirst({
+      where: {
+        providerOrderId: body.orderId,
+        provider: 'cashfree',
+        tenantId: request.authUser.tenantId,
+      },
+      select: { id: true },
+    });
+    if (!order) {
+      return reply.status(404).send({ success: false, error: { code: 'ORDER_NOT_FOUND', message: 'Cashfree order not found.' } });
+    }
+
+    const { confirmCashfreeOrder } = await import('../services/payments.js');
+    return { success: true, data: await confirmCashfreeOrder(app.prisma, body.orderId) };
   });
 
   /**

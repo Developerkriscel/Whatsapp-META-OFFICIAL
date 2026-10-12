@@ -13,8 +13,18 @@
 import { api } from '../api/client';
 
 const CHECKOUT_SCRIPT = 'https://checkout.razorpay.com/v1/checkout.js';
+const CASHFREE_SCRIPT = 'https://sdk.cashfree.com/js/v3/cashfree.js';
 
 let scriptPromise: Promise<void> | null = null;
+let cashfreeScriptPromise: Promise<void> | null = null;
+
+declare global {
+  interface Window {
+    Cashfree?: (options: { mode: 'sandbox' | 'production' }) => {
+      checkout: (options: { paymentSessionId: string; redirectTarget: '_self' }) => Promise<unknown>;
+    };
+  }
+}
 
 /** Loads Razorpay's checkout script once and reuses it. */
 function loadCheckout(): Promise<void> {
@@ -34,6 +44,38 @@ function loadCheckout(): Promise<void> {
     document.body.appendChild(el);
   });
   return scriptPromise;
+}
+
+function loadCashfreeCheckout(): Promise<void> {
+  if (typeof window === 'undefined') return Promise.reject(new Error('No browser'));
+  if (window.Cashfree) return Promise.resolve();
+  if (cashfreeScriptPromise) return cashfreeScriptPromise;
+
+  cashfreeScriptPromise = new Promise<void>((resolve, reject) => {
+    const el = document.createElement('script');
+    el.src = CASHFREE_SCRIPT;
+    el.async = true;
+    el.onload = () => {
+      if (window.Cashfree) resolve();
+      else {
+        cashfreeScriptPromise = null;
+        reject(new Error('Cashfree checkout did not initialize.'));
+      }
+    };
+    el.onerror = () => {
+      cashfreeScriptPromise = null;
+      reject(new Error('Could not load Cashfree checkout. Check the connection and try again.'));
+    };
+    document.body.appendChild(el);
+  });
+  return cashfreeScriptPromise;
+}
+
+export async function openCashfreeCheckout(paymentSessionId: string, testMode: boolean): Promise<void> {
+  await loadCashfreeCheckout();
+  const cashfree = window.Cashfree?.({ mode: testMode ? 'sandbox' : 'production' });
+  if (!cashfree) throw new Error('Cashfree checkout is unavailable.');
+  await cashfree.checkout({ paymentSessionId, redirectTarget: '_self' });
 }
 
 export interface CheckoutResult {

@@ -30,10 +30,36 @@ interface Tenant {
   trialEndsAt: string | null;
 }
 
+interface PlatformHealth {
+  status: 'healthy' | 'degraded';
+  checkedAt: string;
+  uptimeSeconds: number;
+  healthCheckLatencyMs: number;
+  messageDelivery: {
+    percentage: number | null;
+    attempted: number;
+    delivered: number;
+  };
+  services: Array<{
+    id: string;
+    status: 'healthy' | 'degraded' | 'unhealthy' | 'not_configured' | 'unknown';
+    latencyMs: number | null;
+  }>;
+}
+
 function formatCount(n: number): string {
   if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M';
   if (n >= 1_000) return (n / 1_000).toFixed(1) + 'K';
   return n.toLocaleString();
+}
+
+function formatUptime(seconds: number): string {
+  const days = Math.floor(seconds / 86400);
+  const hours = Math.floor((seconds % 86400) / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  if (days > 0) return `${days}d ${hours}h`;
+  if (hours > 0) return `${hours}h ${minutes}m`;
+  return `${minutes}m`;
 }
 
 export default function SuperAdminDashboard() {
@@ -54,8 +80,31 @@ export default function SuperAdminDashboard() {
     },
   });
 
+  const {
+    data: platformHealth,
+    isLoading: healthLoading,
+    isError: healthError,
+  } = useQuery<PlatformHealth>({
+    queryKey: ['superadmin-service-status'],
+    queryFn: async () => {
+      const response = await api.get('/superadmin/service-status');
+      return response.data.data;
+    },
+    refetchInterval: 30_000,
+    refetchIntervalInBackground: false,
+    refetchOnWindowFocus: true,
+  });
+
   const metrics = data?.data;
   const tenants = tenantsData?.data || [];
+  const databaseHealth = platformHealth?.services.find((service) => service.id === 'database');
+
+  const healthValueClass = (status?: PlatformHealth['services'][number]['status']) => {
+    if (status === 'healthy') return 'text-wa-green';
+    if (status === 'degraded' || status === 'unknown') return 'text-apple-orange';
+    if (status === 'unhealthy') return 'text-apple-red';
+    return 'text-ios-muted';
+  };
 
   const cards = [
     {
@@ -178,24 +227,52 @@ export default function SuperAdminDashboard() {
             <TrendingUp className="w-5 h-5 text-wa-green" />
             Platform Health
           </h2>
+          {healthError ? (
+            <p className="text-sm text-apple-red">Unable to load live platform health.</p>
+          ) : healthLoading ? (
+            <p className="text-sm text-ios-muted animate-pulse">Checking platform health...</p>
+          ) : (
           <div className="space-y-4">
             <div className="flex items-center justify-between">
-              <span className="text-ios-secondary">API Uptime</span>
-              <span className="font-medium text-wa-green">99.9%</span>
+              <span className="text-ios-secondary">API Process Uptime</span>
+              <span className="font-medium text-ios-dark">
+                {platformHealth ? formatUptime(platformHealth.uptimeSeconds) : '—'}
+              </span>
             </div>
             <div className="flex items-center justify-between">
               <span className="text-ios-secondary">Database</span>
-              <span className="font-medium text-wa-green">Healthy</span>
+              <span className={`font-medium capitalize ${healthValueClass(databaseHealth?.status)}`}>
+                {databaseHealth?.status ?? 'Unknown'}
+                {databaseHealth?.latencyMs != null ? ` · ${databaseHealth.latencyMs} ms` : ''}
+              </span>
             </div>
             <div className="flex items-center justify-between">
-              <span className="text-ios-secondary">Message Delivery</span>
-              <span className="font-medium text-wa-green">98.2%</span>
+              <span className="text-ios-secondary">Message Delivery (24h)</span>
+              <span className={`font-medium ${
+                platformHealth?.messageDelivery.percentage == null
+                  ? 'text-ios-muted'
+                  : platformHealth.messageDelivery.percentage >= 95
+                    ? 'text-wa-green'
+                    : 'text-apple-orange'
+              }`}>
+                {platformHealth?.messageDelivery.percentage == null
+                  ? 'No delivery data'
+                  : `${platformHealth.messageDelivery.percentage}% (${platformHealth.messageDelivery.delivered}/${platformHealth.messageDelivery.attempted})`}
+              </span>
             </div>
             <div className="flex items-center justify-between">
-              <span className="text-ios-secondary">Avg Response Time</span>
-              <span className="font-medium text-ios-dark">45ms</span>
+              <span className="text-ios-secondary">Health Check Time</span>
+              <span className="font-medium text-ios-dark">
+                {platformHealth ? `${platformHealth.healthCheckLatencyMs} ms` : '—'}
+              </span>
             </div>
+            {platformHealth?.checkedAt && (
+              <p className="text-xs text-ios-muted pt-1">
+                Updated {new Date(platformHealth.checkedAt).toLocaleTimeString()} · refreshes every 30 seconds
+              </p>
+            )}
           </div>
+          )}
         </div>
       </div>
 

@@ -12,8 +12,10 @@
  * reads the same rates and margin the send path charges against.
  */
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { api } from '../api/client';
+import { openCashfreeCheckout } from '../lib/checkout';
 import {
   Wallet, TrendingUp, RotateCcw, Plus, Loader2, CheckCircle2, Info,
 } from 'lucide-react';
@@ -65,8 +67,49 @@ function money(n: number, symbol = '₹', dp = 2) {
 
 export default function CreditsPage() {
   const qc = useQueryClient();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [topUp, setTopUp] = useState('');
   const [period, setPeriod] = useState<'month' | 'all'>('month');
+  const [checkoutError, setCheckoutError] = useState('');
+  const [cashfreeMessage, setCashfreeMessage] = useState<{ text: string; success: boolean } | null>(null);
+
+  const returnedCashfreeOrderId = searchParams.get('cashfree_order_id');
+
+  useEffect(() => {
+    if (!returnedCashfreeOrderId) return;
+    let active = true;
+
+    api.post('/credits/checkout/confirm-cashfree', { orderId: returnedCashfreeOrderId })
+      .then(async (response) => {
+        const result = response.data?.data;
+        const paid = result?.credited || result?.reason === 'Already credited.';
+        if (!active) return;
+        setCashfreeMessage({
+          text: paid
+            ? 'Payment successful. Your balance has been updated.'
+            : `Payment is being confirmed. ${result?.reason || 'Your balance will update when Cashfree confirms it.'}`,
+          success: !!paid,
+        });
+        if (paid) await qc.invalidateQueries({ queryKey: ['billing-summary'] });
+      })
+      .catch((error: any) => {
+        if (active) {
+          setCashfreeMessage({
+            text: error?.response?.data?.error?.message || 'Could not verify the Cashfree payment yet.',
+            success: false,
+          });
+        }
+      })
+      .finally(() => {
+        if (active) {
+          const next = new URLSearchParams(searchParams);
+          next.delete('cashfree_order_id');
+          setSearchParams(next, { replace: true });
+        }
+      });
+
+    return () => { active = false; };
+  }, [returnedCashfreeOrderId, qc, searchParams, setSearchParams]);
 
   const { data, isLoading } = useQuery({
     queryKey: ['billing-summary', period],
@@ -98,10 +141,21 @@ export default function CreditsPage() {
       });
       return res.data?.data;
     },
+    onMutate: () => {
+      setCheckoutError('');
+      setCashfreeMessage(null);
+    },
     onSuccess: (order: any) => {
-      qc.invalidateQueries({ queryKey: ['billing-summary'] });
       setTopUp('');
-      if (order?.checkoutUrl) window.location.href = order.checkoutUrl;
+      setCheckoutError('');
+      if (order?.provider === 'cashfree' && order?.paymentSessionId) {
+        return openCashfreeCheckout(order.paymentSessionId, !!order.testMode)
+          .catch((error: Error) => setCheckoutError(error.message));
+      } else if (order?.checkoutUrl) {
+        window.location.href = order.checkoutUrl;
+      } else if (order?.provider === 'cashfree') {
+        setCheckoutError('Cashfree did not return a payment session. Please try again.');
+      }
     },
   });
 
@@ -121,6 +175,11 @@ export default function CreditsPage() {
         <h1 className="text-2xl font-semibold text-ios-dark">Credits</h1>
         <p className="text-ios-muted">WhatsApp messaging balance</p>
       </div>
+      {cashfreeMessage && (
+        <p className={`text-sm ${cashfreeMessage.success ? 'text-wa-green' : 'text-apple-orange'}`} role="status">
+          {cashfreeMessage.text}
+        </p>
+      )}
 
       {/* Balance, what has been billed, what came back. */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -355,9 +414,9 @@ export default function CreditsPage() {
           </button>
         </div>
 
-        {buy.isError && (
+        {(buy.isError || checkoutError) && (
           <p className="text-xs text-apple-red mt-2">
-            {(buy.error as any)?.response?.data?.error?.message || 'Could not add balance'}
+            {checkoutError || (buy.error as any)?.response?.data?.error?.message || 'Could not add balance'}
           </p>
         )}
       </div>

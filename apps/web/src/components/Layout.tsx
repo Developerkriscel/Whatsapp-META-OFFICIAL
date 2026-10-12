@@ -10,6 +10,7 @@ import {
   Settings,
   LogOut,
   Building2,
+  ClipboardList,
   Ticket,
   Shield,
   Menu,
@@ -22,6 +23,8 @@ import {
   Coins,
   ChevronDown,
   Home,
+  BookOpen,
+  RotateCcw,
 } from 'lucide-react';
 import { useState } from 'react';
 import clsx from 'clsx';
@@ -40,6 +43,7 @@ const navItems = {
   superadmin: [
     { icon: LayoutDashboard, label: 'Dashboard', path: '/superadmin' },
     { icon: Building2, label: 'Tenants', path: '/superadmin/tenants' },
+    { icon: ClipboardList, label: 'Available Plans', path: '/superadmin/plans' },
     { icon: Coins, label: 'Credits', path: '/superadmin/credits' },
     { icon: DollarSign, label: 'Billing Analytics', path: '/superadmin/billing' },
     { icon: Ticket, label: 'Tickets', path: '/superadmin/tickets' },
@@ -58,6 +62,8 @@ const navItems = {
     { icon: Coins, label: 'Credits', path: '/credits' },
     { icon: MessageSquare, label: 'WhatsApp', path: '/whatsapp' },
     { icon: FileText, label: 'Chatbot Flows', path: '/flows' },
+    { icon: BookOpen, label: 'Terms and Conditions', path: '/terms' },
+    { icon: RotateCcw, label: 'Return/Refund/Cancellation Policy', path: '/refund-policy' },
   ],
 };
 
@@ -123,7 +129,7 @@ export default function Layout({ children, variant }: LayoutProps) {
                 {user && <HeaderAvatar kind={pickAvatarKind(user.id, user.avatarGender)} />}
                 <div>
                   <h1 className="font-semibold text-wa-green text-sm leading-tight">Kriscel WA</h1>
-                  <p className="text-xs text-secondary-apple leading-tight">Official WhatsApp Partner</p>
+                  <p className="text-xs text-secondary-apple leading-tight">Customer Support &amp; CRM Software</p>
                 </div>
               </div>
             </div>

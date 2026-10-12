@@ -7,3 +7,7 @@ dist/
 *.tar.gz
 *.pdf
 test-screenshots/
+
+# Local environment secrets
+apps/api/.env
+apps/web/.env

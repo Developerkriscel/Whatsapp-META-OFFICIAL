@@ -167,7 +167,7 @@ export async function registerSuperadminCommerceRoutes(app: FastifyInstance) {
           { provider: 'razorpay', label: 'Razorpay', currencies: ['INR'], fields: ['publicKey', 'secretKey', 'webhookSecret'] },
           { provider: 'stripe', label: 'Stripe', currencies: ['USD', 'INR', 'EUR', 'GBP'], fields: ['publicKey', 'secretKey', 'webhookSecret'] },
           { provider: 'payu', label: 'PayU', currencies: ['INR'], fields: ['publicKey', 'secretKey'] },
-          { provider: 'cashfree', label: 'Cashfree', currencies: ['INR'], fields: ['publicKey', 'secretKey', 'webhookSecret'] },
+          { provider: 'cashfree', label: 'Cashfree', currencies: ['INR'], fields: ['publicKey', 'secretKey'] },
           { provider: 'phonepe', label: 'PhonePe', currencies: ['INR'], fields: ['publicKey', 'secretKey'] },
           { provider: 'paytm', label: 'Paytm', currencies: ['INR'], fields: ['publicKey', 'secretKey'] },
         ],

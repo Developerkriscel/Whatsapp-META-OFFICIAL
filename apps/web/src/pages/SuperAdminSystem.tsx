@@ -9,18 +9,12 @@ import SuperAdminAiTab from '../components/SuperAdminAiTab';
 import {
   Activity,
   Server,
-  HardDrive,
   Cpu,
-  Wifi,
-  Clock,
-  Database,
   Globe,
   Zap,
   AlertTriangle,
   CheckCircle,
-  XCircle,
   RefreshCw,
-  TrendingUp,
   MemoryStick,
   Loader2,
 } from 'lucide-react';
@@ -28,10 +22,126 @@ import {
 const TABS = ['overview', 'whatsapp', 'ai', 'services', 'webhooks', 'announcements', 'rate-markup', 'logs', 'alerts'] as const;
 type TabType = typeof TABS[number];
 
+type ServiceStatus = 'healthy' | 'degraded' | 'unhealthy' | 'not_configured' | 'unknown';
+
+interface ServiceCheck {
+  id: string;
+  name: string;
+  status: ServiceStatus;
+  latencyMs: number | null;
+  detail: string;
+}
+
+interface ServiceStatusData {
+  status: 'healthy' | 'degraded';
+  checkedAt: string;
+  services: ServiceCheck[];
+  process: {
+    cpuPercent: number | null;
+    memory: { rssMb: number; heapUsedMb: number; heapTotalMb: number };
+  };
+}
+
+const SERVICE_STATUS_STYLES: Record<ServiceStatus, string> = {
+  healthy: 'bg-wa-green/20 text-wa-green',
+  degraded: 'bg-apple-orange/20 text-apple-orange',
+  unhealthy: 'bg-apple-red/20 text-apple-red',
+  not_configured: 'bg-ios-gray text-ios-muted',
+  unknown: 'bg-ios-gray text-ios-muted',
+};
+
+function ServiceStatusGrid({
+  services,
+  isLoading,
+  isError,
+  checkedAt,
+  onRefresh,
+  isFetching,
+}: {
+  services: ServiceCheck[];
+  isLoading: boolean;
+  isError: boolean;
+  checkedAt?: string;
+  onRefresh: () => void;
+  isFetching: boolean;
+}) {
+  return (
+    <div className="card-apple p-6">
+      <div className="flex items-start justify-between gap-4 mb-4">
+        <div>
+          <h2 className="text-lg font-semibold text-ios-dark">Service Status</h2>
+          {checkedAt && (
+            <p className="text-xs text-ios-muted mt-1">
+              Last checked {new Date(checkedAt).toLocaleTimeString()}
+            </p>
+          )}
+        </div>
+        <button
+          onClick={onRefresh}
+          disabled={isFetching}
+          className="btn-apple btn-apple-outline text-sm flex items-center gap-2"
+        >
+          <RefreshCw className={`w-4 h-4 ${isFetching ? 'animate-spin' : ''}`} />
+          Refresh
+        </button>
+      </div>
+
+      {isLoading ? (
+        <div className="flex items-center justify-center py-10 text-ios-muted">
+          <Loader2 className="w-5 h-5 animate-spin mr-2" />
+          Checking services...
+        </div>
+      ) : isError ? (
+        <div className="py-8 text-center">
+          <p className="text-sm text-apple-red">Could not retrieve live service status.</p>
+          <button onClick={onRefresh} className="text-sm text-wa-green mt-2 hover:underline">
+            Try again
+          </button>
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+          {services.map((service) => (
+            <div key={service.id} className="p-4 border border-black/5 rounded-apple-lg">
+              <div className="flex items-start justify-between gap-3 mb-2">
+                <span className="font-medium text-ios-dark text-sm">{service.name}</span>
+                <span className={`text-xs px-2 py-1 rounded-apple-full font-medium whitespace-nowrap ${SERVICE_STATUS_STYLES[service.status]}`}>
+                  {service.status.replace('_', ' ')}
+                </span>
+              </div>
+              <p className="text-xs text-ios-muted">{service.detail}</p>
+              {service.latencyMs !== null && (
+                <p className="text-xs text-ios-secondary mt-2">{service.latencyMs} ms</p>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function SuperAdminSystemPage() {
   const [activeTab, setActiveTab] = useState<TabType>('overview');
   const [logLevel, setLogLevel] = useState('all');
   const [logService, setLogService] = useState('all');
+
+  const {
+    data: serviceStatusData,
+    isLoading: serviceStatusLoading,
+    isError: serviceStatusError,
+    isFetching: serviceStatusFetching,
+    refetch: refreshServiceStatus,
+  } = useQuery({
+    queryKey: ['superadmin-service-status'],
+    queryFn: async () => {
+      const response = await api.get('/superadmin/service-status');
+      return response.data.data as ServiceStatusData;
+    },
+    enabled: activeTab === 'overview' || activeTab === 'services',
+    refetchInterval: 30_000,
+    refetchIntervalInBackground: false,
+    refetchOnWindowFocus: true,
+  });
 
   const { data: dashboardData, isLoading: dashLoading } = useQuery({
     queryKey: ['superadmin-dashboard'],
@@ -74,9 +184,29 @@ export default function SuperAdminSystemPage() {
           <h1 className="text-2xl font-bold text-ios-dark">System Monitor</h1>
           <p className="text-ios-secondary mt-1">Platform health and performance metrics</p>
         </div>
-        <div className="flex items-center gap-2 text-sm">
-          <div className="w-2 h-2 bg-wa-green rounded-full animate-pulse" />
-          <span className="text-wa-green font-medium">Systems Operational</span>
+        <div className="flex items-center gap-3">
+          <div className={`flex items-center gap-2 text-sm font-medium ${
+            serviceStatusError ? 'text-apple-red' :
+            serviceStatusData?.status === 'degraded' ? 'text-apple-orange' :
+            serviceStatusData?.status === 'healthy' ? 'text-wa-green' : 'text-ios-muted'
+          }`}>
+            <div className={`w-2 h-2 rounded-full ${
+              serviceStatusError ? 'bg-apple-red' :
+              serviceStatusData?.status === 'degraded' ? 'bg-apple-orange' :
+              serviceStatusData?.status === 'healthy' ? 'bg-wa-green animate-pulse' : 'bg-ios-muted'
+            }`} />
+            {serviceStatusError ? 'Health check unavailable' :
+              serviceStatusData?.status === 'degraded' ? 'Attention required' :
+              serviceStatusData?.status === 'healthy' ? 'Services operational' : 'Checking services...'}
+          </div>
+          <button
+            onClick={() => refreshServiceStatus()}
+            disabled={serviceStatusFetching}
+            aria-label="Refresh service status"
+            className="p-2 rounded-apple-lg text-ios-muted hover:bg-ios-gray disabled:opacity-50"
+          >
+            <RefreshCw className={`w-4 h-4 ${serviceStatusFetching ? 'animate-spin' : ''}`} />
+          </button>
         </div>
       </div>
 
@@ -153,60 +283,36 @@ export default function SuperAdminSystemPage() {
                 ))}
               </div>
 
-              {/* Service Status Grid */}
-              <div className="card-apple p-6">
-                <h2 className="text-lg font-semibold text-ios-dark mb-4">Service Status</h2>
-                <div className="grid grid-cols-3 gap-4">
-                  {[
-                    { name: 'API Gateway', status: 'healthy', latency: '12ms', uptime: '99.99%' },
-                    { name: 'Auth Service', status: 'healthy', latency: '8ms', uptime: '99.98%' },
-                    { name: 'WhatsApp Connector', status: 'healthy', latency: '45ms', uptime: '99.95%' },
-                    { name: 'Database (Prisma)', status: 'healthy', latency: '5ms', uptime: '99.99%' },
-                    { name: 'Message Queue', status: 'healthy', latency: '3ms', uptime: '99.97%' },
-                    { name: 'File Storage', status: 'healthy', latency: '22ms', uptime: '99.94%' },
-                    { name: 'Email Service', status: 'healthy', latency: '120ms', uptime: '99.9%' },
-                    { name: 'Analytics Pipeline', status: 'healthy', latency: '80ms', uptime: '99.8%' },
-                    { name: 'Payment Gateway', status: 'healthy', latency: '67ms', uptime: '99.99%' },
-                  ].map((service) => (
-                    <div key={service.name} className="p-4 border border-black/5 rounded-apple-lg hover:bg-ios-gray/50 transition">
-                      <div className="flex items-center justify-between mb-2">
-                        <span className="font-medium text-ios-dark text-sm">{service.name}</span>
-                        <div className={`flex items-center gap-1.5 ${
-                          service.status === 'healthy' ? 'text-wa-green' : 'text-apple-orange'
-                        }`}>
-                          {service.status === 'healthy' ? (
-                            <CheckCircle className="w-3.5 h-3.5" />
-                          ) : (
-                            <AlertTriangle className="w-3.5 h-3.5" />
-                          )}
-                          <span className="text-xs font-medium capitalize">{service.status}</span>
-                        </div>
-                      </div>
-                      <div className="flex items-center justify-between text-xs text-ios-muted">
-                        <span>{service.latency} latency</span>
-                        <span>{service.uptime}</span>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
+              <ServiceStatusGrid
+                services={serviceStatusData?.services ?? []}
+                isLoading={serviceStatusLoading}
+                isError={serviceStatusError}
+                checkedAt={serviceStatusData?.checkedAt}
+                onRefresh={() => { void refreshServiceStatus(); }}
+                isFetching={serviceStatusFetching}
+              />
 
               {/* Resource Overview */}
-              <div className="grid grid-cols-2 gap-6">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 <div className="card-apple p-6">
                   <div className="flex items-center justify-between mb-4">
                     <div className="flex items-center gap-2">
                       <Cpu className="w-4 h-4 text-ios-muted" />
-                      <h3 className="font-medium text-ios-dark">CPU Usage</h3>
+                      <h3 className="font-medium text-ios-dark">API Process CPU</h3>
                     </div>
-                    <span className="text-sm font-medium text-wa-green">23%</span>
+                    <span className="text-sm font-medium text-wa-green">
+                      {serviceStatusData?.process.cpuPercent == null ? '—' : `${serviceStatusData.process.cpuPercent.toFixed(1)}%`}
+                    </span>
                   </div>
                   <div className="h-3 bg-ios-gray rounded-full overflow-hidden">
-                    <div className="h-full bg-gradient-to-r from-wa-green/60 to-wa-green rounded-full" style={{ width: '23%' }} />
+                    <div
+                      className="h-full bg-gradient-to-r from-wa-green/60 to-wa-green rounded-full"
+                      style={{ width: `${serviceStatusData?.process.cpuPercent ?? 0}%` }}
+                    />
                   </div>
                   <div className="flex justify-between mt-2 text-xs text-ios-muted">
-                    <span>2.4 / 16 cores</span>
-                    <span>Normal</span>
+                    <span>Process CPU across available cores</span>
+                    <span>Live sample</span>
                   </div>
                 </div>
 
@@ -214,51 +320,25 @@ export default function SuperAdminSystemPage() {
                   <div className="flex items-center justify-between mb-4">
                     <div className="flex items-center gap-2">
                       <MemoryStick className="w-4 h-4 text-ios-muted" />
-                      <h3 className="font-medium text-ios-dark">Memory</h3>
+                      <h3 className="font-medium text-ios-dark">API Process Memory</h3>
                     </div>
-                    <span className="text-sm font-medium text-wa-green">67%</span>
-                  </div>
-                  <div className="h-3 bg-ios-gray rounded-full overflow-hidden">
-                    <div className="h-full bg-gradient-to-r from-wa-green/60 to-wa-green rounded-full" style={{ width: '67%' }} />
+                    <span className="text-sm font-medium text-wa-green">
+                      {serviceStatusData ? `${serviceStatusData.process.memory.rssMb} MB RSS` : '—'}
+                    </span>
                   </div>
                   <div className="flex justify-between mt-2 text-xs text-ios-muted">
-                    <span>10.7 / 16 GB</span>
-                    <span>Moderate</span>
+                    <span>
+                      Heap {serviceStatusData?.process.memory.heapUsedMb ?? '—'} / {serviceStatusData?.process.memory.heapTotalMb ?? '—'} MB
+                    </span>
+                    <span>Live sample</span>
                   </div>
                 </div>
 
-                <div className="card-apple p-6">
-                  <div className="flex items-center justify-between mb-4">
-                    <div className="flex items-center gap-2">
-                      <HardDrive className="w-4 h-4 text-ios-muted" />
-                      <h3 className="font-medium text-ios-dark">Disk I/O</h3>
-                    </div>
-                    <span className="text-sm font-medium text-ios-secondary">12%</span>
-                  </div>
-                  <div className="h-3 bg-ios-gray rounded-full overflow-hidden">
-                    <div className="h-full bg-gradient-to-r from-ios-muted/60 to-ios-muted rounded-full" style={{ width: '12%' }} />
-                  </div>
-                  <div className="flex justify-between mt-2 text-xs text-ios-muted">
-                    <span>120 MB/s read</span>
-                    <span>Idle</span>
-                  </div>
-                </div>
-
-                <div className="card-apple p-6">
-                  <div className="flex items-center justify-between mb-4">
-                    <div className="flex items-center gap-2">
-                      <Wifi className="w-4 h-4 text-ios-muted" />
-                      <h3 className="font-medium text-ios-dark">Network</h3>
-                    </div>
-                    <span className="text-sm font-medium text-apple-purple">45 Mbps</span>
-                  </div>
-                  <div className="h-3 bg-ios-gray rounded-full overflow-hidden">
-                    <div className="h-full bg-gradient-to-r from-apple-purple/60 to-apple-purple rounded-full" style={{ width: '45%' }} />
-                  </div>
-                  <div className="flex justify-between mt-2 text-xs text-ios-muted">
-                    <span>In: 32 / Out: 13 Mbps</span>
-                    <span>Normal</span>
-                  </div>
+                <div className="card-apple p-6 md:col-span-2">
+                  <p className="text-sm font-medium text-ios-dark">Host-level disk and network metrics</p>
+                  <p className="text-sm text-ios-muted mt-1">
+                    These require a host monitoring agent and are not exposed by the application process.
+                  </p>
                 </div>
               </div>
             </>
@@ -269,60 +349,14 @@ export default function SuperAdminSystemPage() {
       {/* Services Tab */}
       {activeTab === 'services' && (
         <div className="space-y-6">
-          <div className="card-apple p-6">
-            <h2 className="text-lg font-semibold text-ios-dark mb-6">Microservices Health</h2>
-            <div className="space-y-4">
-              {[
-                { name: 'api-gateway', type: 'Gateway', instances: 4, healthy: 4, region: 'us-east-1', cpu: 18, mem: 45 },
-                { name: 'auth-service', type: 'Auth', instances: 3, healthy: 3, region: 'us-east-1', cpu: 22, mem: 38 },
-                { name: 'whatsapp-connector', type: 'Integration', instances: 5, healthy: 5, region: 'us-east-1', cpu: 35, mem: 62 },
-                { name: 'message-processor', type: 'Queue Consumer', instances: 8, healthy: 8, region: 'us-east-1', cpu: 28, mem: 55 },
-                { name: 'webhook-dispatcher', type: 'Event Handler', instances: 3, healthy: 3, region: 'us-east-1', cpu: 15, mem: 32 },
-                { name: 'analytics-collector', type: 'Analytics', instances: 2, healthy: 2, region: 'us-east-1', cpu: 42, mem: 78 },
-              ].map((svc) => (
-                <div key={svc.name} className="p-4 border border-black/5 rounded-apple-lg">
-                  <div className="flex items-center justify-between mb-3">
-                    <div className="flex items-center gap-3">
-                      <Server className="w-4 h-4 text-ios-muted" />
-                      <div>
-                        <p className="font-medium text-ios-dark">{svc.name}</p>
-                        <p className="text-xs text-ios-muted">{svc.type} · {svc.region}</p>
-                      </div>
-                    </div>
-                    <div className="flex items-center gap-3">
-                      <span className={`text-xs px-2.5 py-1 rounded-apple-full font-medium ${
-                        svc.healthy === svc.instances
-                          ? 'bg-wa-green/20 text-wa-green'
-                          : 'bg-apple-orange/20 text-apple-orange'
-                      }`}>
-                        {svc.healthy}/{svc.instances} instances
-                      </span>
-                    </div>
-                  </div>
-                  <div className="grid grid-cols-2 gap-4">
-                    <div>
-                      <div className="flex justify-between text-xs mb-1">
-                        <span className="text-ios-muted">CPU</span>
-                        <span className="text-ios-secondary font-medium">{svc.cpu}%</span>
-                      </div>
-                      <div className="h-1.5 bg-ios-gray rounded-full overflow-hidden">
-                        <div className={`h-full rounded-full ${svc.cpu > 70 ? 'bg-red-500' : svc.cpu > 50 ? 'bg-apple-orange' : 'bg-wa-green'}`} style={{ width: `${svc.cpu}%` }} />
-                      </div>
-                    </div>
-                    <div>
-                      <div className="flex justify-between text-xs mb-1">
-                        <span className="text-ios-muted">Memory</span>
-                        <span className="text-ios-secondary font-medium">{svc.mem}%</span>
-                      </div>
-                      <div className="h-1.5 bg-ios-gray rounded-full overflow-hidden">
-                        <div className={`h-full rounded-full ${svc.mem > 80 ? 'bg-red-500' : svc.mem > 60 ? 'bg-apple-orange' : 'bg-wa-green'}`} style={{ width: `${svc.mem}%` }} />
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
+          <ServiceStatusGrid
+            services={serviceStatusData?.services ?? []}
+            isLoading={serviceStatusLoading}
+            isError={serviceStatusError}
+            checkedAt={serviceStatusData?.checkedAt}
+            onRefresh={() => { void refreshServiceStatus(); }}
+            isFetching={serviceStatusFetching}
+          />
         </div>
       )}
 

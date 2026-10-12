@@ -77,8 +77,29 @@ const PLAN_LIMITS = {
 /**
  * Get plan limits for a tenant
  */
-export function getPlanLimits(plan) {
-    return PLAN_LIMITS[plan] || PLAN_LIMITS.STARTER;
+export function getPlanLimits(plan, configuredPlan) {
+    const defaults = PLAN_LIMITS[plan] || PLAN_LIMITS.STARTER;
+    if (!configuredPlan)
+        return defaults;
+    return {
+        ...defaults,
+        maxContacts: configuredPlan.maxContacts,
+        maxMessagesPerMonth: configuredPlan.maxMessagesPerMonth,
+        maxPhoneNumbers: configuredPlan.maxPhoneNumbers,
+        maxUsers: configuredPlan.maxTeamMembers,
+        maxCampaigns: configuredPlan.maxCampaigns,
+        maxAutomations: configuredPlan.maxChatbotFlows > 0,
+        maxApiCallsPerMinute: configuredPlan.maxMessagesPerMinute,
+        features: {
+            ...defaults.features,
+            analytics: configuredPlan.hasAnalytics,
+            teamManagement: configuredPlan.maxTeamMembers !== 0,
+            customBranding: configuredPlan.hasCustomBranding,
+            apiAccess: configuredPlan.hasAPI,
+            whiteLabel: configuredPlan.hasWhiteLabel,
+            prioritySupport: configuredPlan.hasPrioritySupport,
+        },
+    };
 }
 /**
  * Check if tenant is within plan limits
@@ -93,7 +114,7 @@ export async function checkPlanLimits(prisma, tenantId) {
         throw new Error('Tenant not found');
     }
     const planTier = tenant.plan?.tier || PlanTier.STARTER;
-    const limits = getPlanLimits(planTier);
+    const limits = getPlanLimits(planTier, tenant.plan);
     // Get current usage
     const now = new Date();
     const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
@@ -117,11 +138,11 @@ export async function checkPlanLimits(prisma, tenantId) {
     };
     // Check limits (-1 means unlimited)
     const overLimits = {
-        contacts: limits.maxContacts > 0 && contacts >= limits.maxContacts,
-        messages: limits.maxMessagesPerMonth > 0 && messagesThisMonth >= limits.maxMessagesPerMonth,
-        phoneNumbers: limits.maxPhoneNumbers > 0 && phoneNumbers >= limits.maxPhoneNumbers,
-        users: limits.maxUsers > 0 && users >= limits.maxUsers,
-        campaigns: limits.maxCampaigns > 0 && campaigns >= limits.maxCampaigns,
+        contacts: limits.maxContacts !== -1 && contacts >= limits.maxContacts,
+        messages: limits.maxMessagesPerMonth !== -1 && messagesThisMonth >= limits.maxMessagesPerMonth,
+        phoneNumbers: limits.maxPhoneNumbers !== -1 && phoneNumbers >= limits.maxPhoneNumbers,
+        users: limits.maxUsers !== -1 && users >= limits.maxUsers,
+        campaigns: limits.maxCampaigns !== -1 && campaigns >= limits.maxCampaigns,
     };
     const blockedFeatures = [];
     if (!limits.features.teamManagement)
@@ -153,7 +174,7 @@ export async function enforceContactLimit(prisma, tenantId) {
         return { allowed: false, error: 'Tenant not found', current: 0, limit: 0 };
     }
     const planTier = tenant.plan?.tier || PlanTier.STARTER;
-    const limits = getPlanLimits(planTier);
+    const limits = getPlanLimits(planTier, tenant.plan);
     if (limits.maxContacts === -1) {
         return { allowed: true, current: 0, limit: -1 };
     }
@@ -182,7 +203,7 @@ export async function enforceMessageLimit(prisma, tenantId) {
         return { allowed: false, error: 'Tenant not found', current: 0, limit: 0 };
     }
     const planTier = tenant.plan?.tier || PlanTier.STARTER;
-    const limits = getPlanLimits(planTier);
+    const limits = getPlanLimits(planTier, tenant.plan);
     if (limits.maxMessagesPerMonth === -1) {
         return { allowed: true, current: 0, limit: -1 };
     }
@@ -214,7 +235,7 @@ export async function enforceUserLimit(prisma, tenantId) {
         return { allowed: false, error: 'Tenant not found', current: 0, limit: 0 };
     }
     const planTier = tenant.plan?.tier || PlanTier.STARTER;
-    const limits = getPlanLimits(planTier);
+    const limits = getPlanLimits(planTier, tenant.plan);
     if (limits.maxUsers === -1) {
         return { allowed: true, current: 0, limit: -1 };
     }
@@ -242,7 +263,7 @@ export async function checkFeatureAccess(prisma, tenantId, feature) {
     if (!tenant)
         return false;
     const planTier = tenant.plan?.tier || PlanTier.STARTER;
-    const limits = getPlanLimits(planTier);
+    const limits = getPlanLimits(planTier, tenant.plan);
     return limits.features[feature];
 }
 //# sourceMappingURL=billingEnforcement.js.map

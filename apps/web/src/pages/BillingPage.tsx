@@ -2,9 +2,11 @@
  * Billing Page - Enhanced with Usage Warnings, Proration Preview, and Invoice Details
  */
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useSearchParams } from 'react-router-dom';
 import { api } from '../api/client';
+import { openCashfreeCheckout } from '../lib/checkout';
 import { useCurrency, formatMoney } from '../lib/money';
 import {
   CreditCard, Check, Download, ExternalLink, Loader2, AlertCircle,
@@ -24,6 +26,8 @@ interface BillingInfo {
   status: string;
   isOnTrial: boolean;
   trialEndsAt: string | null;
+  planExpiresAt: string | null;
+  paymentProvider: string;
   trialDaysLeft: number;
   usage: {
     contacts: { current: number; limit: number };
@@ -67,6 +71,13 @@ interface Plan {
   tier: string;
   monthlyPrice: number;
   annualPrice: number;
+  cashfreeGstRatePercent: number;
+  cashfreeMonthlyBaseInr: number;
+  cashfreeMonthlyGstInr: number;
+  cashfreeMonthlyTotalInr: number;
+  cashfreeAnnualBaseInr: number;
+  cashfreeAnnualGstInr: number;
+  cashfreeAnnualTotalInr: number;
   description: string;
   limits: any;
   features: any;
@@ -98,6 +109,7 @@ interface UsageAlert {
 export default function BillingPage() {
   const fx = useCurrency();
   const queryClient = useQueryClient();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [interval, setBillingInterval] = useState<'monthly' | 'annual'>('monthly');
   const [showUpgradeModal, setShowUpgradeModal] = useState<Plan | null>(null);
   const [showProration, setShowProration] = useState<ProrationPreview | null>(null);
@@ -136,12 +148,13 @@ export default function BillingPage() {
     queryKey: ['billing', 'proration', showUpgradeModal?.tier],
     queryFn: async () => {
       if (!showUpgradeModal) return null;
+      if (billingData?.data.paymentProvider === 'cashfree') return null;
       const response = await api.get('/billing/proration', {
         params: { newPlan: showUpgradeModal.tier }
       });
       return response.data;
     },
-    enabled: !!showUpgradeModal,
+    enabled: !!showUpgradeModal && billingData?.data.paymentProvider !== 'cashfree',
   });
 
   // Mutations
@@ -151,14 +164,66 @@ export default function BillingPage() {
       return response.data;
     },
     onSuccess: (data) => {
-      if (data?.data?.url) {
-        window.location.href = data.data.url;
+      const checkout = data?.data;
+      if (checkout?.provider === 'cashfree' && checkout?.paymentSessionId) {
+        return openCashfreeCheckout(checkout.paymentSessionId, !!checkout.testMode).catch((error: Error) => {
+          setNotification({ type: 'error', message: error.message });
+        });
+      } else if (checkout?.provider === 'cashfree') {
+        setNotification({ type: 'error', message: 'Cashfree did not return a payment session. Please try again.' });
+      } else if (checkout?.url) {
+        window.location.href = checkout.url;
       }
     },
     onError: (error: any) => {
       setNotification({ type: 'error', message: error.response?.data?.error?.message || 'Checkout failed' });
     },
   });
+
+  useEffect(() => {
+    const orderId = searchParams.get('cashfree_order_id');
+    if (!orderId) return;
+    let active = true;
+    api.post('/billing/checkout/confirm-cashfree', { orderId })
+      .then(async (response) => {
+        const result = response.data?.data;
+        if (!active) return;
+        if (result?.activated || result?.alreadyConfirmed) {
+          setNotification({
+            type: 'success',
+            message: result.planExpiresAt
+              ? `Plan activated. Access is available until ${new Date(result.planExpiresAt).toLocaleDateString()}.`
+              : 'Plan activated successfully.',
+          });
+          await Promise.all([
+            queryClient.invalidateQueries({ queryKey: ['billing'] }),
+            queryClient.invalidateQueries({ queryKey: ['billing', 'plans'] }),
+          ]);
+        } else {
+          setNotification({
+            type: 'error',
+            message: result?.reason || 'Cashfree has not confirmed the payment yet. Refresh billing shortly.',
+          });
+        }
+      })
+      .catch((error: any) => {
+        if (active) {
+          setNotification({
+            type: 'error',
+            message: error.response?.data?.error?.message || 'Could not confirm the Cashfree payment yet.',
+          });
+        }
+      })
+      .finally(() => {
+        if (active) {
+          const next = new URLSearchParams(searchParams);
+          next.delete('cashfree_order_id');
+          setSearchParams(next, { replace: true });
+        }
+      });
+
+    return () => { active = false; };
+  }, [searchParams, setSearchParams, queryClient]);
 
   const portalMutation = useMutation({
     mutationFn: async () => {
@@ -191,6 +256,7 @@ export default function BillingPage() {
   const billing = billingData?.data;
   const plans = plansData?.data || [];
   const currentTier = billing?.plan?.tier;
+  const prepaidExpired = !!billing?.planExpiresAt && new Date(billing.planExpiresAt).getTime() <= Date.now();
   const usage = billing?.usage;
 
   // Helper functions
@@ -199,6 +265,14 @@ export default function BillingPage() {
     if (val >= 1000) return `${(val / 1000).toFixed(0)}K`;
     return val.toString();
   };
+
+  const formatInr = (amount: number) =>
+    new Intl.NumberFormat('en-IN', {
+      style: 'currency',
+      currency: 'INR',
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    }).format(amount);
 
   const getUsagePercent = (current: number, limit: number) => {
     if (!limit || limit === -1) return 0;
@@ -225,7 +299,7 @@ export default function BillingPage() {
 
   const handleSelectPlan = (plan: Plan) => {
     setShowUpgradeModal(plan);
-    if (prorationData?.data) {
+    if (billing?.paymentProvider !== 'cashfree' && prorationData?.data) {
       setShowProration(prorationData.data);
     }
   };
@@ -253,6 +327,15 @@ export default function BillingPage() {
         <h1 className="text-2xl font-bold text-gradient-wa">Billing & Subscription</h1>
         <p className="text-ios-secondary mt-1">Manage your plan, usage, and payment methods</p>
       </div>
+
+      {billing?.planExpiresAt && (
+        <div className="card-apple border border-apple-orange/30 bg-apple-orange/5 p-4">
+          <p className="text-sm font-medium text-ios-dark">Prepaid plan</p>
+          <p className="mt-1 text-sm text-ios-secondary">
+            Your current plan is valid until {new Date(billing.planExpiresAt).toLocaleDateString()}. Cashfree plan payments are one-time and do not auto-renew.
+          </p>
+        </div>
+      )}
 
       {/* Mock Mode Warning */}
       {billing?.isMockMode && (
@@ -498,10 +581,22 @@ export default function BillingPage() {
 
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
           {plans.filter(p => p.tier !== 'ENTERPRISE').map((plan) => {
-            const price = interval === 'monthly'
+            const stripePrice = interval === 'monthly'
               ? Number(plan.monthlyPrice)
               : Number(plan.annualPrice) / 12;
-            const isCurrent = currentTier === plan.tier;
+            const cashfreeBase = interval === 'monthly'
+              ? Number(plan.cashfreeMonthlyBaseInr)
+              : Number(plan.cashfreeAnnualBaseInr);
+            const cashfreeGst = interval === 'monthly'
+              ? Number(plan.cashfreeMonthlyGstInr)
+              : Number(plan.cashfreeAnnualGstInr);
+            const cashfreeTotal = interval === 'monthly'
+              ? Number(plan.cashfreeMonthlyTotalInr)
+              : Number(plan.cashfreeAnnualTotalInr);
+            const price = billing?.paymentProvider === 'cashfree'
+              ? interval === 'monthly' ? cashfreeTotal : cashfreeTotal / 12
+              : stripePrice;
+            const isCurrent = currentTier === plan.tier && !prepaidExpired;
             const isPopular = plan.tier === 'GROWTH';
             const isDowngrade = getPlanOrder(currentTier) > getPlanOrder(plan.tier);
             const isUpgrade = getPlanOrder(currentTier) < getPlanOrder(plan.tier);
@@ -529,10 +624,20 @@ export default function BillingPage() {
 
                 <div className="mt-4 mb-6">
                   <span className="text-4xl font-bold text-ios-dark">
-                    ${Number.isInteger(price) ? price : price.toFixed(0)}
+                    {billing?.paymentProvider === 'cashfree'
+                      ? formatInr(price)
+                      : `$${Number.isInteger(price) ? price : price.toFixed(0)}`}
                   </span>
                   <span className="text-ios-muted">/month</span>
-                  {interval === 'annual' && (
+                  {billing?.paymentProvider === 'cashfree' ? (
+                    <div className="mt-2 space-y-1 text-xs text-ios-muted">
+                      <p>Plan price: {formatInr(cashfreeBase)}{interval === 'monthly' ? '/month' : '/year'}</p>
+                      <p>GST ({plan.cashfreeGstRatePercent}%): {formatInr(cashfreeGst)}{interval === 'monthly' ? '/month' : '/year'}</p>
+                      <p className="font-semibold text-ios-dark">
+                        {interval === 'annual' ? 'Annual total' : 'Total including GST'}: {formatInr(cashfreeTotal)}{interval === 'monthly' ? '/month' : '/year'}
+                      </p>
+                    </div>
+                  ) : interval === 'annual' && (
                     <p className="text-sm text-apple-green mt-1">
                       ${plan.annualPrice}/year
                     </p>
@@ -550,7 +655,9 @@ export default function BillingPage() {
                       : 'bg-apple-orange/20 text-apple-orange hover:bg-apple-orange/30'
                   }`}
                 >
-                  {isCurrent ? 'Current Plan' : isUpgrade ? (
+                  {isCurrent ? 'Current Plan' : billing?.paymentProvider === 'cashfree' ? (
+                    <>Pay & activate <ArrowRight className="w-4 h-4" /></>
+                  ) : isUpgrade ? (
                     <>Upgrade <ArrowRight className="w-4 h-4" /></>
                   ) : (
                     <>Downgrade <ArrowRight className="w-4 h-4" /></>
@@ -713,8 +820,43 @@ export default function BillingPage() {
               </button>
             </div>
 
+            {billing?.paymentProvider === 'cashfree' && (
+              <div className="mb-6 rounded-apple-lg bg-ios-gray p-4 text-sm">
+                <p className="mb-3 font-medium text-ios-dark">
+                  {interval === 'monthly' ? 'Monthly payment summary' : 'Annual payment summary'}
+                </p>
+                <div className="space-y-2">
+                  <div className="flex justify-between gap-4">
+                    <span className="text-ios-muted">Plan price</span>
+                    <span className="text-ios-dark">
+                      {formatInr(Number(showUpgradeModal[
+                        interval === 'monthly' ? 'cashfreeMonthlyBaseInr' : 'cashfreeAnnualBaseInr'
+                      ]))}
+                    </span>
+                  </div>
+                  <div className="flex justify-between gap-4">
+                    <span className="text-ios-muted">GST ({showUpgradeModal.cashfreeGstRatePercent}%)</span>
+                    <span className="text-ios-dark">
+                      {formatInr(Number(showUpgradeModal[
+                        interval === 'monthly' ? 'cashfreeMonthlyGstInr' : 'cashfreeAnnualGstInr'
+                      ]))}
+                    </span>
+                  </div>
+                  <div className="flex justify-between gap-4 border-t border-black/10 pt-2 font-semibold">
+                    <span className="text-ios-dark">Total payable</span>
+                    <span className="text-ios-dark">
+                      {formatInr(Number(showUpgradeModal[
+                        interval === 'monthly' ? 'cashfreeMonthlyTotalInr' : 'cashfreeAnnualTotalInr'
+                      ]))}
+                    </span>
+                  </div>
+                </div>
+                <p className="mt-2 text-xs text-ios-muted">One-time prepaid Cashfree plan; no automatic renewal.</p>
+              </div>
+            )}
+
             {/* Proration Preview */}
-            {prorationData?.data && (
+            {billing?.paymentProvider !== 'cashfree' && prorationData?.data && (
               <div className="p-4 bg-ios-gray rounded-apple-lg mb-6">
                 <p className="text-sm font-medium text-ios-dark mb-3 flex items-center gap-2">
                   <Info className="w-4 h-4" />
@@ -750,7 +892,9 @@ export default function BillingPage() {
                   <Loader2 className="w-4 h-4 animate-spin" />
                 ) : (
                   <>
-                    Confirm {getPlanOrder(currentTier) < getPlanOrder(showUpgradeModal.tier) ? 'Upgrade' : 'Change'}
+                    {billing?.paymentProvider === 'cashfree'
+                      ? `Pay for ${interval === 'monthly' ? '1 month' : '1 year'}`
+                      : `Confirm ${getPlanOrder(currentTier) < getPlanOrder(showUpgradeModal.tier) ? 'Upgrade' : 'Change'}`}
                     <ArrowRight className="w-4 h-4" />
                   </>
                 )}

@@ -4,7 +4,7 @@
  */
 
 import { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { Check, MessageSquare, Users, Bot, Zap, Shield } from 'lucide-react';
 import { api } from '../api/client';
@@ -16,6 +16,13 @@ interface Plan {
   tier: string;
   monthlyPrice: number;
   annualPrice: number;
+  cashfreeGstRatePercent: number;
+  cashfreeMonthlyBaseInr: number;
+  cashfreeMonthlyGstInr: number;
+  cashfreeMonthlyTotalInr: number;
+  cashfreeAnnualBaseInr: number;
+  cashfreeAnnualGstInr: number;
+  cashfreeAnnualTotalInr: number;
   description: string;
   maxContacts: number;
   maxMessagesPerMonth: number;
@@ -51,31 +58,13 @@ const features = [
   },
   {
     icon: Zap,
-    title: 'Campaign Broadcasting',
-    description: 'Send to segments, schedule, A/B test, and track delivery in real-time.',
+    title: 'Customer Messaging',
+    description: 'Manage customer updates, schedule campaigns for opted-in contacts, and track delivery.',
   },
   {
     icon: Shield,
-    title: 'Enterprise Security',
-    description: 'SOC 2, GDPR, end-to-end encryption, and role-based access control.',
-  },
-];
-
-const testimonials = [
-  {
-    quote: "We went from email-only support to WhatsApp in 2 days. Our response time dropped 80%.",
-    author: "Sarah K.",
-    company: "E-commerce Director",
-  },
-  {
-    quote: "The chatbot builder saved us $30k/year in support costs. Best ROI ever.",
-    author: "Mike R.",
-    company: "SaaS Founder",
-  },
-  {
-    quote: "Campaign broadcasts reach 98% of our audience — compared to 22% with email.",
-    author: "Priya M.",
-    company: "Marketing Manager",
+    title: 'Workspace Access Controls',
+    description: 'Manage team access and workspace settings from a shared customer-support platform.',
   },
 ];
 
@@ -93,6 +82,13 @@ export default function PricingPage() {
   });
 
   const plans = plansData?.data || [];
+  const formatInr = (amount: number) =>
+    new Intl.NumberFormat('en-IN', {
+      style: 'currency',
+      currency: 'INR',
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    }).format(amount);
 
   const formatLimit = (val: number) => {
     if (val === -1) return 'Unlimited';
@@ -126,7 +122,7 @@ export default function PricingPage() {
               <div className="w-8 h-8 bg-wa-gradient rounded-lg flex items-center justify-center shadow-wa-green">
                 <span className="text-white font-bold text-xs">WA</span>
               </div>
-              <span className="font-semibold text-primary-apple">WhatsApp SaaS</span>
+              <span className="font-semibold text-primary-apple">Kriscel WA</span>
             </div>
             <div className="flex items-center gap-3">
               {user ? (
@@ -159,12 +155,12 @@ export default function PricingPage() {
 
       {/* Hero */}
       <section className="relative pt-20 pb-12 text-center px-4">
-        <h1 className="text-5xl md:text-6xl font-bold text-primary-apple mb-6 tracking-tight">
-          Simple, transparent pricing
+        <h1 className="text-4xl md:text-5xl font-bold text-primary-apple mb-6 tracking-tight">
+          Customer Support Helpdesk &amp; Omnichannel CRM Software
         </h1>
-        <p className="text-xl text-secondary-apple mb-8 max-w-2xl mx-auto">
-          All plans include unlimited team collaboration, 24/7 support,
-          and a 14-day free trial. No credit card required.
+        <p className="text-lg text-secondary-apple mb-8 max-w-3xl mx-auto">
+          B2B SaaS for managing customer conversations, support workflows, WhatsApp-connected inboxes,
+          chatbot automation, and team collaboration.
         </p>
 
         {/* Apple Billing Toggle */}
@@ -200,9 +196,16 @@ export default function PricingPage() {
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
           {plans.filter(p => p.tier !== 'ENTERPRISE').map((plan) => {
             const isPopular = plan.tier === 'GROWTH';
-            const price = interval === 'monthly'
-              ? plan.monthlyPrice
-              : (plan.annualPrice / 12).toFixed(0);
+            const baseInr = interval === 'monthly'
+              ? Number(plan.cashfreeMonthlyBaseInr)
+              : Number(plan.cashfreeAnnualBaseInr);
+            const gstInr = interval === 'monthly'
+              ? Number(plan.cashfreeMonthlyGstInr)
+              : Number(plan.cashfreeAnnualGstInr);
+            const totalInr = interval === 'monthly'
+              ? Number(plan.cashfreeMonthlyTotalInr)
+              : Number(plan.cashfreeAnnualTotalInr);
+            const price = interval === 'monthly' ? totalInr : totalInr / 12;
 
             return (
               <div
@@ -227,13 +230,16 @@ export default function PricingPage() {
                 </p>
 
                 <div className="mt-6">
-                  <span className={`text-5xl font-bold ${isPopular ? 'text-white' : 'text-primary-apple'}`}>${price}</span>
+                  <span className={`text-5xl font-bold ${isPopular ? 'text-white' : 'text-primary-apple'}`}>
+                    {formatInr(price)}
+                  </span>
                   <span className={`text-sm ${isPopular ? 'text-white/70' : 'text-secondary-apple'}`}>/month</span>
-                  {interval === 'annual' && (
-                    <p className={`text-sm mt-2 ${isPopular ? 'text-white/80' : 'text-apple-green'}`}>
-                      Billed ${plan.annualPrice}/year
-                    </p>
-                  )}
+                  <div className={`mt-2 space-y-1 text-xs ${isPopular ? 'text-white/80' : 'text-secondary-apple'}`}>
+                    <p>Plan price {formatInr(baseInr)}{interval === 'monthly' ? '/month' : '/year'}</p>
+                    <p>GST ({plan.cashfreeGstRatePercent}%) {formatInr(gstInr)}{interval === 'monthly' ? '/month' : '/year'}</p>
+                    {interval === 'annual' && <p>Annual total {formatInr(totalInr)}/year</p>}
+                    <p>Cashfree total {formatInr(totalInr)}{interval === 'monthly' ? '/month' : '/year'} including GST</p>
+                  </div>
                 </div>
 
                 <button
@@ -244,7 +250,7 @@ export default function PricingPage() {
                       : 'bg-wa-gradient text-white hover:shadow-wa-green'
                   }`}
                 >
-                  Start Free Trial
+                  View plan
                 </button>
 
                 <ul className="mt-8 space-y-3">
@@ -316,7 +322,10 @@ export default function PricingPage() {
           <p className="mb-6 opacity-90">
             Custom Enterprise plans with unlimited scale, white-label option, SLA, and dedicated support.
           </p>
-          <button className="btn-apple bg-white text-wa-green hover:bg-white/90 px-6 py-3">
+          <button
+            onClick={() => navigate('/contact')}
+            className="btn-apple bg-white text-wa-green hover:bg-white/90 px-6 py-3"
+          >
             Contact Sales
           </button>
         </div>
@@ -347,28 +356,6 @@ export default function PricingPage() {
         </div>
       </section>
 
-      {/* Testimonials */}
-      <section className="py-20">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="text-center mb-12">
-            <h2 className="text-3xl md:text-4xl font-bold text-primary-apple mb-4 tracking-tight">
-              Loved by 247+ teams
-            </h2>
-          </div>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-            {testimonials.map((t, i) => (
-              <div key={i} className="card-apple p-6">
-                <p className="text-primary-apple italic mb-4">"{t.quote}"</p>
-                <div>
-                  <p className="font-semibold text-primary-apple">{t.author}</p>
-                  <p className="text-sm text-secondary-apple">{t.company}</p>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      </section>
-
       {/* FAQ */}
       <section className="py-20">
         <div className="max-w-3xl mx-auto px-4 sm:px-6 lg:px-8">
@@ -384,20 +371,20 @@ export default function PricingPage() {
                 a: 'Yes, upgrade or downgrade at any time. Changes are prorated.',
               },
               {
-                q: 'What payment methods do you accept?',
-                a: 'All major credit cards, debit cards, and bank transfers via Stripe.',
+                q: 'How are Cashfree plan prices calculated?',
+                a: 'Cashfree plan prices are charged in INR using the configured USD-to-INR conversion rate. The amount is rounded to the nearest paise.',
               },
               {
-                q: 'Is there a setup fee?',
-                a: 'No setup fees, ever. You only pay your monthly subscription.',
+                q: 'Are taxes included?',
+                a: 'For Cashfree plan checkout, an 18% GST amount is added to the displayed base plan price and itemized before payment.',
               },
               {
-                q: 'What if I go over my plan limits?',
-                a: "We'll notify you before you reach the limit. Overages are billed at $0.01-$0.02 per contact or message.",
+                q: 'Can I message my customers?',
+                a: 'The service supports customer communications. You are responsible for obtaining required consent and following WhatsApp, Meta, and applicable messaging rules.',
               },
               {
-                q: 'Do you offer annual billing?',
-                a: 'Yes! Save 20% when you pay annually.',
+                q: 'Do Cashfree plans renew automatically?',
+                a: 'No. Cashfree plan purchases are prepaid for the selected term and do not auto-renew.',
               },
             ].map((faq) => (
               <div key={faq.q} className="card-apple p-5">
@@ -440,8 +427,23 @@ export default function PricingPage() {
       </section>
 
       {/* Footer */}
-      <footer className="py-12 text-center">
-        <p className="text-secondary-apple text-sm">© 2024 WhatsApp SaaS. All rights reserved.</p>
+      <footer className="relative py-12 text-center">
+        <p className="mx-auto mb-5 max-w-3xl px-4 text-xs text-secondary-apple">
+          Cashfree plan prices are shown in INR using the configured USD-to-INR rate. Checkout adds 18% GST to
+          the base plan price and shows the tax amount and total before payment.
+        </p>
+        <nav aria-label="Legal and business information" className="mb-4 flex flex-wrap justify-center gap-x-6 gap-y-2 text-sm">
+          <Link to="/contact" className="text-secondary-apple hover:text-wa-green">Contact Us</Link>
+          <Link to="/pricing" className="text-secondary-apple hover:text-wa-green">Pricing</Link>
+          <Link to="/terms" className="text-secondary-apple hover:text-wa-green">Terms and Conditions</Link>
+          <Link to="/privacy" className="text-secondary-apple hover:text-wa-green">Privacy Policy</Link>
+          <Link to="/refund-policy" className="text-secondary-apple hover:text-wa-green">
+            Return/Refund/Cancellation Policy
+          </Link>
+        </nav>
+        <p className="text-secondary-apple text-sm">
+          © {new Date().getFullYear()} Kriscel Tech Pvt Ltd. All rights reserved.
+        </p>
       </footer>
     </div>
   );

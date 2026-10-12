@@ -18,6 +18,9 @@ import {
 } from '../services/stripe.js';
 import { handleCheckoutCompleted, handleSubscriptionUpsert, handleInvoicePaid } from './stripe-webhook.js';
 import type Stripe from 'stripe';
+import { getCurrencyContext } from '../services/currency.js';
+import { EXCHANGE_RATES } from '../services/currencyService.js';
+import { CASHFREE_PLAN_GST_RATE_PERCENT, quoteCashfreePlanPrice } from '../services/cashfreePlanPricing.js';
 
 const createCheckoutSchema = z.object({
   planTier: z.enum(['STARTER', 'GROWTH', 'BUSINESS']),
@@ -60,11 +63,20 @@ export async function registerBillingRoutes(app: FastifyInstance): Promise<void>
     const upcomingInvoice = tenant.stripeCustomerId
       ? await getUpcomingInvoice(tenant.stripeCustomerId).catch(() => null)
       : null;
+    const activePaymentProvider = await app.prisma.paymentProvider.findFirst({
+      where: { isActive: true, isDefault: true },
+      select: { provider: true },
+    }) ?? await app.prisma.paymentProvider.findFirst({
+      where: { isActive: true },
+      select: { provider: true },
+    });
 
     return {
       success: true,
       data: {
         plan: tenant.plan,
+        planExpiresAt: tenant.planExpiresAt,
+        paymentProvider: activePaymentProvider?.provider ?? 'stripe',
         status: tenant.status,
         isOnTrial: tenant.isOnTrial,
         trialEndsAt: tenant.trialEndsAt,
@@ -97,42 +109,55 @@ export async function registerBillingRoutes(app: FastifyInstance): Promise<void>
 
   app.get('/billing/plans', async (request, reply) => {
     const plans = await app.prisma.plan.findMany({
-      where: { isPublic: true },
+      where: { isPublic: true, isActive: true },
       orderBy: { sortOrder: 'asc' },
     });
+    const currency = await getCurrencyContext(app.prisma);
+    const usdToInr = currency.currency === 'INR' ? currency.fxRate : EXCHANGE_RATES.INR;
 
     return {
       success: true,
-      data: plans.map((plan) => ({
-        ...plan,
-        limits: {
-          maxContacts: plan.maxContacts,
-          maxMessagesPerMonth: plan.maxMessagesPerMonth,
-          maxPhoneNumbers: plan.maxPhoneNumbers,
-          maxTeamMembers: plan.maxTeamMembers,
-          maxCampaigns: plan.maxCampaigns,
-          maxSegments: plan.maxSegments,
-          maxTemplates: plan.maxTemplates,
-          maxAPIKeys: plan.maxAPIKeys,
-          maxMessagesPerMinute: plan.maxMessagesPerMinute,
-        },
-        features: {
-          chatbotBuilder: plan.hasChatbotBuilder,
-          whatsappFlows: plan.hasWhatsAppFlows,
-          apiAccess: plan.hasAPI,
-          aiChatbot: plan.hasAIChatbot,
-          customBranding: plan.hasCustomBranding,
-          prioritySupport: plan.hasPrioritySupport,
-          advancedAnalytics: plan.hasAdvancedAnalytics,
-          whiteLabel: plan.hasWhiteLabel,
-          dripCampaigns: plan.hasDripCampaigns,
-          abTesting: plan.hasABTesting,
-        },
-        priceIds: {
-          monthly: mapPlanTierToPriceId(plan.tier, 'monthly'),
-          annual: mapPlanTierToPriceId(plan.tier, 'annual'),
-        },
-      })),
+      data: plans.map((plan) => {
+        const monthly = quoteCashfreePlanPrice(Number(plan.monthlyPrice), usdToInr);
+        const annual = quoteCashfreePlanPrice(Number(plan.annualPrice), usdToInr);
+        return {
+          ...plan,
+          cashfreeGstRatePercent: CASHFREE_PLAN_GST_RATE_PERCENT,
+          cashfreeMonthlyBaseInr: monthly.baseMinor / 100,
+          cashfreeMonthlyGstInr: monthly.gstMinor / 100,
+          cashfreeMonthlyTotalInr: monthly.totalMinor / 100,
+          cashfreeAnnualBaseInr: annual.baseMinor / 100,
+          cashfreeAnnualGstInr: annual.gstMinor / 100,
+          cashfreeAnnualTotalInr: annual.totalMinor / 100,
+          limits: {
+            maxContacts: plan.maxContacts,
+            maxMessagesPerMonth: plan.maxMessagesPerMonth,
+            maxPhoneNumbers: plan.maxPhoneNumbers,
+            maxTeamMembers: plan.maxTeamMembers,
+            maxCampaigns: plan.maxCampaigns,
+            maxSegments: plan.maxSegments,
+            maxTemplates: plan.maxTemplates,
+            maxAPIKeys: plan.maxAPIKeys,
+            maxMessagesPerMinute: plan.maxMessagesPerMinute,
+          },
+          features: {
+            chatbotBuilder: plan.hasChatbotBuilder,
+            whatsappFlows: plan.hasWhatsAppFlows,
+            apiAccess: plan.hasAPI,
+            aiChatbot: plan.hasAIChatbot,
+            customBranding: plan.hasCustomBranding,
+            prioritySupport: plan.hasPrioritySupport,
+            advancedAnalytics: plan.hasAdvancedAnalytics,
+            whiteLabel: plan.hasWhiteLabel,
+            dripCampaigns: plan.hasDripCampaigns,
+            abTesting: plan.hasABTesting,
+          },
+          priceIds: {
+            monthly: mapPlanTierToPriceId(plan.tier, 'monthly'),
+            annual: mapPlanTierToPriceId(plan.tier, 'annual'),
+          },
+        };
+      }),
     };
   });
 
@@ -153,6 +178,70 @@ export async function registerBillingRoutes(app: FastifyInstance): Promise<void>
 
     if (!tenant) {
       return reply.status(404).send({ success: false, error: { code: 'NOT_FOUND' } });
+    }
+
+    const activeProvider = await app.prisma.paymentProvider.findFirst({
+      where: { isActive: true, isDefault: true },
+    }) ?? await app.prisma.paymentProvider.findFirst({ where: { isActive: true } });
+
+    if (activeProvider?.provider === 'cashfree') {
+      if (tenant.stripeSubId) {
+        return reply.status(409).send({
+          success: false,
+          error: {
+            code: 'ACTIVE_STRIPE_SUBSCRIPTION',
+            message: 'This workspace has an active Stripe subscription. Cancel it before purchasing a prepaid Cashfree plan.',
+          },
+        });
+      }
+
+      const plan = await app.prisma.plan.findFirst({
+        where: { tier: body.planTier, isPublic: true, isActive: true },
+      });
+      if (!plan) {
+        return reply.status(404).send({ success: false, error: { code: 'PLAN_NOT_FOUND', message: 'Selected plan is not available.' } });
+      }
+
+      const amountUsd = Number(body.interval === 'monthly' ? plan.monthlyPrice : plan.annualPrice);
+      if (amountUsd <= 0) {
+        return reply.status(400).send({ success: false, error: { code: 'PLAN_NOT_PURCHASABLE', message: 'This plan is not available for online checkout.' } });
+      }
+
+      const customer = await app.prisma.user.findUnique({
+        where: { id: request.authUser.id },
+        select: { name: true, email: true, phone: true },
+      });
+      if (!customer?.phone) {
+        return reply.status(400).send({
+          success: false,
+          error: { code: 'PHONE_REQUIRED', message: 'Add a valid phone number to your user profile before paying with Cashfree.' },
+        });
+      }
+
+      try {
+        const { createCashfreePlanOrder } = await import('../services/payments.js');
+        const order = await createCashfreePlanOrder(app.prisma, {
+          tenantId: tenant.id,
+          planId: plan.id,
+          planTier: plan.tier,
+          planName: plan.name,
+          interval: body.interval,
+          amountUsd,
+          customer: {
+            id: tenant.id,
+            name: customer.name,
+            email: customer.email,
+            phone: customer.phone,
+          },
+        });
+        return { success: true, data: order };
+      } catch (error: any) {
+        request.log.error({ err: error }, 'Cashfree plan checkout order creation failed');
+        return reply.status(502).send({
+          success: false,
+          error: { code: 'CHECKOUT_FAILED', message: error.message || 'Could not create Cashfree checkout.' },
+        });
+      }
     }
 
     // Get or create Stripe customer
@@ -192,6 +281,36 @@ export async function registerBillingRoutes(app: FastifyInstance): Promise<void>
     return {
       success: true,
       data: session,
+    };
+  });
+
+  app.post('/billing/checkout/confirm-cashfree', { preHandler: [app.requirePermission('billing', 'update')] }, async (request, reply) => {
+    if (!request.authUser.tenantId) {
+      return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
+    }
+    const { orderId } = z.object({ orderId: z.string().min(1) }).parse(request.body);
+    const order = await app.prisma.paymentOrder.findFirst({
+      where: { providerOrderId: orderId, provider: 'cashfree', tenantId: request.authUser.tenantId },
+      select: { id: true },
+    });
+    if (!order) {
+      return reply.status(404).send({ success: false, error: { code: 'ORDER_NOT_FOUND', message: 'Cashfree plan order not found.' } });
+    }
+
+    const { confirmCashfreeOrder } = await import('../services/payments.js');
+    const result = await confirmCashfreeOrder(app.prisma, orderId);
+    const tenant = await app.prisma.tenant.findUnique({
+      where: { id: request.authUser.tenantId },
+      select: { planExpiresAt: true },
+    });
+    return {
+      success: true,
+      data: {
+        activated: result.credited,
+        alreadyConfirmed: result.reason === 'Already confirmed.' || result.reason === 'Already credited.',
+        planExpiresAt: tenant?.planExpiresAt,
+        reason: result.reason,
+      },
     };
   });
 
@@ -287,7 +406,7 @@ export async function registerBillingRoutes(app: FastifyInstance): Promise<void>
       where: { tier: body.planTier },
     });
 
-    if (!newPlan) {
+    if (!newPlan || !newPlan.isPublic || !newPlan.isActive) {
       return reply.status(404).send({
         success: false,
         error: { code: 'PLAN_NOT_FOUND', message: 'Target plan not found' },
@@ -343,7 +462,7 @@ export async function registerBillingRoutes(app: FastifyInstance): Promise<void>
       where: { tier: body.planTier },
     });
 
-    if (!newPlan) {
+    if (!newPlan || !newPlan.isPublic || !newPlan.isActive) {
       return reply.status(404).send({
         success: false,
         error: { code: 'PLAN_NOT_FOUND', message: 'Target plan not found' },
@@ -568,7 +687,7 @@ export async function registerBillingRoutes(app: FastifyInstance): Promise<void>
     }
 
     const newPlanData = await app.prisma.plan.findFirst({
-      where: { tier: newPlan as any, isPublic: true },
+      where: { tier: newPlan as any, isPublic: true, isActive: true },
     });
 
     if (!newPlanData) {

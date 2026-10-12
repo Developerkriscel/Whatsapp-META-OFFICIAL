@@ -108,6 +108,7 @@ export async function handleCheckoutCompleted(app: FastifyInstance, session: Str
         stripeCustomerId: typeof session.customer === 'string' ? session.customer : session.customer?.id,
         status: 'ACTIVE',
         isOnTrial: false,
+        planExpiresAt: null,
       },
     });
 
@@ -152,6 +153,7 @@ export async function handleSubscriptionUpsert(app: FastifyInstance, subscriptio
               subscription.status === 'canceled' ? 'CHURNED' : 'PENDING_SETUP',
       isOnTrial: subscription.status === 'trialing',
       trialEndsAt: subscription.trial_end ? new Date(subscription.trial_end * 1000) : null,
+      planExpiresAt: null,
     },
   });
 

@@ -17,6 +17,7 @@ import { registerWebhookRoutes } from './routes/webhooks.js';
 import { registerBillingRoutes } from './routes/billing.js';
 import { registerStripeWebhook } from './routes/stripe-webhook.js';
 import { registerRazorpayWebhook } from './routes/razorpay-webhook.js';
+import { registerCashfreeWebhook } from './routes/cashfree-webhook.js';
 import { registerAddOnRoutes } from './routes/tenant-addons.js';
 import { registerInvoiceRoutes } from './routes/invoice.js';
 import { registerWhatsAppRoutes } from './routes/whatsapp.js';
@@ -83,7 +84,7 @@ export async function buildApp() {
         // '/webhook' is Meta's callback. Its signature is an HMAC over the exact
         // bytes Meta sent, so the handler needs those bytes -- re-serialising the
         // parsed body produces different ones and the comparison always fails.
-        routes: ['/api/v1/stripe/webhook', '/webhooks/razorpay', '/webhook'],
+        routes: ['/api/v1/stripe/webhook', '/webhooks/razorpay', '/webhooks/cashfree', '/webhook'],
     });
     /**
      * A POST with no body but a JSON content-type.
@@ -200,6 +201,7 @@ export async function buildApp() {
     await app.register(registerWebhookRoutes);
     await app.register(registerStripeWebhook);
     await app.register(registerRazorpayWebhook);
+    await app.register(registerCashfreeWebhook);
     await app.register(registerSSERoutes, { prefix: '/api/v1' });
     await app.register(registerAutomationRoutes, { prefix: '/api/v1' });
     await app.register(registerTeamRoutes, { prefix: '/api/v1' });

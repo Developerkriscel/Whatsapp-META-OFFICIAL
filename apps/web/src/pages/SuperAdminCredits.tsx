@@ -54,6 +54,8 @@ export default function SuperAdminCreditsPage() {
   const currency = useCurrency();
   const [activeTab, setActiveTab] = useState<TabType>('overview');
   const [search, setSearch] = useState('');
+  const [planFilter, setPlanFilter] = useState('');
+  const [statusFilter, setStatusFilter] = useState('');
   const [showAdjustModal, setShowAdjustModal] = useState(false);
   const [selectedTenant, setSelectedTenant] = useState<TenantCredit | null>(null);
   const [adjustAmount, setAdjustAmount] = useState('');
@@ -169,11 +171,19 @@ export default function SuperAdminCreditsPage() {
     createdAt: log.createdAt,
   }));
 
-  const filteredTenants = tenants.filter(t =>
-    !search ||
-    t.name.toLowerCase().includes(search.toLowerCase()) ||
-    t.billingEmail.toLowerCase().includes(search.toLowerCase())
-  );
+  const normalizedSearch = search.trim().toLowerCase();
+  const filteredTenants = tenants.filter((tenant) => {
+    const matchesSearch = !normalizedSearch ||
+      tenant.name.toLowerCase().includes(normalizedSearch) ||
+      tenant.billingEmail.toLowerCase().includes(normalizedSearch);
+    const matchesPlan = !planFilter ||
+      (planFilter === 'NO_PLAN'
+        ? tenant.plan === 'No Plan'
+        : tenant.plan.toUpperCase() === planFilter);
+    const matchesStatus = !statusFilter || tenant.status === statusFilter;
+
+    return matchesSearch && matchesPlan && matchesStatus;
+  });
 
   const totalPlatformBalance = tenants.reduce((sum, t) => sum + t.balance, 0);
   const totalPurchased = tenants.reduce((sum, t) => sum + t.totalPurchased, 0);
@@ -306,7 +316,7 @@ export default function SuperAdminCreditsPage() {
           {/* Plan Distribution */}
           <div className="grid grid-cols-4 gap-4">
             {[
-              { plan: 'STARTER', count: tenants.filter(t => t.plan === 'STARTER').length, color: 'bg-ios-muted', credits: tenants.filter(t => t.plan === 'STARTER').reduce((s, t) => s + t.balance, 0) },
+              { plan: 'STARTER', count: tenants.filter(t => t.plan === 'STARTER').length, color: 'bg-blue-900', credits: tenants.filter(t => t.plan === 'STARTER').reduce((s, t) => s + t.balance, 0) },
               { plan: 'GROWTH', count: tenants.filter(t => t.plan === 'GROWTH').length, color: 'bg-wa-green', credits: tenants.filter(t => t.plan === 'GROWTH').reduce((s, t) => s + t.balance, 0) },
               { plan: 'BUSINESS', count: tenants.filter(t => t.plan === 'BUSINESS').length, color: 'bg-apple-purple', credits: tenants.filter(t => t.plan === 'BUSINESS').reduce((s, t) => s + t.balance, 0) },
               { plan: 'ENTERPRISE', count: tenants.filter(t => t.plan === 'ENTERPRISE').length, color: 'bg-apple-indigo', credits: tenants.filter(t => t.plan === 'ENTERPRISE').reduce((s, t) => s + t.balance, 0) },
@@ -364,24 +374,35 @@ export default function SuperAdminCreditsPage() {
         <div className="space-y-4">
           {/* Search + Filters */}
           <div className="card-apple p-4">
-            <div className="flex items-center gap-3">
+            <div className="flex flex-col items-stretch gap-3 sm:flex-row sm:items-center">
               <div className="relative flex-1">
-                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-ios-muted" />
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-ios-muted" />
                 <input
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
                   placeholder="Search tenants by name or email..."
-                  className="input-apple w-full pl-10"
+                  className="input-apple w-full py-3 pl-12"
                 />
               </div>
-              <select className="input-apple w-auto">
+              <select
+                value={planFilter}
+                onChange={(e) => setPlanFilter(e.target.value)}
+                className="input-apple w-full px-2 text-sm sm:w-32"
+                aria-label="Filter tenants by plan"
+              >
                 <option value="">All Plans</option>
                 <option value="STARTER">STARTER</option>
                 <option value="GROWTH">GROWTH</option>
                 <option value="BUSINESS">BUSINESS</option>
                 <option value="ENTERPRISE">ENTERPRISE</option>
+                <option value="NO_PLAN">No Plan</option>
               </select>
-              <select className="input-apple w-auto">
+              <select
+                value={statusFilter}
+                onChange={(e) => setStatusFilter(e.target.value)}
+                className="input-apple w-full px-2 text-sm sm:w-32"
+                aria-label="Filter tenants by credit balance status"
+              >
                 <option value="">All Status</option>
                 <option value="active">Active</option>
                 <option value="low">Low Balance</option>
@@ -402,7 +423,22 @@ export default function SuperAdminCreditsPage() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-black/5">
-                  {filteredTenants.map((tenant) => (
+                  {isLoading ? (
+                    <tr>
+                      <td colSpan={8} className="px-4 py-10 text-center text-sm text-ios-muted">
+                        <span className="inline-flex items-center gap-2" role="status">
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                          Loading tenants...
+                        </span>
+                      </td>
+                    </tr>
+                  ) : filteredTenants.length === 0 ? (
+                    <tr>
+                      <td colSpan={8} className="px-4 py-10 text-center text-sm text-ios-muted">
+                        No tenants match the selected filters.
+                      </td>
+                    </tr>
+                  ) : filteredTenants.map((tenant) => (
                     <tr key={tenant.id} className="hover:bg-ios-gray/50 transition">
                       <td className="px-4 py-3">
                         <div>

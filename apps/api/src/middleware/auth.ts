@@ -108,6 +108,13 @@ async function authMiddlewareInner(app: FastifyInstance): Promise<void> {
         });
       }
 
+      if (keyDoc.tenant.planExpiresAt && keyDoc.tenant.planExpiresAt < new Date() && !keyDoc.tenant.stripeSubId) {
+        return reply.status(402).send({
+          success: false,
+          error: { code: 'PLAN_EXPIRED', message: 'Your prepaid plan has expired. Renew or choose a plan to continue.' },
+        });
+      }
+
       // Update last used timestamp (fire and forget)
       app.prisma.apiKey.update({
         where: { id: keyDoc.id },
@@ -252,6 +259,26 @@ async function authMiddlewareInner(app: FastifyInstance): Promise<void> {
                 code: 'TRIAL_EXPIRED',
                 message: 'Your free trial has ended. Choose a plan to continue.',
                 trialEndedAt: tenant.trialEndsAt,
+              },
+            });
+          }
+        }
+
+        if (tenant.planExpiresAt && tenant.planExpiresAt < new Date() && !tenant.stripeSubId) {
+          const url = request.url.split('?')[0];
+          const allowedAfterPlanExpiry =
+            url.startsWith('/api/v1/billing') ||
+            url.startsWith('/api/v1/auth') ||
+            url.startsWith('/api/v1/plans') ||
+            url.startsWith('/api/v1/credits/rates');
+
+          if (!allowedAfterPlanExpiry) {
+            return reply.status(402).send({
+              success: false,
+              error: {
+                code: 'PLAN_EXPIRED',
+                message: 'Your prepaid plan has expired. Renew or choose a plan to continue.',
+                planExpiredAt: tenant.planExpiresAt,
               },
             });
           }

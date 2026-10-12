@@ -59,7 +59,7 @@ export default function DashboardPage() {
   };
 
   const quickLinks = [
-    { label: 'New Campaign', desc: 'Send bulk messages', icon: Send, href: '/campaigns', color: 'wa-green' },
+    { label: 'New Campaign', desc: 'Reach opted-in customers', icon: Send, href: '/campaigns', color: 'wa-green' },
     { label: 'Contacts', desc: 'Manage your audience', icon: Users, href: '/contacts', color: 'wa-teal' },
     { label: 'Bot Flows', desc: 'Automate conversations', icon: Zap, href: '/flows', color: 'wa-green' },
     { label: 'Analytics', desc: 'View detailed stats', icon: BarChart3, href: '/analytics', color: 'wa-teal' },

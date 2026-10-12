@@ -96,7 +96,8 @@ function sign(
   payload: Buffer | string,
   extraHeaders: Record<string, string> = {}
 ): { url: string; headers: Record<string, string> } {
-  const url = new URL(`${cfg.endpoint}/${cfg.bucket}/${key}`);
+  const objectPath = key ? `/${key}` : '';
+  const url = new URL(`${cfg.endpoint}/${cfg.bucket}${objectPath}`);
   const now = new Date();
   const amzDate = now.toISOString().replace(/[:-]|\.\d{3}/g, '');
   const dateStamp = amzDate.slice(0, 8);
@@ -130,6 +131,30 @@ function sign(
     `AWS4-HMAC-SHA256 Credential=${cfg.accessKeyId}/${scope}, SignedHeaders=${signedHeaders}, Signature=${signature}`;
 
   return { url: url.toString(), headers };
+}
+
+/** Checks bucket access with a read-only S3 HeadBucket request. */
+export async function checkR2(cfg: R2Config): Promise<{ ok: boolean; latencyMs: number; detail: string }> {
+  const { url, headers } = sign(cfg, 'HEAD', '', '');
+  const startedAt = performance.now();
+
+  try {
+    const response = await fetch(url, {
+      method: 'HEAD',
+      headers,
+      signal: AbortSignal.timeout(5000),
+    });
+    const latencyMs = Math.round(performance.now() - startedAt);
+    return response.ok
+      ? { ok: true, latencyMs, detail: 'Bucket is reachable.' }
+      : { ok: false, latencyMs, detail: `Bucket check returned HTTP ${response.status}.` };
+  } catch {
+    return {
+      ok: false,
+      latencyMs: Math.round(performance.now() - startedAt),
+      detail: 'Bucket could not be reached.',
+    };
+  }
 }
 
 export interface StoredObject {

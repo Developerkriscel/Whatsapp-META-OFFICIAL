@@ -332,8 +332,25 @@ async function main() {
   console.log('📱 Creating phone numbers...');
 
   const phoneNumber = await prisma.phoneNumber.upsert({
-    where: { metaPhoneId: 'demo-phone-1' },
-    update: {},
+    where: {
+      tenantId_phoneNumber: {
+        tenantId: demoTenant.id,
+        phoneNumber: '+1234567890',
+      },
+    },
+    update: {
+      displayName: 'Acme Support',
+      metaPhoneId: 'demo-phone-1',
+      status: 'verified',
+      qualityScore: 'GREEN',
+      canSendSales: true,
+      canSendMarketing: true,
+      canSendUtility: true,
+      canSendAuth: true,
+      timezone: 'America/New_York',
+      verifiedAt: new Date(),
+      dailySentLimit: 1000,
+    },
     create: {
       tenantId: demoTenant.id,
       phoneNumber: '+1234567890',

@@ -1,5 +1,5 @@
 /**
- * Kriscel WA brandmark — WhatsApp Business API White List Provider.
+ * Kriscel WA brandmark — customer support and CRM software.
  * Shared across auth pages (login, forgot password, register).
  */
 
@@ -20,7 +20,7 @@ export default function KriscelWaBrandmark({ compact = false }: { compact?: bool
           Kriscel WA
         </div>
         <div className={`text-black/45 leading-tight ${compact ? 'text-[10px]' : 'text-[10px] sm:text-[11px]'}`}>
-          WhatsApp Business API{!compact && <br className="hidden sm:block" />} White List Provider
+          Customer Support &amp; CRM Software
         </div>
       </div>
     </div>

@@ -12,11 +12,12 @@
  * gate is worse than no panel, because it is trusted.
  */
 
-export type AccessState = 'active' | 'trialing' | 'trial_expired' | 'suspended' | 'other';
+export type AccessState = 'active' | 'trialing' | 'trial_expired' | 'plan_expired' | 'suspended' | 'other';
 
 export interface TenantLike {
   status?: string | null;
   trialEndsAt?: string | Date | null;
+  planExpiresAt?: string | Date | null;
   stripeSubId?: string | null;
 }
 
@@ -70,6 +71,18 @@ export function tenantAccess(t: TenantLike): Access {
         : daysLeft != null
           ? `${daysLeft} day${daysLeft === 1 ? '' : 's'} left`
           : 'No trial end set',
+    };
+  }
+
+  const planEnd = t.planExpiresAt ? new Date(t.planExpiresAt) : null;
+  if (status === 'ACTIVE' && !hasSub && planEnd && planEnd.getTime() < Date.now()) {
+    return {
+      state: 'plan_expired',
+      lockedOut: true,
+      label: 'Plan expired',
+      className: 'bg-apple-red/15 text-apple-red',
+      daysLeft: Math.ceil((planEnd.getTime() - Date.now()) / DAY),
+      detail: `Prepaid plan ended ${planEnd.toLocaleDateString()}`,
     };
   }
 

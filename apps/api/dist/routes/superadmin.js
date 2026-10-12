@@ -2,13 +2,26 @@
 import { z } from 'zod';
 import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
+import { availableParallelism } from 'node:os';
 import { createAuditLog } from '../middleware/auth.js';
+import { decryptIfPresent, resolveAccessToken } from '../services/credentialEncryption.js';
+import { checkR2, getR2Config } from '../services/objectStorage.js';
 const paginationSchema = z.object({
     page: z.coerce.number().min(1).default(1),
     limit: z.coerce.number().min(1).max(100).default(20),
     sort: z.string().default('createdAt'),
     order: z.enum(['asc', 'desc']).default('desc'),
 });
+async function readServiceConfig(read) {
+    try {
+        return { ok: true, value: await read() };
+    }
+    catch {
+        return { ok: false };
+    }
+}
+let previousCpuSample = process.cpuUsage();
+let previousCpuSampleAt = process.hrtime.bigint();
 /**
  * Register superadmin routes
  */
@@ -725,6 +738,8 @@ export async function registerSuperadminRoutes(app) {
         }).parse(request.body);
         const { extendTrialDays, trialEndsAt, ...rest } = body;
         const data = { ...rest };
+        if (body.planId)
+            data.planExpiresAt = null;
         if (trialEndsAt !== undefined)
             data.trialEndsAt = trialEndsAt ? new Date(trialEndsAt) : null;
         if (extendTrialDays) {
@@ -977,11 +992,39 @@ export async function registerSuperadminRoutes(app) {
     app.patch('/plans/:planId', async (request, reply) => {
         const { planId } = z.object({ planId: z.string() }).parse(request.params);
         const body = z.object({
-            name: z.string().optional(),
+            name: z.string().min(1).optional(),
             monthlyPrice: z.number().min(0).optional(),
             annualPrice: z.number().min(0).optional(),
             description: z.string().optional(),
             sortOrder: z.number().optional(),
+            maxContacts: z.number().int().min(-1).optional(),
+            maxMessagesPerMonth: z.number().int().min(-1).optional(),
+            maxPhoneNumbers: z.number().int().min(-1).optional(),
+            maxTeamMembers: z.number().int().min(-1).optional(),
+            maxChatbotFlows: z.number().int().min(0).optional(),
+            maxCampaigns: z.number().int().min(0).optional(),
+            maxSegments: z.number().int().min(0).optional(),
+            maxContactsPerCampaign: z.number().int().min(0).optional(),
+            maxTemplates: z.number().int().min(0).optional(),
+            maxAPIKeys: z.number().int().min(0).optional(),
+            maxCampaignsPerDay: z.number().int().min(0).optional(),
+            maxMessagesPerMinute: z.number().int().min(-1).optional(),
+            maxMessagesPerHour: z.number().int().min(-1).optional(),
+            hasAnalytics: z.boolean().optional(),
+            hasChatbotBuilder: z.boolean().optional(),
+            hasWhatsAppFlows: z.boolean().optional(),
+            hasAPI: z.boolean().optional(),
+            hasAIChatbot: z.boolean().optional(),
+            hasCustomBranding: z.boolean().optional(),
+            hasPrioritySupport: z.boolean().optional(),
+            hasAdvancedAnalytics: z.boolean().optional(),
+            hasWhiteLabel: z.boolean().optional(),
+            hasDripCampaigns: z.boolean().optional(),
+            hasABTesting: z.boolean().optional(),
+            hasContactImport: z.boolean().optional(),
+            hasBulkExport: z.boolean().optional(),
+            isPublic: z.boolean().optional(),
+            isActive: z.boolean().optional(),
         }).parse(request.body);
         const plan = await app.prisma.plan.update({
             where: { id: planId },
@@ -1475,6 +1518,314 @@ export async function registerSuperadminRoutes(app) {
     // ============================================
     // SYSTEM MONITORING
     // ============================================
+    app.get('/service-status', async () => {
+        const healthCheckStartedAt = performance.now();
+        const services = [
+            {
+                id: 'api',
+                name: 'API Gateway',
+                status: 'healthy',
+                latencyMs: null,
+                detail: 'The monitoring request reached the API.',
+            },
+            {
+                id: 'auth',
+                name: 'Authentication',
+                status: 'healthy',
+                latencyMs: null,
+                detail: 'This superadmin request passed authentication; auth runs in the API process.',
+            },
+        ];
+        const databaseStartedAt = performance.now();
+        let databaseHealthy = false;
+        try {
+            await app.prisma.$queryRaw `SELECT 1`;
+            databaseHealthy = true;
+            services.push({
+                id: 'database',
+                name: 'PostgreSQL',
+                status: 'healthy',
+                latencyMs: Math.round(performance.now() - databaseStartedAt),
+                detail: 'Database query succeeded.',
+            });
+        }
+        catch {
+            services.push({
+                id: 'database',
+                name: 'PostgreSQL',
+                status: 'unhealthy',
+                latencyMs: Math.round(performance.now() - databaseStartedAt),
+                detail: 'Database query failed.',
+            });
+        }
+        const [credentialsLookup, phoneLookup, paymentLookup, storageSettingsLookup, storageConfig] = await Promise.all([
+            readServiceConfig(() => app.prisma.whatsAppCredentials.findFirst({
+                where: { accessToken: { not: null }, wabaId: { not: null } },
+                select: { accessToken: true, wabaId: true },
+                orderBy: { updatedAt: 'desc' },
+            })),
+            readServiceConfig(() => app.prisma.phoneNumber.findFirst({
+                where: { accessToken: { not: null }, wabaId: { not: null } },
+                select: { accessToken: true, wabaId: true },
+                orderBy: { updatedAt: 'desc' },
+            })),
+            readServiceConfig(async () => {
+                const preferred = await app.prisma.paymentProvider.findFirst({
+                    where: { isActive: true, isDefault: true },
+                });
+                return preferred ?? app.prisma.paymentProvider.findFirst({ where: { isActive: true } });
+            }),
+            readServiceConfig(() => app.prisma.platformSetting.findMany({
+                where: { key: { in: ['r2_endpoint', 'r2_bucket', 'r2_access_key_id', 'r2_secret_access_key'] } },
+                select: { key: true },
+            })),
+            getR2Config(app.prisma),
+        ]);
+        const credentials = credentialsLookup.ok ? credentialsLookup.value : null;
+        const phoneWithToken = phoneLookup.ok ? phoneLookup.value : null;
+        const paymentProvider = paymentLookup.ok ? paymentLookup.value : null;
+        let wabaId = null;
+        let accessToken = null;
+        let whatsappCredentialError = false;
+        try {
+            if (credentials?.wabaId && credentials.accessToken) {
+                wabaId = credentials.wabaId;
+                accessToken = resolveAccessToken(undefined, credentials.accessToken);
+            }
+            else if (phoneWithToken?.wabaId && phoneWithToken.accessToken) {
+                wabaId = phoneWithToken.wabaId;
+                accessToken = resolveAccessToken(phoneWithToken.accessToken, undefined);
+            }
+        }
+        catch {
+            whatsappCredentialError = true;
+        }
+        if (!credentialsLookup.ok || !phoneLookup.ok || whatsappCredentialError) {
+            services.push({
+                id: 'whatsapp',
+                name: 'WhatsApp / Meta',
+                status: whatsappCredentialError ? 'degraded' : 'unknown',
+                latencyMs: null,
+                detail: whatsappCredentialError
+                    ? 'WhatsApp credentials could not be decrypted.'
+                    : 'Could not read WhatsApp connection settings.',
+            });
+        }
+        else if (!wabaId || !accessToken) {
+            services.push({
+                id: 'whatsapp',
+                name: 'WhatsApp / Meta',
+                status: 'not_configured',
+                latencyMs: null,
+                detail: 'No connected WhatsApp account with a usable token was found.',
+            });
+        }
+        else {
+            const startedAt = performance.now();
+            try {
+                const response = await fetch(`https://graph.facebook.com/v21.0/${encodeURIComponent(wabaId)}?fields=id`, {
+                    headers: { Authorization: `Bearer ${accessToken}` },
+                    signal: AbortSignal.timeout(5000),
+                });
+                services.push({
+                    id: 'whatsapp',
+                    name: 'WhatsApp / Meta',
+                    status: response.ok ? 'healthy' : response.status >= 500 ? 'unhealthy' : 'degraded',
+                    latencyMs: Math.round(performance.now() - startedAt),
+                    detail: response.ok
+                        ? 'Meta accepted the connected account credentials.'
+                        : `Meta returned HTTP ${response.status} for the connected account check.`,
+                });
+            }
+            catch {
+                services.push({
+                    id: 'whatsapp',
+                    name: 'WhatsApp / Meta',
+                    status: 'unhealthy',
+                    latencyMs: Math.round(performance.now() - startedAt),
+                    detail: 'Meta could not be reached within 5 seconds.',
+                });
+            }
+        }
+        if (!paymentLookup.ok) {
+            services.push({
+                id: 'payments',
+                name: 'Payment Gateway',
+                status: 'unknown',
+                latencyMs: null,
+                detail: 'Could not read payment provider settings.',
+            });
+        }
+        else if (!paymentProvider) {
+            services.push({
+                id: 'payments',
+                name: 'Payment Gateway',
+                status: 'not_configured',
+                latencyMs: null,
+                detail: 'No active payment provider is configured.',
+            });
+        }
+        else if (paymentProvider.provider !== 'razorpay') {
+            services.push({
+                id: 'payments',
+                name: `Payment Gateway (${paymentProvider.label})`,
+                status: 'unknown',
+                latencyMs: null,
+                detail: 'A live, read-only connectivity check is not implemented for this provider.',
+            });
+        }
+        else {
+            const publicKey = paymentProvider.publicKey;
+            let secret;
+            try {
+                secret = decryptIfPresent(paymentProvider.secretKey);
+            }
+            catch {
+                // Keep decryption diagnostics private.
+            }
+            if (!publicKey || !secret) {
+                services.push({
+                    id: 'payments',
+                    name: `Payment Gateway (${paymentProvider.label})`,
+                    status: 'degraded',
+                    latencyMs: null,
+                    detail: 'The active provider credentials are missing or could not be decrypted.',
+                });
+            }
+            else {
+                const startedAt = performance.now();
+                try {
+                    const auth = Buffer.from(`${publicKey}:${secret}`).toString('base64');
+                    const response = await fetch('https://api.razorpay.com/v1/payments?count=1', {
+                        headers: { Authorization: `Basic ${auth}` },
+                        signal: AbortSignal.timeout(5000),
+                    });
+                    services.push({
+                        id: 'payments',
+                        name: `Payment Gateway (${paymentProvider.label}${paymentProvider.testMode ? ' test' : ''})`,
+                        status: response.ok ? 'healthy' : response.status >= 500 ? 'unhealthy' : 'degraded',
+                        latencyMs: Math.round(performance.now() - startedAt),
+                        detail: response.ok
+                            ? 'Provider accepted a read-only API request.'
+                            : `Provider returned HTTP ${response.status}.`,
+                    });
+                }
+                catch {
+                    services.push({
+                        id: 'payments',
+                        name: `Payment Gateway (${paymentProvider.label})`,
+                        status: 'unhealthy',
+                        latencyMs: Math.round(performance.now() - startedAt),
+                        detail: 'Payment provider could not be reached within 5 seconds.',
+                    });
+                }
+            }
+        }
+        const requiredStorageSettings = ['r2_endpoint', 'r2_bucket', 'r2_access_key_id', 'r2_secret_access_key'];
+        const configuredStorageKeys = new Set(storageSettingsLookup.ok ? storageSettingsLookup.value.map((setting) => setting.key) : []);
+        const storageConfigured = requiredStorageSettings.every((key) => configuredStorageKeys.has(key));
+        if (!storageSettingsLookup.ok) {
+            services.push({
+                id: 'storage',
+                name: 'Cloudflare R2 Storage',
+                status: 'unknown',
+                latencyMs: null,
+                detail: 'Could not read object-storage settings.',
+            });
+        }
+        else if (!storageConfigured) {
+            services.push({
+                id: 'storage',
+                name: 'Cloudflare R2 Storage',
+                status: 'not_configured',
+                latencyMs: null,
+                detail: 'Object storage is not configured.',
+            });
+        }
+        else if (storageConfig) {
+            const storageCheck = await checkR2(storageConfig);
+            services.push({
+                id: 'storage',
+                name: 'Cloudflare R2 Storage',
+                status: storageCheck.ok ? 'healthy' : 'unhealthy',
+                latencyMs: storageCheck.latencyMs,
+                detail: storageCheck.detail,
+            });
+        }
+        else {
+            services.push({
+                id: 'storage',
+                name: 'Cloudflare R2 Storage',
+                status: 'degraded',
+                latencyMs: null,
+                detail: 'Storage settings exist, but credentials could not be decrypted or loaded.',
+            });
+        }
+        services.push({
+            id: 'queue',
+            name: 'Message Queue',
+            status: 'not_configured',
+            latencyMs: null,
+            detail: 'No external message-queue service is configured in this application.',
+        });
+        let messageDelivery = {
+            percentage: null,
+            attempted: 0,
+            delivered: 0,
+        };
+        if (databaseHealthy) {
+            const since24Hours = new Date(Date.now() - 24 * 60 * 60 * 1000);
+            const deliveryLookup = await readServiceConfig(() => app.prisma.message.groupBy({
+                by: ['status'],
+                where: {
+                    direction: 'OUTGOING',
+                    createdAt: { gte: since24Hours },
+                    status: { in: ['SENT', 'DELIVERED', 'READ', 'FAILED'] },
+                },
+                _count: { _all: true },
+            }));
+            if (deliveryLookup.ok) {
+                const counts = new Map(deliveryLookup.value.map((row) => [row.status, row._count._all]));
+                const delivered = (counts.get('DELIVERED') ?? 0) + (counts.get('READ') ?? 0);
+                const attempted = delivered + (counts.get('SENT') ?? 0) + (counts.get('FAILED') ?? 0);
+                messageDelivery = {
+                    percentage: attempted > 0 ? Math.round((delivered / attempted) * 1000) / 10 : null,
+                    attempted,
+                    delivered,
+                };
+            }
+        }
+        const hasFailure = services.some((service) => service.status === 'unhealthy' || service.status === 'degraded' || service.status === 'unknown');
+        const now = process.hrtime.bigint();
+        const cpuNow = process.cpuUsage();
+        const elapsedMicroseconds = Number(now - previousCpuSampleAt) / 1000;
+        const cpuMicroseconds = (cpuNow.user - previousCpuSample.user) + (cpuNow.system - previousCpuSample.system);
+        const cpuPercent = elapsedMicroseconds > 0
+            ? Math.min(100, Math.max(0, (cpuMicroseconds / elapsedMicroseconds / availableParallelism()) * 100))
+            : null;
+        previousCpuSample = cpuNow;
+        previousCpuSampleAt = now;
+        const memory = process.memoryUsage();
+        return {
+            success: true,
+            data: {
+                status: hasFailure ? 'degraded' : 'healthy',
+                checkedAt: new Date().toISOString(),
+                uptimeSeconds: Math.floor(process.uptime()),
+                healthCheckLatencyMs: Math.round(performance.now() - healthCheckStartedAt),
+                messageDelivery,
+                services,
+                process: {
+                    cpuPercent,
+                    memory: {
+                        rssMb: Math.round(memory.rss / 1024 / 1024),
+                        heapUsedMb: Math.round(memory.heapUsed / 1024 / 1024),
+                        heapTotalMb: Math.round(memory.heapTotal / 1024 / 1024),
+                    },
+                },
+            },
+        };
+    });
     app.get('/system', async (request, reply) => {
         const startTime = Date.now();
         // Get real metrics from database

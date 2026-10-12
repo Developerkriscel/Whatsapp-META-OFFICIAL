@@ -2,6 +2,9 @@
 import { handleWebhookVerification, parseIncomingMessage, isStopKeyword } from '@whatsapp-saas/config/guards';
 import { getDefaultConfig } from '@whatsapp-saas/config/guards';
 import { broadcastToTenant, broadcastMessageStatus } from './sse.js';
+import { getCurrencyContext } from '../services/currency.js';
+import { EXCHANGE_RATES } from '../services/currencyService.js';
+import { CASHFREE_PLAN_GST_RATE_PERCENT, quoteCashfreePlanPrice } from '../services/cashfreePlanPricing.js';
 const whatsappConfig = getDefaultConfig();
 /**
  * Register webhook routes
@@ -65,10 +68,28 @@ export async function registerWebhookRoutes(app) {
     // ============================================
     app.get('/api/v1/plans', async (request, reply) => {
         const plans = await app.prisma.plan.findMany({
-            where: { isPublic: true },
+            where: { isPublic: true, isActive: true },
             orderBy: { sortOrder: 'asc' },
         });
-        return { success: true, data: plans };
+        const currency = await getCurrencyContext(app.prisma);
+        const usdToInr = currency.currency === 'INR' ? currency.fxRate : EXCHANGE_RATES.INR;
+        return {
+            success: true,
+            data: plans.map((plan) => {
+                const monthly = quoteCashfreePlanPrice(Number(plan.monthlyPrice), usdToInr);
+                const annual = quoteCashfreePlanPrice(Number(plan.annualPrice), usdToInr);
+                return {
+                    ...plan,
+                    cashfreeGstRatePercent: CASHFREE_PLAN_GST_RATE_PERCENT,
+                    cashfreeMonthlyBaseInr: monthly.baseMinor / 100,
+                    cashfreeMonthlyGstInr: monthly.gstMinor / 100,
+                    cashfreeMonthlyTotalInr: monthly.totalMinor / 100,
+                    cashfreeAnnualBaseInr: annual.baseMinor / 100,
+                    cashfreeAnnualGstInr: annual.gstMinor / 100,
+                    cashfreeAnnualTotalInr: annual.totalMinor / 100,
+                };
+            }),
+        };
     });
 }
 // ============================================

@@ -287,6 +287,7 @@ model Tenant {
   plan             Plan?        @relation(fields: [planId], references: [id])
   stripeCustomerId String?
   stripeSubId      String?
+  planExpiresAt    DateTime?
 
   // Trial
   trialEndsAt DateTime?

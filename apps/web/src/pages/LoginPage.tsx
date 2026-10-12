@@ -1,6 +1,6 @@
 /**
  * Login Page — Kriscel WA
- * WhatsApp Business API White List Provider.
+ * B2B customer support and CRM software.
  * Matches the approved reference: bordered full-width desktop card with
  * header/footer + two-column body, genuinely restructured single-column
  * mobile composition.
@@ -107,14 +107,15 @@ export default function LoginPage() {
                 Grow Conversations.<br />Build Connections.
               </h2>
               <p className="mt-2 text-[13px] text-black/55 leading-relaxed max-w-[300px]">
-                Kriscel WA is a trusted WhatsApp White List Provider for your business.
+                B2B software for customer conversations, team inboxes, CRM records, and support workflows.
+                WhatsApp messaging features are intended for permitted, consent-based customer communications.
               </p>
             </div>
 
             <div className="grid grid-cols-3 gap-2 mt-5 shrink-0">
-              <TrustItem icon={<ShieldCheck className="w-4 h-4" strokeWidth={1.75} />} lines={['100% Compliant', 'WhatsApp Policies']} />
-              <TrustItem icon={<Users className="w-4 h-4" strokeWidth={1.75} />} lines={['Quick Onboarding', 'Get Whitelisted Fast']} />
-              <TrustItem icon={<Headphones className="w-4 h-4" strokeWidth={1.75} />} lines={['Reliable Support', 'Always Here to Help']} />
+              <TrustItem icon={<ShieldCheck className="w-4 h-4" strokeWidth={1.75} />} lines={['Customer Support', 'Shared team inbox']} />
+              <TrustItem icon={<Users className="w-4 h-4" strokeWidth={1.75} />} lines={['B2B CRM', 'Organized customer records']} />
+              <TrustItem icon={<Headphones className="w-4 h-4" strokeWidth={1.75} />} lines={['Support', 'Contact our team']} />
             </div>
           </div>
 
@@ -128,7 +129,8 @@ export default function LoginPage() {
                   Grow Conversations.<br />Build Connections.
                 </h2>
                 <p className="mt-1.5 text-[12px] text-black/55 leading-relaxed max-w-[280px]">
-                  Kriscel WA is a trusted WhatsApp White List Provider for your business.
+                  B2B software for customer conversations, CRM records, and support workflows.
+                  WhatsApp messaging features are intended for permitted, consent-based customer communications.
                 </p>
                 <div className="flex gap-1.5 w-full max-w-[160px] mt-3" aria-hidden="true">
                   <span className="h-1.5 flex-1 rounded-full" style={{ background: HEADING_GREEN }} />
@@ -258,8 +260,9 @@ export default function LoginPage() {
         <div className="hidden lg:flex items-center justify-between px-7 py-2.5 border-t border-black/[0.06] text-[11px] text-black/40 shrink-0">
           <span>© {new Date().getUTCFullYear()} Kriscel WA. All rights reserved.</span>
           <div className="flex items-center gap-5">
-            <a href="#" className="hover:text-black/60 transition-colors">Privacy Policy</a>
-            <a href="#" className="hover:text-black/60 transition-colors">Terms of Service</a>
+            <Link to="/contact" className="hover:text-black/60 transition-colors">Contact Us</Link>
+            <Link to="/privacy" className="hover:text-black/60 transition-colors">Privacy Policy</Link>
+            <Link to="/terms" className="hover:text-black/60 transition-colors">Terms and Conditions</Link>
           </div>
         </div>
       </div>
@@ -306,4 +309,3 @@ function BackgroundArcs() {
     </svg>
   );
 }
-

@@ -45,7 +45,20 @@ export interface PlanStatus {
 /**
  * Get plan limits for a tenant
  */
-export declare function getPlanLimits(plan: PlanTier): PlanLimits;
+export declare function getPlanLimits(plan: PlanTier, configuredPlan?: {
+    maxContacts: number;
+    maxMessagesPerMonth: number;
+    maxPhoneNumbers: number;
+    maxTeamMembers: number;
+    maxCampaigns: number;
+    maxChatbotFlows: number;
+    maxMessagesPerMinute: number;
+    hasAnalytics: boolean;
+    hasCustomBranding: boolean;
+    hasAPI: boolean;
+    hasWhiteLabel: boolean;
+    hasPrioritySupport: boolean;
+} | null): PlanLimits;
 /**
  * Check if tenant is within plan limits
  */

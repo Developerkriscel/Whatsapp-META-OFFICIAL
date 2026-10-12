@@ -434,6 +434,11 @@ function Providers({ qc }: { qc: any }) {
                 <p className="text-xs text-ios-muted mt-0.5">
                   {cfg?.hasSecretKey ? 'Keys stored' : 'Not configured'} · {a.currencies.join(', ')}
                 </p>
+                {a.provider === 'cashfree' && (
+                  <p className="text-xs text-ios-muted mt-1">
+                    Cashfree PG must be activated on your merchant account. Set the Cashfree webhook URL to your API&apos;s <code>/webhooks/cashfree</code> endpoint.
+                  </p>
+                )}
               </div>
               {cfg?.hasSecretKey && (
                 <button onClick={() => test.mutate(a.provider)} disabled={test.isPending} className="text-xs text-wa-green hover:underline">
@@ -476,7 +481,11 @@ function Providers({ qc }: { qc: any }) {
                   <Toggle checked={!!form.isDefault} onChange={(v) => setForm({ ...form, isDefault: v })} label="Use by default" />
                 </div>
                 <button
-                  onClick={() => save.mutate({ provider: a.provider, body: { ...form, label: a.label, supportedCurrencies: a.currencies } })}
+                  onClick={() => {
+                    const body = { ...form, label: a.label, supportedCurrencies: a.currencies };
+                    if (body.config === null) delete body.config;
+                    save.mutate({ provider: a.provider, body });
+                  }}
                   disabled={save.isPending}
                   className="btn-apple btn-wa-green text-sm disabled:opacity-50"
                 >

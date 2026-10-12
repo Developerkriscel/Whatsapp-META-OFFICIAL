@@ -85,6 +85,7 @@ export async function handleCheckoutCompleted(app, session) {
                 stripeCustomerId: typeof session.customer === 'string' ? session.customer : session.customer?.id,
                 status: 'ACTIVE',
                 isOnTrial: false,
+                planExpiresAt: null,
             },
         });
         console.log(`Tenant ${tenantId} subscribed: ${subscriptionId}`);
@@ -122,6 +123,7 @@ export async function handleSubscriptionUpsert(app, subscription) {
                         subscription.status === 'canceled' ? 'CHURNED' : 'PENDING_SETUP',
             isOnTrial: subscription.status === 'trialing',
             trialEndsAt: subscription.trial_end ? new Date(subscription.trial_end * 1000) : null,
+            planExpiresAt: null,
         },
     });
     console.log(`Subscription updated for tenant ${tenantId}: ${subscription.status}`);
