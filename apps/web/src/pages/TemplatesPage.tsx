@@ -57,6 +57,8 @@ export default function TemplatesPage() {
   const [selectedTemplate, setSelectedTemplate] = useState<Template | null>(null);
   const [confirmDeleteTemplate, setConfirmDeleteTemplate] = useState<Template | null>(null);
   const [notification, setNotification] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+  const [templateNameError, setTemplateNameError] = useState('');
+  const templateModalRef = useRef<HTMLDivElement>(null);
   const [form, setForm] = useState({
     name: '',
     category: 'MARKETING' as 'MARKETING' | 'UTILITY' | 'AUTHENTICATION',
@@ -171,11 +173,18 @@ export default function TemplatesPage() {
       queryClient.invalidateQueries({ queryKey: ['templates'] });
       setShowCreate(false);
       setForm(emptyForm);
+      setTemplateNameError('');
       setSampleError('');
       showNotification('success', 'Template created successfully!');
     },
     onError: (error: any) => {
-      const message = error.response?.data?.error?.message || 'Failed to create template';
+      const apiError = error.response?.data?.error;
+      if (apiError?.code === 'DUPLICATE_TEMPLATE_NAME') {
+        setTemplateNameError(apiError.message || 'This template name is already in use. Choose another.');
+        requestAnimationFrame(() => templateModalRef.current?.scrollTo({ top: 0, behavior: 'smooth' }));
+        return;
+      }
+      const message = apiError?.message || 'Failed to create template';
       showNotification('error', message);
     },
   });
@@ -188,10 +197,17 @@ export default function TemplatesPage() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['templates'] });
       setShowEdit(null);
+      setTemplateNameError('');
       showNotification('success', 'Template updated successfully!');
     },
     onError: (error: any) => {
-      const message = error.response?.data?.error?.message || 'Failed to update template';
+      const apiError = error.response?.data?.error;
+      if (apiError?.code === 'DUPLICATE_TEMPLATE_NAME') {
+        setTemplateNameError(apiError.message || 'This template name is already in use. Choose another.');
+        requestAnimationFrame(() => templateModalRef.current?.scrollTo({ top: 0, behavior: 'smooth' }));
+        return;
+      }
+      const message = apiError?.message || 'Failed to update template';
       showNotification('error', message);
     },
   });
@@ -306,7 +322,7 @@ export default function TemplatesPage() {
     <div className="space-y-6">
       {/* Notification Toast */}
       {notification && (
-        <div className={`fixed top-4 right-4 z-50 px-4 py-3 rounded-apple-lg shadow-lg flex items-center gap-3 animate-in slide-in-from-right ${
+        <div className={`fixed top-4 right-4 z-[60] px-4 py-3 rounded-apple-lg shadow-lg flex items-center gap-3 animate-in slide-in-from-right ${
           notification.type === 'success'
             ? 'bg-apple-green text-white'
             : 'bg-apple-red text-white'
@@ -326,7 +342,7 @@ export default function TemplatesPage() {
           <p className="text-ios-secondary mt-1">Create and manage WhatsApp message templates</p>
         </div>
         <button
-          onClick={() => setShowCreate(true)}
+          onClick={() => { setTemplateNameError(''); setShowCreate(true); }}
           className="btn-apple btn-wa-green flex items-center gap-2"
         >
           <Plus className="w-4 h-4" />
@@ -451,23 +467,26 @@ export default function TemplatesPage() {
       {/* Create Modal */}
       {showCreate && (
         <div className="fixed inset-0 bg-black/40 backdrop-blur-xl flex items-center justify-center z-50">
-          <div className="glass-card p-6 w-[520px] shadow-apple-xl max-h-[90vh] overflow-y-auto">
+          <div ref={templateModalRef} className="glass-card p-6 w-[520px] shadow-apple-xl max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between mb-4">
               <h3 className="font-semibold text-ios-dark">Create Template</h3>
-              <button onClick={() => setShowCreate(false)} className="p-1 hover:bg-ios-gray rounded-apple-lg transition">
+              <button onClick={() => { setShowCreate(false); setTemplateNameError(''); }} className="p-1 hover:bg-ios-gray rounded-apple-lg transition">
                 <X className="w-5 h-5 text-ios-muted" />
               </button>
             </div>
             <div className="space-y-4">
               <div>
                 <label className="block text-sm font-medium text-ios-secondary mb-1">Template Name *</label>
+                <p className="mb-2 text-xs text-red-600">The template name must be unique. Please ensure that the name has not been used for any previously created WhatsApp message template.</p>
                 <input
                   type="text"
                   placeholder="e.g., welcome_message"
                   value={form.name}
-                  onChange={(e) => setForm({ ...form, name: e.target.value })}
+                  onChange={(e) => { setForm({ ...form, name: e.target.value }); setTemplateNameError(''); }}
                   className="input-apple w-full"
+                  aria-invalid={!!templateNameError}
                 />
+                {templateNameError && <p role="alert" className="mt-1 text-xs text-red-600">{templateNameError}</p>}
               </div>
               {phoneNumbers.length > 1 && (
                 <div>
@@ -660,7 +679,7 @@ export default function TemplatesPage() {
       {/* Detail Modal */}
       {selectedTemplate && (
         <div className="fixed inset-0 bg-black/40 backdrop-blur-xl flex items-center justify-center z-50">
-          <div className="glass-card p-6 w-[520px] shadow-apple-xl max-h-[90vh] overflow-y-auto">
+          <div ref={templateModalRef} className="glass-card p-6 w-[520px] shadow-apple-xl max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between mb-4">
               <div className="flex items-center gap-2">
                 <FileText className="w-5 h-5 text-wa-green" />
@@ -727,7 +746,7 @@ export default function TemplatesPage() {
                     ['IMAGE', 'VIDEO', 'DOCUMENT'].includes(
                       String(selectedTemplate.header?.format || '').toUpperCase(),
                     )
-                      ? 'Approved with a media header — every campaign using this template must attach a file.'
+                      ? 'This template has a media header — every campaign using it must attach a file.'
                       : undefined
                   }
                 />
@@ -782,6 +801,7 @@ export default function TemplatesPage() {
               )}
               <button
                 onClick={() => {
+                  setTemplateNameError('');
                   setShowEdit(selectedTemplate);
                   setForm({
                     ...emptyForm,
@@ -862,19 +882,22 @@ export default function TemplatesPage() {
           <div className="glass-card p-6 w-[520px] shadow-apple-xl max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between mb-4">
               <h3 className="font-semibold text-ios-dark">Edit Template</h3>
-              <button onClick={() => setShowEdit(null)} className="p-1 hover:bg-ios-gray rounded-apple-lg transition">
+              <button onClick={() => { setShowEdit(null); setTemplateNameError(''); }} className="p-1 hover:bg-ios-gray rounded-apple-lg transition">
                 <X className="w-5 h-5 text-ios-muted" />
               </button>
             </div>
             <div className="space-y-4">
               <div>
                 <label className="block text-sm font-medium text-ios-secondary mb-1">Template Name *</label>
+                <p className="mb-2 text-xs text-red-600">The template name must be unique. Please ensure that the name has not been used for any previously created WhatsApp message template.</p>
                 <input
                   type="text"
                   value={form.name}
-                  onChange={(e) => setForm({ ...form, name: e.target.value })}
+                  onChange={(e) => { setForm({ ...form, name: e.target.value }); setTemplateNameError(''); }}
                   className="input-apple w-full"
+                  aria-invalid={!!templateNameError}
                 />
+                {templateNameError && <p role="alert" className="mt-1 text-xs text-red-600">{templateNameError}</p>}
               </div>
               <div className="grid grid-cols-2 gap-4">
                 <div>

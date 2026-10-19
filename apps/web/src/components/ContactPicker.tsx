@@ -7,10 +7,11 @@
  * "all or nothing" but *which* 250 — and the answer usually comes from sorting
  * and filtering, then taking the top N.
  *
- * Selection is a Set of ids held above the table, so it survives paging,
- * searching and re-sorting. Anything that selects rows the user cannot
- * currently see resolves server-side through /contacts/select-ids, which shares
- * its filter builder with the list endpoint so the two can never disagree.
+ * Only active contacts with explicit opt-in consent are selectable. Selection
+ * is a Set of ids held above the table, so it survives paging, searching and
+ * re-sorting. Anything that selects rows the user cannot currently see resolves
+ * server-side through /contacts/select-ids, which shares its filter builder
+ * with the list endpoint so the two can never disagree.
  */
 import { useState, useMemo, useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
@@ -55,7 +56,6 @@ export default function ContactPicker({ selectedIds, onChange, phoneNumberId }: 
   const [debouncedSearch, setDebouncedSearch] = useState('');
   const [sort, setSort] = useState<SortField>('createdAt');
   const [order, setOrder] = useState<'asc' | 'desc'>('desc');
-  const [consentStatus, setConsentStatus] = useState('');
   const [country, setCountry] = useState('');
   const [tag, setTag] = useState('');
   const [busy, setBusy] = useState(false);
@@ -69,12 +69,12 @@ export default function ContactPicker({ selectedIds, onChange, phoneNumberId }: 
 
   const filterParams = useMemo(() => ({
     ...(debouncedSearch ? { search: debouncedSearch } : {}),
-    ...(consentStatus ? { consentStatus } : {}),
+    consentStatus: 'OPTED_IN',
     ...(country ? { country } : {}),
     ...(tag ? { tag } : {}),
     sort,
     order,
-  }), [debouncedSearch, consentStatus, country, tag, sort, order]);
+  }), [debouncedSearch, country, tag, sort, order]);
 
   const { data, isLoading } = useQuery({
     queryKey: ['picker-contacts', filterParams, page],
@@ -105,7 +105,7 @@ export default function ContactPicker({ selectedIds, onChange, phoneNumberId }: 
   const tier = tierData?.data;
   const tierRemaining: number | null = tier?.known ? tier.remaining : null;
 
-  const filtersActive = !!(debouncedSearch || consentStatus || country || tag);
+  const filtersActive = !!(debouncedSearch || country || tag);
 
   // --- selection helpers ------------------------------------------------
 
@@ -160,18 +160,6 @@ export default function ContactPicker({ selectedIds, onChange, phoneNumberId }: 
 
   const clearAll = () => { onChange(new Set()); setNote(null); };
 
-  const dropOptedOut = () => withBusy(async () => {
-    const res = await api.get('/contacts/select-ids', {
-      params: { ...filterParams, consentStatus: 'OPTED_OUT' },
-    });
-    const optedOut: string[] = res.data?.data?.ids || [];
-    const removed = optedOut.filter((id) => selectedIds.has(id)).length;
-    mutate((n) => optedOut.forEach((id) => n.delete(id)));
-    setNote(removed > 0
-      ? `Removed ${removed} opted-out contact${removed === 1 ? '' : 's'} from the selection.`
-      : 'No opted-out contacts were selected.');
-  });
-
   const setSortField = (field: SortField) => {
     if (sort === field) setOrder(order === 'asc' ? 'desc' : 'asc');
     else { setSort(field); setOrder('asc'); }
@@ -179,7 +167,7 @@ export default function ContactPicker({ selectedIds, onChange, phoneNumberId }: 
   };
 
   const resetFilters = () => {
-    setSearch(''); setDebouncedSearch(''); setConsentStatus('');
+    setSearch(''); setDebouncedSearch('');
     setCountry(''); setTag(''); setPage(1);
   };
 
@@ -216,17 +204,6 @@ export default function ContactPicker({ selectedIds, onChange, phoneNumberId }: 
               className="input-apple w-full pl-9 py-2 text-sm"
             />
           </div>
-
-          <select
-            value={consentStatus}
-            onChange={(e) => { setConsentStatus(e.target.value); setPage(1); }}
-            className="input-apple py-2 text-sm"
-          >
-            <option value="">Any consent</option>
-            {(options?.data?.consentStatus || []).map((c: any) => (
-              <option key={c.value} value={c.value}>{c.value.replace('_', ' ').toLowerCase()} ({c.count})</option>
-            ))}
-          </select>
 
           <select
             value={country}
@@ -293,12 +270,11 @@ export default function ContactPicker({ selectedIds, onChange, phoneNumberId }: 
               Fill tier limit — first {tierRemaining.toLocaleString()}
             </button>
           )}
-          <button onClick={dropOptedOut} disabled={busy || count === 0}
-            className="px-2.5 py-1 rounded-apple-lg bg-white border border-black/10 hover:border-wa-green/50 disabled:opacity-40">
-            Remove opted-out
-          </button>
         </div>
 
+        <p className="text-xs text-ios-muted">
+          Only active contacts with explicit opt-in consent are available for campaign selection. Unknown and opted-out contacts are excluded.
+        </p>
         {note && <p className="text-xs text-ios-muted">{note}</p>}
       </div>
 

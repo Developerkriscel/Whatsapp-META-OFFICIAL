@@ -103,6 +103,20 @@ async function main() {
       runSweep();
       const sweepTimer = setInterval(runSweep, SWEEP_MS);
       sweepTimer.unref();
+
+      // Webhooks are the fast path for template approvals, but a missed one
+      // left templates at "Pending Review" for good. Ask Meta directly.
+      const { refreshPendingTemplates } = await import('./services/metaTemplate.js');
+      const TEMPLATE_STATUS_MS = 2 * 60 * 1000;
+      const runTemplateStatus = () =>
+        refreshPendingTemplates(app.prisma)
+          .then((r) => {
+            if (r.updated > 0) console.log(`[Templates] ${r.updated} of ${r.checked} pending template(s) updated from Meta`);
+          })
+          .catch((e) => console.error('[Templates] status refresh failed:', e?.message));
+      runTemplateStatus();
+      const templateTimer = setInterval(runTemplateStatus, TEMPLATE_STATUS_MS);
+      templateTimer.unref();
     } catch (e: any) {
       // Sending still works — getRateCredits falls back to Meta's published
       // prices — so this must not stop the server coming up.

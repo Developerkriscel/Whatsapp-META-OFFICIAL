@@ -48,6 +48,8 @@ interface Campaign {
   id: string;
   name: string;
   status: 'draft' | 'scheduled' | 'sending' | 'sent' | 'paused';
+  phoneNumberId: string | null;
+  phoneNumberReady: boolean;
   type: 'broadcast' | 'automated' | 'followup';
   segment: string;
   sent: number;
@@ -134,12 +136,27 @@ const WIZARD_STEPS = [
   { id: 5, name: 'Review', icon: Eye, description: 'Confirm & launch' },
 ];
 
+function localDateInputValue(date = new Date()): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function toScheduledIsoDateTime(localDateTime: string): string | null {
+  if (!localDateTime) return null;
+  const date = new Date(localDateTime);
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+
 export default function CampaignsPage() {
   const [view, setView] = useState<'list' | 'create'>('list');
   const [wizardStep, setWizardStep] = useState(1);
   const [tab, setTab] = useState<'all' | 'sent' | 'scheduled' | 'draft' | 'sending'>('all');
   const [showDeleteConfirm, setShowDeleteConfirm] = useState<string | null>(null);
   const [viewingCampaignId, setViewingCampaignId] = useState<string | null>(null);
+  const [phoneSetupCampaignId, setPhoneSetupCampaignId] = useState<string | null>(null);
+  const [phoneSetupSelectedId, setPhoneSetupSelectedId] = useState('');
   const [notification, setNotification] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
   const queryClient = useQueryClient();
 
@@ -243,7 +260,7 @@ export default function CampaignsPage() {
   const { data: contactsData } = useQuery({
     queryKey: ['contacts-count'],
     queryFn: async () => {
-      const response = await api.get('/contacts', { params: { limit: 1 } });
+      const response = await api.get('/contacts', { params: { limit: 1, consentStatus: 'OPTED_IN' } });
       return response.data;
     },
   });
@@ -350,8 +367,30 @@ export default function CampaignsPage() {
       queryClient.invalidateQueries({ queryKey: ['campaigns'] });
       showNotification('success', 'Campaign launched! Messages are being sent.');
     },
-    onError: (error: any) => {
+    onError: (error: any, campaignId: string) => {
+      if (error.response?.data?.error?.code === 'NO_PHONE') {
+        setPhoneSetupCampaignId(campaignId);
+        setPhoneSetupSelectedId('');
+        return;
+      }
       const message = error.response?.data?.error?.message || 'Failed to launch campaign';
+      showNotification('error', message);
+    },
+  });
+
+  const assignCampaignPhoneMutation = useMutation({
+    mutationFn: async ({ campaignId, phoneNumberId }: { campaignId: string; phoneNumberId: string }) => {
+      await api.patch(`/campaigns/${campaignId}`, { phoneNumberId });
+      return campaignId;
+    },
+    onSuccess: (campaignId) => {
+      setPhoneSetupCampaignId(null);
+      setPhoneSetupSelectedId('');
+      queryClient.invalidateQueries({ queryKey: ['campaigns'] });
+      sendMutation.mutate(campaignId);
+    },
+    onError: (error: any) => {
+      const message = error.response?.data?.error?.message || 'Failed to assign the WhatsApp number';
       showNotification('error', message);
     },
   });
@@ -360,6 +399,8 @@ export default function CampaignsPage() {
   const campaigns: Campaign[] = (data?.data || []).map((c: any) => ({
     id: c.id,
     name: c.name || 'Untitled Campaign',
+    phoneNumberId: c.phoneNumberId || null,
+    phoneNumberReady: !!c.phoneNumber?.metaPhoneId,
     // Backend CampaignStatus is DRAFT/SCHEDULED/SENDING/COMPLETED/FAILED/
     // CANCELLED — every other value already matches this page's vocabulary
     // via plain lowercasing, but COMPLETED has no equivalent here (the page
@@ -508,9 +549,22 @@ export default function CampaignsPage() {
   };
 
   const handleSubmit = () => {
+    let scheduledAt: string | null = null;
+    if (form.scheduleType === 'scheduled') {
+      scheduledAt = toScheduledIsoDateTime(form.scheduledAt);
+      if (!scheduledAt) {
+        showNotification('error', 'Choose a valid date and time for this campaign.');
+        return;
+      }
+      if (new Date(scheduledAt).getTime() <= Date.now()) {
+        showNotification('error', 'Choose a future date and time for this campaign.');
+        return;
+      }
+    }
+
     createMutation.mutate({
       ...buildCampaignPayload(),
-      scheduledAt: form.scheduleType === 'scheduled' ? form.scheduledAt : null,
+      scheduledAt,
     });
   };
 
@@ -784,7 +838,15 @@ export default function CampaignsPage() {
                         {campaign.status === 'draft' && (
                           <>
                             <button
-                              onClick={(e) => { e.stopPropagation(); sendMutation.mutate(campaign.id); }}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                if (campaign.phoneNumberReady) {
+                                  sendMutation.mutate(campaign.id);
+                                } else {
+                                  setPhoneSetupCampaignId(campaign.id);
+                                  setPhoneSetupSelectedId('');
+                                }
+                              }}
                               disabled={sendMutation.isPending}
                               className="p-2 hover:bg-ios-gray rounded-apple-lg transition disabled:opacity-50"
                               title="Launch campaign"
@@ -860,6 +922,79 @@ export default function CampaignsPage() {
 
         {viewingCampaignId && (
           <CampaignDetailModal campaignId={viewingCampaignId} onClose={() => setViewingCampaignId(null)} />
+        )}
+
+        {phoneSetupCampaignId && (
+          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-[9999] p-4">
+            <div className="bg-white rounded-apple-xl w-full max-w-md p-6 shadow-2xl">
+              <div className="flex items-start justify-between gap-4 mb-2">
+                <div>
+                  <h3 className="text-lg font-semibold text-ios-dark">Choose a WhatsApp sender</h3>
+                  <p className="text-sm text-ios-secondary mt-1">
+                    This draft has no ready phone number assigned. Select one to save it to the campaign and launch.
+                  </p>
+                </div>
+                <button
+                  onClick={() => { setPhoneSetupCampaignId(null); setPhoneSetupSelectedId(''); }}
+                  className="p-1 hover:bg-ios-gray rounded-apple-lg"
+                  aria-label="Close sender selection"
+                >
+                  <X className="w-5 h-5 text-ios-muted" />
+                </button>
+              </div>
+
+              {phoneNumbers.filter((phone) => phone.hasMetaId).length === 0 ? (
+                <div className="mt-4 rounded-apple-lg border border-apple-orange/30 bg-apple-orange/10 p-4 text-sm text-ios-secondary">
+                  No ready WhatsApp number is connected. Connect or finish setting up a number in WhatsApp Settings, then try again.
+                </div>
+              ) : (
+                <div className="mt-4 space-y-2 max-h-64 overflow-y-auto">
+                  {phoneNumbers.filter((phone) => phone.hasMetaId).map((phone) => (
+                    <label
+                      key={phone.id}
+                      className={`flex items-center gap-3 rounded-apple-lg border p-3 cursor-pointer transition ${
+                        phoneSetupSelectedId === phone.id ? 'border-wa-green bg-wa-green/5' : 'border-black/10 hover:border-wa-green/40'
+                      }`}
+                    >
+                      <input
+                        type="radio"
+                        name="campaign-sender-phone"
+                        value={phone.id}
+                        checked={phoneSetupSelectedId === phone.id}
+                        onChange={() => setPhoneSetupSelectedId(phone.id)}
+                        className="accent-wa-green"
+                      />
+                      <span>
+                        <span className="block text-sm font-medium text-ios-dark">{phone.displayName}</span>
+                        <span className="block text-xs text-ios-muted">{phone.phoneNumber}</span>
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              )}
+
+              <div className="flex justify-end gap-2 mt-5">
+                <button
+                  onClick={() => { setPhoneSetupCampaignId(null); setPhoneSetupSelectedId(''); }}
+                  className="btn-apple btn-apple-outline"
+                >
+                  Cancel
+                </button>
+                {phoneNumbers.some((phone) => phone.hasMetaId) && (
+                  <button
+                    onClick={() => assignCampaignPhoneMutation.mutate({
+                      campaignId: phoneSetupCampaignId,
+                      phoneNumberId: phoneSetupSelectedId,
+                    })}
+                    disabled={!phoneSetupSelectedId || assignCampaignPhoneMutation.isPending}
+                    className="btn-apple btn-wa-green disabled:opacity-50"
+                  >
+                    {assignCampaignPhoneMutation.isPending ? 'Saving…' : 'Save number & launch'}
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
         )}
       </div>
     );
@@ -958,7 +1093,7 @@ export default function CampaignsPage() {
                   one where the exact set is pinned at build time. */}
               <div className="grid grid-cols-3 gap-3 mb-4">
                 {([
-                  { key: 'all', title: 'All Contacts', sub: `${totalContacts} contacts`, Icon: Users },
+                  { key: 'all', title: 'Opted-in Contacts', sub: `${totalContacts} active with opt-in`, Icon: Users },
                   { key: 'segment', title: 'A Segment', sub: `${segments.length} available`, Icon: Filter },
                   { key: 'manual', title: 'Choose People', sub: 'Pick individually', Icon: ListChecks },
                 ] as const).map(({ key, title, sub, Icon }) => (
@@ -1030,8 +1165,8 @@ export default function CampaignsPage() {
                 <div className="flex items-center gap-3">
                   <CheckCircle2 className="w-5 h-5 text-wa-green" />
                   <div>
-                    <p className="font-medium text-wa-green">{totalContacts} contacts</p>
-                    <p className="text-sm text-ios-muted">All contacts in your list</p>
+                    <p className="font-medium text-wa-green">{totalContacts} active opted-in contacts</p>
+                    <p className="text-sm text-ios-muted">Only contacts with explicit opt-in consent will be messaged</p>
                   </div>
                 </div>
               </div>
@@ -1060,9 +1195,9 @@ export default function CampaignsPage() {
 
             {/* Template Selection */}
             <div>
-              <label className="block text-sm font-medium text-ios-dark mb-2">Use Template (Optional)</label>
+              {/* <label className="block text-sm font-medium text-ios-dark mb-2">Use Template (Optional)</label> */}
               <div className="grid grid-cols-3 gap-3">
-                <button
+                {/* <button
                   onClick={() => setForm({ ...form, templateId: '', message: '' })}
                   className={`p-4 border rounded-apple-lg text-left transition ${
                     !form.templateId
@@ -1075,7 +1210,7 @@ export default function CampaignsPage() {
                     <span className="font-medium text-ios-dark text-sm">Blank</span>
                   </div>
                   <p className="text-xs text-ios-muted">Start from scratch</p>
-                </button>
+                </button> */}
                 {templates.map((template) => (
                   <button
                     key={template.id}
@@ -1485,14 +1620,13 @@ export default function CampaignsPage() {
                       type="date"
                       value={form.scheduledAt.split('T')[0] || ''}
                       onChange={(e) => {
-                        const date = new Date(e.target.value);
                         const time = form.scheduledAt.includes('T')
                           ? form.scheduledAt.split('T')[1]
                           : '09:00';
-                        setForm({ ...form, scheduledAt: `${date.toISOString().split('T')[0]}T${time}` });
+                        setForm({ ...form, scheduledAt: e.target.value ? `${e.target.value}T${time}` : '' });
                       }}
                       className="input-apple w-full"
-                      min={new Date().toISOString().split('T')[0]}
+                      min={localDateInputValue()}
                     />
                   </div>
                   <div>
@@ -1503,7 +1637,7 @@ export default function CampaignsPage() {
                         ? form.scheduledAt.split('T')[1]?.substring(0, 5)
                         : '09:00'}
                       onChange={(e) => {
-                        const date = form.scheduledAt.split('T')[0] || new Date().toISOString().split('T')[0];
+                        const date = form.scheduledAt.split('T')[0] || localDateInputValue();
                         setForm({ ...form, scheduledAt: `${date}T${e.target.value}` });
                       }}
                       className="input-apple w-full"
@@ -1541,9 +1675,9 @@ export default function CampaignsPage() {
                       {audienceMode === 'manual'
                         ? `${selectedContactIds.size} contacts (hand-picked)`
                         : audienceMode === 'all'
-                          ? `${totalContacts} contacts (All)`
+                          ? `${totalContacts} active opted-in contacts`
                           : selectedSegment
-                            ? `${selectedSegment.contacts} contacts (${selectedSegment.name})`
+                          ? `${selectedSegment.contacts} segment matches (${selectedSegment.name}; opted-in only)`
                             : 'No audience selected'}
                     </p>
                   </div>
@@ -1709,6 +1843,13 @@ function cleanCampaignError(raw?: string | null): string {
   }
 }
 
+function campaignErrorGuidance(errorCode?: string | null): string | null {
+  if (errorCode === '131049') {
+    return 'Meta withheld this message to protect recipient experience. Do not repeatedly retry it. Check that the recipient opted in, use an approved template that matches the message purpose, and avoid sending repeated marketing messages to recipients who are not engaging.';
+  }
+  return null;
+}
+
 interface CampaignRecipientMessage {
   id: string;
   contact: { id: string; name: string | null; phone: string } | null;
@@ -1816,13 +1957,13 @@ function CampaignDetailModal({ campaignId, onClose }: { campaignId: string; onCl
               ) : messages.length === 0 ? (
                 <p className="text-sm text-ios-muted text-center py-10">No recipients yet</p>
               ) : (
-                <table className="w-full text-sm">
+                <table className="w-full table-fixed text-sm">
                   <thead className="sticky top-0 bg-white border-b border-black/5">
                     <tr className="text-left text-xs text-ios-muted uppercase tracking-wide">
-                      <th className="px-6 py-2 font-medium">Contact</th>
-                      <th className="px-3 py-2 font-medium">Status</th>
-                      <th className="px-3 py-2 font-medium">Timestamp</th>
-                      <th className="px-6 py-2 font-medium">Detail</th>
+                      <th className="w-[24%] px-6 py-2 font-medium">Contact</th>
+                      <th className="w-[14%] px-3 py-2 font-medium">Status</th>
+                      <th className="w-[24%] px-3 py-2 font-medium">Timestamp</th>
+                      <th className="w-[38%] px-6 py-2 font-medium">Detail</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -1845,11 +1986,23 @@ function CampaignDetailModal({ campaignId, onClose }: { campaignId: string; onCl
                           <td className="px-3 py-2.5 text-xs text-ios-muted whitespace-nowrap">
                             {ts ? new Date(ts).toLocaleString() : '—'}
                           </td>
-                          <td className="px-6 py-2.5 text-xs text-ios-muted max-w-[240px] truncate">
+                          <td className="px-6 py-2.5 text-xs text-ios-muted align-top">
                             {m.status === 'FAILED' ? (
-                              <span className="text-apple-red">{cleanCampaignError(m.errorMessage) || 'Failed'}</span>
+                              <div className="space-y-1.5">
+                                {m.errorCode && (
+                                  <p className="font-medium text-apple-red">Meta error {m.errorCode}</p>
+                                )}
+                                <p className="whitespace-normal break-words text-apple-red" title={cleanCampaignError(m.errorMessage) || 'Failed'}>
+                                  {cleanCampaignError(m.errorMessage) || 'Failed'}
+                                </p>
+                                {campaignErrorGuidance(m.errorCode) && (
+                                  <p className="whitespace-normal break-words text-ios-muted">
+                                    {campaignErrorGuidance(m.errorCode)}
+                                  </p>
+                                )}
+                              </div>
                             ) : m.metaMessageId ? (
-                              <span className="font-mono truncate block">{m.metaMessageId}</span>
+                              <span className="font-mono break-all">{m.metaMessageId}</span>
                             ) : (
                               '—'
                             )}

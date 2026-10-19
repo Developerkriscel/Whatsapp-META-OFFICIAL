@@ -58,31 +58,82 @@ export async function registerSuperadminRoutes(app: FastifyInstance): Promise<vo
   // ============================================
 
   app.get('/dashboard', async (request, reply) => {
+    const now = new Date();
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+    const { getCurrencyContext } = await import('../services/currency.js');
+    const { EXCHANGE_RATES } = await import('../services/currencyService.js');
     const [
       totalTenants,
       activeTenants,
       totalMessages,
       totalContacts,
-      planGroups,
       openTickets,
+      paidInvoices,
+      paidOrders,
+      currency,
     ] = await Promise.all([
       app.prisma.tenant.count(),
       app.prisma.tenant.count({ where: { status: 'ACTIVE' } }),
-      app.prisma.message.count({ where: { direction: 'OUTGOING' } }),
-      app.prisma.contact.count(),
-      app.prisma.tenant.findMany({
-        where: { status: { in: ['ACTIVE'] } },
-        select: { plan: { select: { monthlyPrice: true } } },
+      // Only messages that actually left the platform — failed and still-pending
+      // sends made up most of the old count.
+      app.prisma.message.count({
+        where: { direction: 'OUTGOING', status: { in: ['SENT', 'DELIVERED', 'READ'] } },
       }),
+      app.prisma.contact.count(),
       app.prisma.ticket.count({ where: { status: 'OPEN' } }),
+      // Money actually received this calendar month, from both payment paths.
+      app.prisma.invoice.findMany({
+        where: { status: 'paid', paidAt: { gte: monthStart } },
+        select: { amount: true, currency: true },
+      }),
+      app.prisma.paymentOrder.findMany({
+        where: { status: 'PAID', creditedAt: { gte: monthStart } },
+        select: { amountMinor: true, currency: true, breakdown: true },
+      }),
+      getCurrencyContext(app.prisma),
     ]);
 
-    // Calculate real MRR from active tenants' plan prices
-    const mrr = planGroups.reduce((sum, t) => {
-      const raw = t.plan?.monthlyPrice;
-      const price = typeof raw === 'string' ? parseFloat(raw) : Number(raw);
-      return sum + (isNaN(price) ? 0 : price);
+    // Amounts are reported in USD (the frontend converts for display), so
+    // anything charged in another currency is converted back here.
+    const fallbackInrRate = currency.currency === 'INR' ? currency.fxRate : EXCHANGE_RATES.INR;
+    const toUsd = (amount: number, cur: string, rate?: number) => {
+      const code = (cur || 'USD').toUpperCase();
+      if (code === 'USD') return amount;
+      const perUsd = code === 'INR' ? (rate || fallbackInrRate) : EXCHANGE_RATES[code];
+      return perUsd ? amount / perUsd : 0;
+    };
+
+    const invoiceRevenue = paidInvoices.reduce(
+      (sum, inv) => sum + toUsd(Number(inv.amount), inv.currency), 0);
+    // Cashfree orders (plan purchases and credit packs) hold the full amount
+    // charged, in minor units; plan orders also record the rate they were quoted at.
+    const orderRevenue = paidOrders.reduce((sum, o) => {
+      const rate = (o.breakdown as { usdToInr?: number } | null)?.usdToInr;
+      return sum + toUsd(o.amountMinor / 100, o.currency, rate);
     }, 0);
+    const mrr = Math.round((invoiceRevenue + orderRevenue) * 100) / 100;
+
+    // Tenants that most recently sent a message that actually went out.
+    const latestSends = await app.prisma.message.groupBy({
+      by: ['tenantId'],
+      where: { direction: 'OUTGOING', status: { in: ['SENT', 'DELIVERED', 'READ'] } },
+      _max: { createdAt: true },
+      _count: { _all: true },
+      orderBy: { _max: { createdAt: 'desc' } },
+      take: 6,
+    });
+    const recentSenderRows = await app.prisma.tenant.findMany({
+      where: { id: { in: latestSends.map((row) => row.tenantId) } },
+      select: { id: true, name: true, status: true, plan: { select: { name: true } } },
+    });
+    const recentSenders = latestSends
+      .map((row) => {
+        const tenant = recentSenderRows.find((t) => t.id === row.tenantId);
+        return tenant
+          ? { ...tenant, lastMessageAt: row._max.createdAt, messagesSent: row._count._all }
+          : null;
+      })
+      .filter(Boolean);
 
     return {
       success: true,
@@ -94,6 +145,7 @@ export async function registerSuperadminRoutes(app: FastifyInstance): Promise<vo
         mrr,
         openTickets,
         trialTenants: totalTenants - activeTenants,
+        recentSenders,
       },
     };
   });
@@ -747,7 +799,7 @@ export async function registerSuperadminRoutes(app: FastifyInstance): Promise<vo
 
   app.post('/tenants', async (request, reply) => {
     const schema = z.object({
-      name: z.string().min(1),
+      name: z.string().trim().min(1),
       email: z.string().email(),
       password: z.string().min(8).optional(),
       planId: z.string().optional(),
@@ -756,6 +808,21 @@ export async function registerSuperadminRoutes(app: FastifyInstance): Promise<vo
     });
 
     const body = schema.parse(request.body);
+
+    const existingTenant = await app.prisma.tenant.findFirst({
+      where: { name: { equals: body.name, mode: 'insensitive' } },
+      select: { id: true },
+    });
+
+    if (existingTenant) {
+      return reply.status(409).send({
+        success: false,
+        error: {
+          code: 'TENANT_NAME_EXISTS',
+          message: 'Tenant name must be unique. Please choose a name that has not been used for another tenant.',
+        },
+      });
+    }
 
     // Check if email exists
     const existing = await app.prisma.user.findFirst({
@@ -773,27 +840,56 @@ export async function registerSuperadminRoutes(app: FastifyInstance): Promise<vo
     const passwordToUse = body.password || Math.random().toString(36).slice(-8) + Math.random().toString(36).slice(-2).toUpperCase() + '!';
     const hashedPassword = await bcrypt.hash(passwordToUse, 12);
 
-    const tenant = await app.prisma.tenant.create({
-      data: {
-        name: body.name,
-        website: body.website || null,
-        billingEmail: body.billingEmail || body.email,
-        status: 'TRIAL',
-        planId: body.planId,
-        isOnTrial: true,
-        trialEndsAt: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000),
-        users: {
-          create: {
-            email: body.email,
-            name: body.name.split(' ')[0],
-            password: hashedPassword,
-            role: 'OWNER',
-            isActive: true,
+    let tenant;
+    try {
+      tenant = await app.prisma.tenant.create({
+        data: {
+          name: body.name,
+          website: body.website || null,
+          billingEmail: body.billingEmail || body.email,
+          status: 'TRIAL',
+          planId: body.planId,
+          isOnTrial: true,
+          trialEndsAt: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000),
+          users: {
+            create: {
+              email: body.email,
+              name: body.name.split(' ')[0],
+              password: hashedPassword,
+              role: 'OWNER',
+              isActive: true,
+            },
           },
         },
-      },
-      include: { users: true },
-    });
+        include: { users: true },
+      });
+    } catch (error) {
+      const prismaError = error as { code?: string; meta?: { target?: string | string[] } };
+      if (prismaError.code === 'P2002') {
+        const target = Array.isArray(prismaError.meta?.target)
+          ? prismaError.meta.target.join(' ').toLowerCase()
+          : String(prismaError.meta?.target || '').toLowerCase();
+
+        if (target.includes('name')) {
+          return reply.status(409).send({
+            success: false,
+            error: {
+              code: 'TENANT_NAME_EXISTS',
+              message: 'Tenant name must be unique. Please choose a name that has not been used for another tenant.',
+            },
+          });
+        }
+
+        if (target.includes('email')) {
+          return reply.status(409).send({
+            success: false,
+            error: { code: 'EMAIL_EXISTS', message: 'Email already registered' },
+          });
+        }
+      }
+
+      throw error;
+    }
 
     await createAuditLog(app.prisma, {
       actorId: request.authUser.id,

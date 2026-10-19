@@ -31,7 +31,7 @@ const sections = {
       {
         heading: 'Acceptable use and third-party services',
         paragraphs: [
-          'You must use Kriscel WA in compliance with applicable law and the terms and policies of WhatsApp, Meta, and any other services you connect. You are responsible for having the permissions and consents required to contact your end users.',
+          'You must use Kriscel WA in compliance with applicable law and the terms and policies of WhatsApp, Meta, and any other services you connect. You are responsible for having the permissions and consents required to contact your end users. Campaigns can only be sent to active contacts recorded as explicitly opted in; contacts with unknown consent or an opt-out are excluded.',
           'Do not use the service to send unlawful, deceptive, abusive, or unsolicited messages, interfere with the service, or attempt to access another person’s account or data. We may restrict or suspend access where reasonably necessary to protect users, the service, or comply with law.',
           'Third-party services are governed by their own terms and availability. Kriscel WA does not control changes, interruptions, or decisions made by those providers.',
         ],

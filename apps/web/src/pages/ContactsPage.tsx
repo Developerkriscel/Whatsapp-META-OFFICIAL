@@ -26,9 +26,22 @@ interface Contact {
   tags: string[];
   isActive: boolean;
   blocked: boolean;
+  consentStatus: 'OPTED_IN' | 'OPTED_OUT' | 'UNKNOWN';
+  consentSource?: string | null;
+  optInAt?: string | null;
   lastMessage?: string;
   createdAt: string;
 }
+
+const CONSENT_SOURCES = [
+  { value: 'website_form', label: 'Website form' },
+  { value: 'checkout', label: 'Checkout' },
+  { value: 'in_person', label: 'In person' },
+  { value: 'email', label: 'Email' },
+  { value: 'phone', label: 'Phone call' },
+  { value: 'whatsapp', label: 'WhatsApp message with explicit consent' },
+  { value: 'other', label: 'Other' },
+] as const;
 
 function getContactStatus(contact: Pick<Contact, 'isActive' | 'blocked'>): 'active' | 'inactive' | 'blocked' {
   if (contact.blocked) return 'blocked';
@@ -122,6 +135,9 @@ export default function ContactsPage() {
   const [createError, setCreateError] = useState<string | null>(null);
   const [editForm, setEditForm] = useState({ name: '', email: '', company: '' });
   const [editError, setEditError] = useState<string | null>(null);
+  const [optInContact, setOptInContact] = useState<Contact | null>(null);
+  const [optInForm, setOptInForm] = useState({ confirmed: false, source: '', reference: '' });
+  const [optInError, setOptInError] = useState<string | null>(null);
 
   // CSV Import state
   const [importStep, setImportStep] = useState<ImportStep>('upload');
@@ -174,7 +190,11 @@ export default function ContactsPage() {
       // Adding a number that only a deleted record stood in the way of brings
       // that record back, along with its conversations and history. Say so,
       // rather than reporting it as a new contact.
-      toast.success(res?.meta?.restored ? 'Contact restored, with its history' : 'Contact added');
+      toast.success(
+        res?.data?.consentStatus === 'OPTED_IN'
+          ? 'Contact added and consent recorded'
+          : res?.meta?.restored ? 'Contact restored, with its history' : 'Contact added'
+      );
     },
     onError: (err: any) => {
       setCreateError(
@@ -214,6 +234,44 @@ export default function ContactsPage() {
         err.response?.data?.message ||
         'Failed to update contact.'
       );
+    },
+  });
+
+  const optInMutation = useMutation({
+    mutationFn: async ({ contactId, source, reference }: { contactId: string; source: string; reference: string }) => {
+      const response = await api.post(`/contacts/${contactId}/opt-in`, {
+        confirmed: true,
+        source,
+        reference: reference || undefined,
+      });
+      return response.data;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['contacts'] });
+      setOptInContact(null);
+      setOptInForm({ confirmed: false, source: '', reference: '' });
+      setOptInError(null);
+      toast.success('WhatsApp consent recorded');
+    },
+    onError: (err: any) => {
+      setOptInError(err.response?.data?.error?.message || 'Could not record consent. Please try again.');
+    },
+  });
+
+  const bulkInPersonConsentMutation = useMutation({
+    mutationFn: async () => {
+      const response = await api.post('/contacts/bulk-opt-in-existing', {
+        confirmed: true,
+        source: 'in_person',
+      });
+      return response.data;
+    },
+    onSuccess: (response: any) => {
+      queryClient.invalidateQueries({ queryKey: ['contacts'] });
+      toast.success(`${response?.data?.updated ?? 0} contact(s) recorded as opted in via in-person consent`);
+    },
+    onError: (err: any) => {
+      toast.error(err.response?.data?.error?.message || 'Could not record existing consent');
     },
   });
 
@@ -353,6 +411,12 @@ export default function ContactsPage() {
     resetImport();
   };
 
+  const handleImportDone = () => {
+    bulkInPersonConsentMutation.mutate(undefined, {
+      onSuccess: closeImport,
+    });
+  };
+
   // ── Form Handlers ─────────────────────────────────────
 
   const handleSubmit = () => {
@@ -364,6 +428,26 @@ export default function ContactsPage() {
       email: form.email || undefined,
       company: form.company || undefined,
       tags: form.tags.split(',').map(t => t.trim()).filter(Boolean),
+      consent: {
+        confirmed: true,
+        source: 'in_person',
+      },
+    });
+  };
+
+  const startOptIn = (contact: Contact) => {
+    setOptInContact(contact);
+    setOptInForm({ confirmed: false, source: '', reference: '' });
+    setOptInError(null);
+  };
+
+  const handleOptIn = () => {
+    if (!optInContact || !optInForm.confirmed || !optInForm.source) return;
+    setOptInError(null);
+    optInMutation.mutate({
+      contactId: optInContact.id,
+      source: optInForm.source,
+      reference: optInForm.reference.trim(),
     });
   };
 
@@ -374,6 +458,11 @@ export default function ContactsPage() {
     setEditing(contact);
     setEditForm({ name: contact.name || '', email: contact.email || '', company: contact.company || '' });
     setEditError(null);
+  };
+
+  const openAdd = () => {
+    setCreateError(null);
+    setShowAdd(true);
   };
 
   const handleEditSubmit = () => {
@@ -462,7 +551,7 @@ export default function ContactsPage() {
             </button>
           )}
           <button
-            onClick={() => setShowAdd(true)}
+            onClick={openAdd}
             className="btn-apple btn-wa-green flex items-center gap-2"
           >
             <Plus className="w-4 h-4" />
@@ -557,12 +646,24 @@ export default function ContactsPage() {
                       </span>
                     </td>
                     <td className="px-4 py-3">
-                      <button
-                        onClick={() => startEdit(contact)}
-                        className="p-1.5 hover:bg-ios-gray rounded-apple-lg text-ios-muted"
-                      >
-                        <Edit2 className="w-4 h-4" />
-                      </button>
+                      <div className="flex items-center gap-1">
+                        {contact.consentStatus !== 'OPTED_IN' && (
+                          <button
+                            onClick={() => startOptIn(contact)}
+                            className="px-2 py-1 hover:bg-wa-green/10 rounded-apple-lg text-wa-green text-xs font-medium whitespace-nowrap"
+                            title="Record explicit WhatsApp consent"
+                          >
+                            Record opt-in
+                          </button>
+                        )}
+                        <button
+                          onClick={() => startEdit(contact)}
+                          className="p-1.5 hover:bg-ios-gray rounded-apple-lg text-ios-muted"
+                          aria-label={`Edit ${contact.name || contact.phone}`}
+                        >
+                          <Edit2 className="w-4 h-4" />
+                        </button>
+                      </div>
                     </td>
                   </tr>
                   );
@@ -576,7 +677,7 @@ export default function ContactsPage() {
                 <p className="text-sm mt-1">{search ? 'Try a different search term' : 'Add or import your first contact'}</p>
                 {!search && (
                   <div className="flex items-center justify-center gap-3 mt-4">
-                    <button onClick={() => setShowAdd(true)} className="btn-apple btn-wa-green text-sm">Add Contact</button>
+                    <button onClick={openAdd} className="btn-apple btn-wa-green text-sm">Add Contact</button>
                     <button onClick={() => setShowImport(true)} className="btn-apple btn-apple-outline text-sm">Import CSV</button>
                   </div>
                 )}
@@ -615,7 +716,7 @@ export default function ContactsPage() {
       {/* ── ADD CONTACT MODAL ─────────────────────────── */}
       {showAdd && (
         <div className="fixed inset-0 bg-black/40 backdrop-blur-xl flex items-center justify-center z-50 p-4">
-          <div className="glass-card rounded-apple-xl w-full max-w-md p-6">
+          <div className="glass-card rounded-apple-xl w-full max-w-md max-h-[90vh] overflow-y-auto p-6">
             <div className="flex items-center justify-between mb-5">
               <h3 className="text-lg font-semibold text-ios-dark">Add New Contact</h3>
               <button onClick={() => { setShowAdd(false); setCreateError(null); }} className="p-1 hover:bg-ios-gray rounded-apple-lg">
@@ -642,6 +743,9 @@ export default function ContactsPage() {
                   />
                 </div>
               ))}
+              <div className="rounded-apple-lg border border-black/10 p-3">
+                <p className="text-sm text-ios-secondary">Consent is recorded as given in person when this contact is added. Add only after the person has explicitly agreed to receive the types of WhatsApp messages this business plans to send.</p>
+              </div>
               {createError && (
                 <div className="p-3 bg-red-50 border border-red-200 rounded-apple-lg text-sm text-apple-red flex items-center gap-2">
                   <AlertCircle className="w-4 h-4 flex-shrink-0" />
@@ -657,6 +761,78 @@ export default function ContactsPage() {
                   {createMutation.isPending ? 'Adding...' : 'Add Contact'}
                 </button>
                 <button onClick={() => { setShowAdd(false); setCreateError(null); }} className="flex-1 btn-apple btn-apple-outline">
+                  Cancel
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {optInContact && (
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-xl flex items-center justify-center z-50 p-4">
+          <div className="glass-card rounded-apple-xl w-full max-w-md p-6">
+            <div className="flex items-center justify-between mb-4">
+              <div>
+                <h3 className="text-lg font-semibold text-ios-dark">Record WhatsApp opt-in</h3>
+                <p className="text-sm text-ios-muted mt-1">{optInContact.name || optInContact.phone} · {optInContact.phone}</p>
+              </div>
+              <button
+                onClick={() => { setOptInContact(null); setOptInForm({ confirmed: false, source: '', reference: '' }); setOptInError(null); }}
+                className="p-1 hover:bg-ios-gray rounded-apple-lg"
+                aria-label="Close opt-in dialog"
+              >
+                <X className="w-5 h-5 text-ios-muted" />
+              </button>
+            </div>
+            <div className="space-y-4">
+              <label className="flex items-start gap-2 text-sm text-ios-secondary">
+                <input
+                  type="checkbox"
+                  checked={optInForm.confirmed}
+                  onChange={(e) => setOptInForm({ ...optInForm, confirmed: e.target.checked, source: e.target.checked ? optInForm.source : '', reference: e.target.checked ? optInForm.reference : '' })}
+                  className="mt-0.5 h-4 w-4 rounded"
+                />
+                <span>I confirm this person has agreed to receive the types of WhatsApp messages this business plans to send.</span>
+              </label>
+              {optInForm.confirmed && (
+                <>
+                  <div>
+                    <label className="block text-sm font-medium text-ios-secondary mb-1">Where did they opt in? *</label>
+                    <select
+                      value={optInForm.source}
+                      onChange={(e) => setOptInForm({ ...optInForm, source: e.target.value })}
+                      className="input-apple w-full"
+                    >
+                      <option value="">Choose a consent source</option>
+                      {CONSENT_SOURCES.map((source) => <option key={source.value} value={source.value}>{source.label}</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-ios-secondary mb-1">Consent record or message ID (optional)</label>
+                    <input
+                      value={optInForm.reference}
+                      onChange={(e) => setOptInForm({ ...optInForm, reference: e.target.value })}
+                      placeholder="Form submission ID, message ID, or other record reference"
+                      className="input-apple w-full"
+                    />
+                  </div>
+                </>
+              )}
+              <p className="text-xs text-ios-muted">This records permission already given by the person; it does not send an opt-in request. Do not infer promotional consent from an inbound support message.</p>
+              {optInError && <p className="text-sm text-apple-red">{optInError}</p>}
+              <div className="flex gap-2 pt-1">
+                <button
+                  onClick={handleOptIn}
+                  disabled={!optInForm.confirmed || !optInForm.source || optInMutation.isPending}
+                  className="flex-1 btn-apple btn-wa-green disabled:opacity-50"
+                >
+                  {optInMutation.isPending ? 'Recording...' : 'Record opt-in'}
+                </button>
+                <button
+                  onClick={() => { setOptInContact(null); setOptInForm({ confirmed: false, source: '', reference: '' }); setOptInError(null); }}
+                  className="flex-1 btn-apple btn-apple-outline"
+                >
                   Cancel
                 </button>
               </div>
@@ -989,13 +1165,20 @@ export default function ContactsPage() {
                       ))}
                     </div>
                   )}
+                  <p className="mt-4 text-xs text-ios-muted">
+                    Done also records active, unblocked contacts with unknown consent as opted in via in-person consent. Opted-out contacts are left unchanged; the recorded date is when this action runs.
+                  </p>
                   <div className="flex gap-2 mt-6">
                     <button onClick={resetImport} className="flex-1 btn-apple btn-apple-outline flex items-center justify-center gap-2">
                       <Upload className="w-4 h-4" />
                       Import More
                     </button>
-                    <button onClick={closeImport} className="flex-1 btn-apple btn-wa-green">
-                      Done
+                    <button
+                      onClick={handleImportDone}
+                      disabled={bulkInPersonConsentMutation.isPending}
+                      className="flex-1 btn-apple btn-wa-green disabled:opacity-50"
+                    >
+                      {bulkInPersonConsentMutation.isPending ? 'Recording consent...' : 'Done'}
                     </button>
                   </div>
                 </div>

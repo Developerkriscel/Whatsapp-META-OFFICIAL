@@ -41,7 +41,7 @@ export default function SuperAdminTenantsPage() {
   const [page, setPage] = useState(1);
   const [search, setSearch] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
-  const [status, setStatus] = useState('');
+  const [status, setStatus] = useState('ACTIVE');
   const [onlyLocked, setOnlyLocked] = useState(false);
   const [selectedTenantId, setSelectedTenantId] = useState<string | null>(null);
   const [showAddModal, setShowAddModal] = useState(false);

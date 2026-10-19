@@ -22,10 +22,10 @@ export async function registerSuperadminCommerceRoutes(app: FastifyInstance) {
     const packages = await app.prisma.creditPackage.findMany({ orderBy: { sortOrder: 'asc' } });
     const { quotePackage } = await import('../services/pricing.js');
 
-    const quoted = await Promise.all(packages.map(async (p) => ({
-      ...p,
-      quote: await quotePackage(app.prisma, p, country),
-    })));
+    const quoted = await Promise.all(packages.map(async (p) => {
+      const quote = await quotePackage(app.prisma, p, country);
+      return { ...p, credits: quote.credits, quote };
+    }));
 
     // A pack whose value ratio is far from 1 is charging a buyer materially
     // more per credit than the engine consumes them at. Surfaced rather than
@@ -50,16 +50,29 @@ export async function registerSuperadminCommerceRoutes(app: FastifyInstance) {
 
   app.post('/credit-packages', async (request, reply) => {
     const body = packageBody.parse(request.body);
-    const created = await app.prisma.creditPackage.create({ data: body });
+    if (body.priceMinor < 100 || body.priceMinor % 100 !== 0) {
+      return reply.status(400).send({ success: false, error: { code: 'INVALID_PACKAGE_PRICE', message: 'Package base price must be a whole rupee amount so ₹1 equals 1 credit.' } });
+    }
+    const created = await app.prisma.creditPackage.create({ data: { ...body, credits: body.priceMinor / 100 } });
     return reply.status(201).send({ success: true, data: created });
   });
 
   app.patch('/credit-packages/:id', async (request, reply) => {
     const { id } = z.object({ id: z.string() }).parse(request.params);
     const body = packageBody.partial().parse(request.body);
-    const exists = await app.prisma.creditPackage.findUnique({ where: { id }, select: { id: true } });
+    const exists = await app.prisma.creditPackage.findUnique({ where: { id }, select: { id: true, priceMinor: true } });
     if (!exists) return reply.status(404).send({ success: false, error: { code: 'NOT_FOUND' } });
-    return { success: true, data: await app.prisma.creditPackage.update({ where: { id }, data: body }) };
+    const priceMinor = body.priceMinor ?? exists.priceMinor;
+    if (priceMinor < 100 || priceMinor % 100 !== 0) {
+      return reply.status(400).send({ success: false, error: { code: 'INVALID_PACKAGE_PRICE', message: 'Package base price must be a whole rupee amount so ₹1 equals 1 credit.' } });
+    }
+    return {
+      success: true,
+      data: await app.prisma.creditPackage.update({
+        where: { id },
+        data: { ...body, credits: priceMinor / 100 },
+      }),
+    };
   });
 
   app.delete('/credit-packages/:id', async (request, reply) => {

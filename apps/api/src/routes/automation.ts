@@ -580,6 +580,17 @@ async function executeFlowStep(
     return { action: 'completed' };
   }
 
+  // Substitute {{contact_name}}, {{business_name}} and {{agent_name}} in a
+  // step's text. The editor offers these variables but the executor was
+  // dispatching the raw template string, so every customer saw "Hi {{1}}".
+  function substituteVars(text: string): string {
+    return text
+      .replace(/\{\{contact_name\}\}/gi, conversation.contact?.name || 'there')
+      .replace(/\{\{business_name\}\}/gi, (flow as any).tenant?.name || '')
+      .replace(/\{\{agent_name\}\}/gi, '')
+      .replace(/\{\{\d+\}\}/g, '');  // strip leftover positional {{1}} etc.
+  }
+
   switch (currentStep.type) {
     case 'trigger':
       if (currentStep.next) {
@@ -593,10 +604,8 @@ async function executeFlowStep(
 
     case 'message':
       if (currentStep.message) {
-        // This used to only write a local Message row and broadcast an SSE
-        // event — it never actually reached Meta, so bot replies never
-        // arrived on the real customer's WhatsApp at all. Dispatch for real,
-        // using the same tenant-scoped sender the manual reply box uses.
+        const messageText = substituteVars(currentStep.message);
+
         const message = await app.prisma.message.create({
           data: {
             tenantId: flow.tenantId,
@@ -605,7 +614,7 @@ async function executeFlowStep(
             phoneNumberId: conversation.phoneNumberId,
             direction: 'OUTGOING',
             type: 'TEXT',
-            body: currentStep.message,
+            body: messageText,
             status: 'PENDING',
           },
         });
@@ -617,7 +626,7 @@ async function executeFlowStep(
           tenantId: flow.tenantId,
           contactPhone: conversation.contact?.phone || '',
           phoneNumberId: conversation.phoneNumberId,
-          body: currentStep.message,
+          body: messageText,
           type: 'text',
         });
 
@@ -625,7 +634,7 @@ async function executeFlowStep(
           event: 'new_message',
           data: {
             conversationId: conversation.id,
-            body: currentStep.message,
+            body: messageText,
             direction: 'OUTGOING',
             timestamp: new Date().toISOString(),
           },
@@ -655,7 +664,7 @@ async function executeFlowStep(
 
       const fallbackMessage: string =
         currentStep.fallbackMessage ||
-        "I'm not sure about that — let me connect you with a member of our team.";
+        "I'm not entirely sure about this, but I'll connect you with the appropriate person who can assist you. They will get in touch with you shortly.";
 
       // The bot answers the public under the business's own number, so the
       // scope, the refusal and the screening are built here rather than left to
@@ -697,7 +706,8 @@ async function executeFlowStep(
       if (generatedReply && !screened.ok) {
         console.warn(`[Bot] reply rejected for tenant ${flow.tenantId}: ${screened.reason}`);
       }
-      const replyText: string = screened.ok && screened.text ? screened.text : fallbackMessage;
+      const usedFallback = !(screened.ok && screened.text);
+      const replyText: string = usedFallback ? fallbackMessage : screened.text!;
 
       const message = await app.prisma.message.create({
         data: {
@@ -732,6 +742,32 @@ async function executeFlowStep(
           timestamp: new Date().toISOString(),
         },
       });
+
+      // When the fallback fires the bot told the customer it would connect
+      // them with a person — actually do that instead of leaving them waiting
+      // with the bot still active and nobody assigned.
+      if (usedFallback) {
+        const handoffData: any = { isBotActive: false };
+        if (flow.assignToUserId) {
+          handoffData.assignedToId = flow.assignToUserId;
+          handoffData.status = 'OPEN';
+        }
+        await app.prisma.conversation.update({
+          where: { id: conversation.id },
+          data: handoffData,
+        });
+        await app.prisma.botExecution.update({
+          where: { id: execution.id },
+          data: { status: 'HANDED_OFF', endedAt: new Date() },
+        });
+
+        broadcastToTenant(flow.tenantId, {
+          event: 'conversation_updated',
+          data: { conversationId: conversation.id, isBotActive: false },
+        });
+
+        return { action: 'handoff', data: { reason: 'ai_fallback' } };
+      }
 
       if (currentStep.next) {
         await app.prisma.botExecution.update({

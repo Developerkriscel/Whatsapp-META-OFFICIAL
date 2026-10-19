@@ -110,6 +110,15 @@ export function formatCredits(credits: number): string {
   return credits.toLocaleString('en-IN');
 }
 
+/** The messaging wallet stores paise, while customers see one credit per rupee. */
+export function formatWalletCredits(balancePaise: number): { credits: string; money: string } {
+  const value = (balancePaise / 100).toLocaleString('en-IN', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+  return { credits: value, money: `₹${value}` };
+}
+
 /**
  * Balance shown the way a person actually reads it: the money first, with the
  * credit count as the secondary detail rather than the headline.

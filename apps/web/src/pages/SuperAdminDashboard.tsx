@@ -19,6 +19,14 @@ interface SuperAdminDashboard {
   mrr: number;
   openTickets: number;
   trialTenants: number;
+  recentSenders: Array<{
+    id: string;
+    name: string;
+    status: string;
+    plan: { name: string } | null;
+    lastMessageAt: string;
+    messagesSent: number;
+  }>;
 }
 
 interface Tenant {
@@ -27,8 +35,12 @@ interface Tenant {
   status: string;
   plan: any;
   planName: string | null;
+  isOnTrial: boolean;
   trialEndsAt: string | null;
 }
+
+/** How far ahead a trial end counts as "soon". */
+const TRIAL_ENDING_WINDOW_DAYS = 7;
 
 interface PlatformHealth {
   status: 'healthy' | 'degraded';
@@ -97,6 +109,21 @@ export default function SuperAdminDashboard() {
 
   const metrics = data?.data;
   const tenants = tenantsData?.data || [];
+
+  // Trials that are still running but end within the window, soonest first.
+  // Already-expired trials are left out — they used to crowd this list.
+  // A tenant can be ACTIVE while still on trial, so isOnTrial counts too.
+  const now = Date.now();
+  const windowEnd = now + TRIAL_ENDING_WINDOW_DAYS * 24 * 60 * 60 * 1000;
+  const trialsEndingSoon = tenants
+    .filter((t: Tenant) => {
+      if (!(t.status === 'TRIAL' || t.isOnTrial) || !t.trialEndsAt) return false;
+      const endsAt = new Date(t.trialEndsAt).getTime();
+      return endsAt > now && endsAt <= windowEnd;
+    })
+    .sort((a: Tenant, b: Tenant) =>
+      new Date(a.trialEndsAt!).getTime() - new Date(b.trialEndsAt!).getTime()
+    );
   const databaseHealth = platformHealth?.services.find((service) => service.id === 'database');
 
   const healthValueClass = (status?: PlatformHealth['services'][number]['status']) => {
@@ -108,25 +135,25 @@ export default function SuperAdminDashboard() {
 
   const cards = [
     {
-      label: 'Total Tenants',
-      value: metrics?.totalTenants || 0,
+      label: 'Active Tenants',
+      value: metrics?.activeTenants || 0,
       icon: Building2,
       color: 'blue',
-      subtext: `${metrics?.activeTenants || 0} active`,
+      subtext: `${metrics?.totalTenants || 0} total tenants`,
     },
     {
       label: 'Monthly Revenue',
       value: formatMoney(Number(metrics?.mrr || 0), fx, { decimals: 0 }),
       icon: CreditCard,
       color: 'green',
-      subtext: 'MRR',
+      subtext: 'Received this month',
     },
     {
       label: 'Total Messages',
       value: formatCount(metrics?.totalMessages || 0),
       icon: MessageSquare,
       color: 'purple',
-      subtext: 'All time',
+      subtext: 'Sent, all time',
     },
     {
       label: 'Open Tickets',
@@ -188,15 +215,11 @@ export default function SuperAdminDashboard() {
             Trials Ending Soon
           </h2>
           <div className="space-y-3">
-            {tenants
-              .filter((t: Tenant) => t.status === 'TRIAL' && t.trialEndsAt)
-              .sort((a: Tenant, b: Tenant) =>
-                new Date(a.trialEndsAt!).getTime() - new Date(b.trialEndsAt!).getTime()
-              )
+            {trialsEndingSoon
               .slice(0, 5)
               .map((tenant: Tenant) => {
                 const daysLeft = Math.ceil(
-                  (new Date(tenant.trialEndsAt!).getTime() - Date.now()) / (1000 * 60 * 60 * 24)
+                  (new Date(tenant.trialEndsAt!).getTime() - now) / (1000 * 60 * 60 * 24)
                 );
                 return (
                   <div key={tenant.id} className="flex items-center justify-between p-3 bg-apple-orange/10 rounded-apple-lg">
@@ -210,13 +233,15 @@ export default function SuperAdminDashboard() {
                       </div>
                     </div>
                     <span className="text-sm text-apple-orange font-medium">
-                      {daysLeft > 0 ? `${daysLeft} days left` : 'Expired'}
+                      {daysLeft === 1 ? '1 day left' : `${daysLeft} days left`}
                     </span>
                   </div>
                 );
               })}
-            {tenants.filter((t: Tenant) => t.status === 'TRIAL').length === 0 && (
-              <p className="text-sm text-ios-muted">No trials ending soon</p>
+            {trialsEndingSoon.length === 0 && (
+              <p className="text-sm text-ios-muted">
+                No trials ending in the next {TRIAL_ENDING_WINDOW_DAYS} days
+              </p>
             )}
           </div>
         </div>
@@ -279,13 +304,16 @@ export default function SuperAdminDashboard() {
       {/* Recent Tenants */}
       <div className="card-apple p-6">
         <div className="flex items-center justify-between mb-4">
-          <h2 className="text-lg font-semibold text-ios-dark">Recent Tenants</h2>
+          <div>
+            <h2 className="text-lg font-semibold text-ios-dark">Recent Tenants</h2>
+            <p className="text-sm text-ios-muted">Most recently sent a message</p>
+          </div>
           <a href="/superadmin/tenants" className="text-wa-green hover:text-wa-teal text-sm">
             View all →
           </a>
         </div>
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          {tenants.slice(0, 6).map((tenant: Tenant) => (
+          {(metrics?.recentSenders || []).map((tenant) => (
             <div key={tenant.id} className="p-4 bg-ios-gray rounded-apple-lg hover:bg-ios-gray/80 transition-all">
               <div className="flex items-center gap-3 mb-2">
                 <div className="w-10 h-10 bg-wa-green/20 text-wa-green rounded-apple-lg flex items-center justify-center font-semibold">
@@ -296,6 +324,12 @@ export default function SuperAdminDashboard() {
                   <p className="text-sm text-ios-muted">{tenant.plan?.name || 'No plan'}</p>
                 </div>
               </div>
+              <p className="text-sm font-medium text-ios-dark">
+                {tenant.messagesSent.toLocaleString()} {tenant.messagesSent === 1 ? 'message' : 'messages'} sent
+              </p>
+              <p className="text-xs text-ios-muted mb-2">
+                Last message {new Date(tenant.lastMessageAt).toLocaleString()}
+              </p>
               <span
                 className={`px-2 py-1 text-xs rounded-apple-full ${
                   tenant.status === 'ACTIVE'
@@ -311,6 +345,9 @@ export default function SuperAdminDashboard() {
               </span>
             </div>
           ))}
+          {!isLoading && (metrics?.recentSenders || []).length === 0 && (
+            <p className="text-sm text-ios-muted">No tenant has sent a message yet</p>
+          )}
         </div>
       </div>
     </div>

@@ -10,19 +10,28 @@ import { Check, MessageSquare, Users, Bot, Zap, Shield } from 'lucide-react';
 import { api } from '../api/client';
 import { useAuth } from '../context/AuthContext';
 
+const CASHFREE_PLAN_GST_RATE_PERCENT = 18;
+const FALLBACK_USD_TO_INR_RATE = 88.5;
+
+interface CashfreePlanQuote {
+  baseInr: number;
+  gstInr: number;
+  totalInr: number;
+}
+
 interface Plan {
   id: string;
   name: string;
   tier: string;
   monthlyPrice: number;
   annualPrice: number;
-  cashfreeGstRatePercent: number;
-  cashfreeMonthlyBaseInr: number;
-  cashfreeMonthlyGstInr: number;
-  cashfreeMonthlyTotalInr: number;
-  cashfreeAnnualBaseInr: number;
-  cashfreeAnnualGstInr: number;
-  cashfreeAnnualTotalInr: number;
+  cashfreeGstRatePercent?: number;
+  cashfreeMonthlyBaseInr?: number;
+  cashfreeMonthlyGstInr?: number;
+  cashfreeMonthlyTotalInr?: number;
+  cashfreeAnnualBaseInr?: number;
+  cashfreeAnnualGstInr?: number;
+  cashfreeAnnualTotalInr?: number;
   description: string;
   maxContacts: number;
   maxMessagesPerMonth: number;
@@ -89,6 +98,35 @@ export default function PricingPage() {
       minimumFractionDigits: 2,
       maximumFractionDigits: 2,
     }).format(amount);
+
+  const cashfreeQuote = (
+    amountUsd: number,
+    baseInrFromApi?: number,
+    gstInrFromApi?: number,
+    totalInrFromApi?: number,
+  ): CashfreePlanQuote | null => {
+    const baseUsd = Number(amountUsd);
+    if (!Number.isFinite(baseUsd) || baseUsd < 0) return null;
+
+    if (
+      typeof baseInrFromApi === 'number' &&
+      Number.isFinite(baseInrFromApi) &&
+      typeof gstInrFromApi === 'number' &&
+      Number.isFinite(gstInrFromApi) &&
+      typeof totalInrFromApi === 'number' &&
+      Number.isFinite(totalInrFromApi)
+    ) {
+      return { baseInr: baseInrFromApi, gstInr: gstInrFromApi, totalInr: totalInrFromApi };
+    }
+
+    const baseMinor = Math.round(baseUsd * FALLBACK_USD_TO_INR_RATE * 100);
+    const gstMinor = Math.round((baseMinor * CASHFREE_PLAN_GST_RATE_PERCENT) / 100);
+    return {
+      baseInr: baseMinor / 100,
+      gstInr: gstMinor / 100,
+      totalInr: (baseMinor + gstMinor) / 100,
+    };
+  };
 
   const formatLimit = (val: number) => {
     if (val === -1) return 'Unlimited';
@@ -196,16 +234,26 @@ export default function PricingPage() {
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
           {plans.filter(p => p.tier !== 'ENTERPRISE').map((plan) => {
             const isPopular = plan.tier === 'GROWTH';
-            const baseInr = interval === 'monthly'
-              ? Number(plan.cashfreeMonthlyBaseInr)
-              : Number(plan.cashfreeAnnualBaseInr);
-            const gstInr = interval === 'monthly'
-              ? Number(plan.cashfreeMonthlyGstInr)
-              : Number(plan.cashfreeAnnualGstInr);
-            const totalInr = interval === 'monthly'
-              ? Number(plan.cashfreeMonthlyTotalInr)
-              : Number(plan.cashfreeAnnualTotalInr);
-            const price = interval === 'monthly' ? totalInr : totalInr / 12;
+            const quote = interval === 'monthly'
+              ? cashfreeQuote(
+                  plan.monthlyPrice,
+                  plan.cashfreeMonthlyBaseInr,
+                  plan.cashfreeMonthlyGstInr,
+                  plan.cashfreeMonthlyTotalInr,
+                )
+              : cashfreeQuote(
+                  plan.annualPrice,
+                  plan.cashfreeAnnualBaseInr,
+                  plan.cashfreeAnnualGstInr,
+                  plan.cashfreeAnnualTotalInr,
+                );
+            const price = quote
+              ? interval === 'monthly' ? quote.totalInr : quote.totalInr / 12
+              : null;
+            const gstRatePercent = typeof plan.cashfreeGstRatePercent === 'number' &&
+              Number.isFinite(plan.cashfreeGstRatePercent)
+              ? plan.cashfreeGstRatePercent
+              : CASHFREE_PLAN_GST_RATE_PERCENT;
 
             return (
               <div
@@ -231,15 +279,25 @@ export default function PricingPage() {
 
                 <div className="mt-6">
                   <span className={`text-5xl font-bold ${isPopular ? 'text-white' : 'text-primary-apple'}`}>
-                    {formatInr(price)}
+                    {price === null ? 'Contact us' : formatInr(price)}
                   </span>
-                  <span className={`text-sm ${isPopular ? 'text-white/70' : 'text-secondary-apple'}`}>/month</span>
-                  <div className={`mt-2 space-y-1 text-xs ${isPopular ? 'text-white/80' : 'text-secondary-apple'}`}>
-                    <p>Plan price {formatInr(baseInr)}{interval === 'monthly' ? '/month' : '/year'}</p>
-                    <p>GST ({plan.cashfreeGstRatePercent}%) {formatInr(gstInr)}{interval === 'monthly' ? '/month' : '/year'}</p>
-                    {interval === 'annual' && <p>Annual total {formatInr(totalInr)}/year</p>}
-                    <p>Cashfree total {formatInr(totalInr)}{interval === 'monthly' ? '/month' : '/year'} including GST</p>
-                  </div>
+                  {price !== null && (
+                    <>
+                      <span className={`text-sm ${isPopular ? 'text-white/70' : 'text-secondary-apple'}`}>/month</span>
+                      <div className={`mt-2 space-y-1 text-xs ${isPopular ? 'text-white/80' : 'text-secondary-apple'}`}>
+                        <p>
+                          Plan price {formatInr(quote!.baseInr)}{interval === 'monthly' ? '/month' : '/year'}
+                        </p>
+                        <p>
+                          GST ({gstRatePercent}%) {formatInr(quote!.gstInr)}{interval === 'monthly' ? '/month' : '/year'}
+                        </p>
+                        {interval === 'annual' && <p>Annual total {formatInr(quote!.totalInr)}/year</p>}
+                        <p>
+                          Cashfree total {formatInr(quote!.totalInr)}{interval === 'monthly' ? '/month' : '/year'} including GST
+                        </p>
+                      </div>
+                    </>
+                  )}
                 </div>
 
                 <button

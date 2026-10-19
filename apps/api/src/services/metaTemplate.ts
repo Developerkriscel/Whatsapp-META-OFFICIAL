@@ -44,7 +44,7 @@ export async function fetchMetaTemplates(
 ): Promise<MetaTemplate[]> {
   try {
     const response = await axios.get(
-      `https://graph.facebook.com/v18.0/${wabaId}/message_templates`,
+      `https://graph.facebook.com/v25.0/${wabaId}/message_templates`,
       {
         params: {
           access_token: accessToken,
@@ -70,7 +70,7 @@ export async function getMetaTemplate(
 ): Promise<MetaTemplate | null> {
   try {
     const response = await axios.get(
-      `https://graph.facebook.com/v18.0/${templateId}`,
+      `https://graph.facebook.com/v25.0/${templateId}`,
       {
         params: {
           access_token: accessToken,
@@ -87,6 +87,186 @@ export async function getMetaTemplate(
 }
 
 /**
+ * Check that a token can actually manage templates on a WABA.
+ *
+ * A token can be perfectly valid for its app and still be unable to reach the
+ * WABA it was saved with (a different business, or a system user never
+ * assigned to it). Nothing caught that until a template submission failed
+ * with Meta's "Object with ID ... does not exist".
+ *
+ * `reachable: false` means Meta itself could not be reached, so callers should
+ * not treat it as proof that the credentials are wrong.
+ */
+export async function checkWabaAccess(
+  accessToken: string,
+  wabaId: string
+): Promise<{ ok: true; name: string | null } | { ok: false; reachable: boolean; message: string }> {
+  try {
+    const waba = await axios.get(`https://graph.facebook.com/v25.0/${encodeURIComponent(wabaId)}`, {
+      params: { access_token: accessToken, fields: 'id,name' },
+    });
+    // Reading the WABA only needs it to be visible; the template edge is what
+    // submission actually uses, and it needs whatsapp_business_management.
+    await axios.get(`https://graph.facebook.com/v25.0/${encodeURIComponent(wabaId)}/message_templates`, {
+      params: { access_token: accessToken, limit: 1, fields: 'id' },
+    });
+    return { ok: true, name: waba.data?.name ?? null };
+  } catch (error: any) {
+    const err = error.response?.data?.error;
+    if (!error.response) {
+      return { ok: false, reachable: false, message: 'Could not reach Meta to check the WhatsApp Business Account.' };
+    }
+    if (err?.code === 190) {
+      return { ok: false, reachable: true, message: 'The access token is invalid or has expired. Generate a new one in Meta Business Settings.' };
+    }
+    if (err?.code === 100 || err?.code === 10 || err?.code === 200) {
+      return {
+        ok: false,
+        reachable: true,
+        message:
+          `This access token cannot access WhatsApp Business Account ${wabaId}. Check the WABA ID in WhatsApp Manager, ` +
+          'and make sure the token has the whatsapp_business_management permission and its system user is assigned to this account.',
+      };
+    }
+    return { ok: false, reachable: true, message: err?.message || error.message };
+  }
+}
+
+/**
+ * Pick the access token to use for template calls on a WABA.
+ *
+ * A tenant can hold more than one token: each phone number may carry its own,
+ * and the tenant credentials carry another. Sending messages already prefers
+ * the phone's token, but template calls only ever used the credentials token,
+ * so templates failed with "Object with ID ... does not exist" whenever that
+ * token could not reach the WABA, even though messages from the same WABA
+ * were going out fine on the phone's token. Which token ended up in the
+ * credentials changed as numbers and credentials were saved, which is why the
+ * failure came and went.
+ *
+ * Tries the phone tokens for this WABA first, then the credentials token, and
+ * returns the first one Meta confirms can manage templates. If none can, or
+ * Meta cannot be reached to check, returns the first candidate so the real
+ * error still surfaces.
+ */
+export async function resolveWabaToken(
+  prisma: PrismaClient,
+  tenantId: string,
+  wabaId: string,
+  credentialsToken?: string | null
+): Promise<string | null> {
+  const phones = await prisma.phoneNumber.findMany({
+    where: { tenantId, wabaId, accessToken: { not: null } },
+    orderBy: { updatedAt: 'desc' },
+    select: { accessToken: true },
+  });
+
+  const candidates: string[] = [];
+  for (const stored of [...phones.map((p) => p.accessToken), credentialsToken]) {
+    if (!stored) continue;
+    try {
+      const token = decryptSecret(stored);
+      if (token && !candidates.includes(token)) candidates.push(token);
+    } catch {
+      // A token that no longer decrypts cannot be used; try the next one.
+    }
+  }
+  if (candidates.length <= 1) return candidates[0] ?? null;
+
+  for (const token of candidates) {
+    const access = await checkWabaAccess(token, wabaId);
+    if (access.ok) return token;
+    if (!access.reachable) break;
+  }
+  return candidates[0];
+}
+
+/**
+ * Map a Meta template status onto ours. Returns null for anything we do not
+ * recognise, so callers leave the stored status alone rather than guess.
+ */
+export function localTemplateStatus(metaStatus?: string | null): 'PENDING' | 'APPROVED' | 'REJECTED' | 'DEPRECATED' | null {
+  switch ((metaStatus || '').toUpperCase()) {
+    case 'APPROVED': return 'APPROVED';
+    case 'REJECTED': return 'REJECTED';
+    case 'PENDING':
+    case 'IN_APPEAL': return 'PENDING';
+    case 'PAUSED':
+    case 'DISABLED':
+    case 'DELETED': return 'DEPRECATED';
+    default: return null;
+  }
+}
+
+const TEMPLATE_CATEGORIES = new Set(['MARKETING', 'UTILITY', 'AUTHENTICATION']);
+
+/**
+ * Ask Meta for the current status of every template still marked PENDING and
+ * record any change.
+ *
+ * Status normally arrives by webhook, but a webhook can be late, dropped, or
+ * never sent, and nothing else ever looked again — so a template Meta approved
+ * in seconds could sit at "Pending Review" here indefinitely. This is the
+ * safety net; the webhook remains the fast path.
+ */
+export async function refreshPendingTemplates(prisma: PrismaClient): Promise<{ checked: number; updated: number }> {
+  const pending = await prisma.template.findMany({
+    where: { status: 'PENDING', metaTemplateId: { not: null } },
+    select: { id: true, tenantId: true, metaTemplateId: true, phoneNumberId: true, category: true },
+    orderBy: { submittedAt: 'desc' },
+    take: 200,
+  });
+
+  let updated = 0;
+  const tokenCache = new Map<string, string | null>();
+
+  for (const t of pending) {
+    // Meta template ids are numeric. Seeded demo rows carry placeholder ids
+    // that Meta can only reject, which would log an error on every run.
+    if (!/^\d+$/.test(t.metaTemplateId || '')) continue;
+    try {
+      const credentials = await prisma.whatsAppCredentials.findUnique({ where: { tenantId: t.tenantId } });
+      const wabaId = await resolveEffectiveWabaId(prisma, t.tenantId, credentials?.wabaId, t.phoneNumberId);
+      if (!wabaId) continue;
+
+      const cacheKey = `${t.tenantId}:${wabaId}`;
+      if (!tokenCache.has(cacheKey)) {
+        tokenCache.set(cacheKey, await resolveWabaToken(prisma, t.tenantId, wabaId, credentials?.accessToken));
+      }
+      const token = tokenCache.get(cacheKey);
+      if (!token) continue;
+
+      const { data } = await axios.get(`https://graph.facebook.com/v25.0/${t.metaTemplateId}`, {
+        params: { access_token: token, fields: 'status,category,rejected_reason' },
+      });
+
+      const status = localTemplateStatus(data?.status);
+      if (!status || status === 'PENDING') continue;
+
+      const now = new Date();
+      const category = String(data?.category || '').toUpperCase();
+      await prisma.template.update({
+        where: { id: t.id },
+        data: {
+          status,
+          // Meta may move a template to another category when it approves it.
+          ...(TEMPLATE_CATEGORIES.has(category) && category !== t.category ? { category: category as any } : {}),
+          rejectionReason: status === 'REJECTED' ? (data?.rejected_reason && data.rejected_reason !== 'NONE' ? data.rejected_reason : null) : null,
+          approvedAt: status === 'APPROVED' ? now : undefined,
+          rejectedAt: status === 'REJECTED' ? now : undefined,
+        },
+      });
+      updated++;
+    } catch (error: any) {
+      // One template failing (deleted at Meta, token gone) must not stop the rest.
+      console.error(`[Templates] status check failed for ${t.metaTemplateId}:`, error.response?.data?.error?.message || error.message);
+    }
+  }
+
+  return { checked: pending.length, updated };
+}
+
+/**
  * Submit template to Meta for review
  */
 export async function submitTemplateToMeta(
@@ -98,10 +278,10 @@ export async function submitTemplateToMeta(
     language: string;
     components: MetaTemplateComponent[];
   }
-): Promise<{ id: string; status: string }> {
+): Promise<{ id: string; status: string; category?: string }> {
   try {
     const response = await axios.post(
-      `https://graph.facebook.com/v18.0/${wabaId}/message_templates`,
+      `https://graph.facebook.com/v25.0/${wabaId}/message_templates`,
       {
         name: template.name.toLowerCase().replace(/[^a-z0-9_]/g, '_'),
         category: template.category,
@@ -116,10 +296,21 @@ export async function submitTemplateToMeta(
     return {
       id: response.data.id,
       status: response.data.status,
+      category: response.data.category,
     };
   } catch (error: any) {
     const err = error.response?.data?.error;
     console.error('Failed to submit template to Meta:', error.response?.data);
+    // Code 100 / subcode 33 means the token cannot reach this WABA at all —
+    // nothing about the template is wrong. Meta's wording points at the Graph
+    // API docs, which leaves the user with no idea that the fix is reconnecting.
+    if (err?.code === 100 && err?.error_subcode === 33) {
+      throw new Error(
+        `Meta could not access WhatsApp Business Account ${wabaId} with the saved access token. ` +
+        'Reconnect WhatsApp in Settings, or make sure the token has the whatsapp_business_management ' +
+        'permission and its system user is assigned to this WhatsApp Business Account.'
+      );
+    }
     // Meta's top-level `message` for a rejected template is the useless
     // "Invalid parameter". What is actually wrong is in error_user_msg, and
     // discarding it left the UI showing a bare 400 with nothing to act on.
@@ -211,7 +402,7 @@ export async function uploadTemplateHeaderSample(
   appId: string,
   file: { buffer: Buffer; mimeType: string; fileName: string }
 ): Promise<string> {
-  const api = 'https://graph.facebook.com/v21.0';
+  const api = 'https://graph.facebook.com/v25.0';
 
   let sessionId: string;
   try {
@@ -266,7 +457,7 @@ export async function deleteMetaTemplate(
 ): Promise<boolean> {
   try {
     await axios.delete(
-      `https://graph.facebook.com/v18.0/${templateId}`,
+      `https://graph.facebook.com/v25.0/${templateId}`,
       {
         params: { access_token: accessToken },
       }
@@ -333,15 +524,13 @@ export async function syncTemplatesFromMeta(
 
   const wabaId = await resolveEffectiveWabaId(prisma, tenantId, credentials?.wabaId, explicitPhoneNumberId);
 
-  if (!credentials?.accessToken || !wabaId) {
+  const token = wabaId ? await resolveWabaToken(prisma, tenantId, wabaId, credentials?.accessToken) : null;
+  if (!token || !wabaId) {
     throw new Error('WhatsApp not connected. Please connect your WhatsApp Business Account first.');
   }
 
   // Fetch templates from Meta
-  const metaTemplates = await fetchMetaTemplates(
-    decryptSecret(credentials.accessToken),
-    wabaId
-  );
+  const metaTemplates = await fetchMetaTemplates(token, wabaId);
 
   // Stamp every synced template with the phone number that actually owns
   // this WABA, so future submissions/re-syncs for a multi-number tenant

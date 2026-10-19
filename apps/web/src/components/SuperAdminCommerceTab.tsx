@@ -116,11 +116,11 @@ function Packages({ money, qc }: { money: (m: number) => string; qc: any }) {
           <div>
             <h3 className="font-semibold text-ios-dark">Credit packages</h3>
             <p className="text-xs text-ios-muted mt-0.5">
-              Prices are stored before fees. The total below is what a buyer pays.
+              ₹1 of base price adds 1 credit; applicable fees are added to the checkout total.
             </p>
           </div>
           <button
-            onClick={() => setDraft({ name: '', credits: 1000, priceMinor: 9900, currency: 'INR', sortOrder: (packages.length || 0) + 1 })}
+            onClick={() => setDraft({ name: '', credits: 99, priceMinor: 9900, currency: 'INR', sortOrder: (packages.length || 0) + 1 })}
             className="btn-apple btn-wa-green text-sm inline-flex items-center gap-1.5"
           >
             <Plus className="w-4 h-4" /> New package
@@ -180,11 +180,14 @@ function Packages({ money, qc }: { money: (m: number) => string; qc: any }) {
             <Field label="Name">
               <input value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} className="input-apple w-full text-sm" />
             </Field>
-            <Field label="Credits">
-              <input type="number" value={draft.credits} onChange={(e) => setDraft({ ...draft, credits: Number(e.target.value) })} className="input-apple w-full text-sm tabular-nums" />
+            <Field label="Credits (₹1 each)">
+              <input type="number" value={Math.floor((draft.priceMinor || 0) / 100)} readOnly className="input-apple w-full text-sm tabular-nums" />
             </Field>
-            <Field label="Base price (paise)" hint="9900 = ₹99.00, before fees">
-              <input type="number" value={draft.priceMinor} onChange={(e) => setDraft({ ...draft, priceMinor: Number(e.target.value) })} className="input-apple w-full text-sm tabular-nums" />
+            <Field label="Base price (paise)" hint="9900 = ₹99 and 99 credits, before fees">
+              <input type="number" step="100" value={draft.priceMinor} onChange={(e) => {
+                const priceMinor = Number(e.target.value);
+                setDraft({ ...draft, priceMinor, credits: Math.floor(priceMinor / 100) });
+              }} className="input-apple w-full text-sm tabular-nums" />
             </Field>
             <Field label="Sort order">
               <input type="number" value={draft.sortOrder ?? 0} onChange={(e) => setDraft({ ...draft, sortOrder: Number(e.target.value) })} className="input-apple w-full text-sm tabular-nums" />

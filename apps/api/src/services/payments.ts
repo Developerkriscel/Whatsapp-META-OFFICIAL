@@ -129,20 +129,14 @@ export async function createOrder(prisma: PrismaClient, input: CreateOrderInput)
     const pkg = await prisma.creditPackage.findFirst({ where: { id: input.packageId, isActive: true } });
     if (!pkg) throw new Error('That package is not available.');
     const quote = await quotePackage(prisma, pkg, 'IN');
-    credits = pkg.credits;
+    credits = pkg.priceMinor;
     amountMinor = quote.totalMinor;
     breakdown = { fees: quote.fees, baseMinor: quote.baseMinor, totalMinor: quote.totalMinor };
     packageId = pkg.id;
   } else if (input.credits && input.credits > 0) {
-    // A custom amount is priced from the same rate the packages use, so it
-    // cannot be a cheaper route to the same credits.
-    const cheapest = await prisma.creditPackage.findFirst({
-      where: { isActive: true }, orderBy: { credits: 'asc' },
-    });
-    if (!cheapest) throw new Error('No packages are configured to price against.');
-    const perCreditMinor = cheapest.priceMinor / cheapest.credits;
-    const base = Math.round(perCreditMinor * input.credits);
-    const quote = await priceWithFees(prisma, base, 'CREDIT_PURCHASE');
+    // Custom input is supplied in paise by the website: ₹100 is 10,000 paise
+    // in the ledger, which is displayed to the customer as 100 credits.
+    const quote = await priceWithFees(prisma, input.credits, 'CREDIT_PURCHASE');
     credits = input.credits;
     amountMinor = quote.totalMinor;
     breakdown = { fees: quote.fees, baseMinor: quote.baseMinor, totalMinor: quote.totalMinor };

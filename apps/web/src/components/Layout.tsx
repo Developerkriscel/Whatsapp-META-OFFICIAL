@@ -30,7 +30,7 @@ import { useState } from 'react';
 import clsx from 'clsx';
 import { useQuery } from '@tanstack/react-query';
 import { api } from '../api/client';
-import { useCurrency, creditsToMoney, formatCredits } from '../lib/money';
+import { formatWalletCredits } from '../lib/money';
 import NotificationBell from './NotificationBell';
 import HeaderAvatar, { AvatarKind } from './HeaderAvatar';
 
@@ -75,6 +75,8 @@ export default function Layout({ children, variant }: LayoutProps) {
   const [userMenuOpen, setUserMenuOpen] = useState(false);
 
   const items = navItems[variant];
+  // Fetched with the page so the balance is ready when the user menu opens.
+  const creditBalance = useCreditBalance(variant === 'client');
   const isImpersonating = !!user?.impersonatedBy;
 
   const handleLogout = () => {
@@ -168,12 +170,15 @@ export default function Layout({ children, variant }: LayoutProps) {
                 {userMenuOpen && (
                   <>
                     <div className="fixed inset-0 z-10" onClick={() => setUserMenuOpen(false)} />
-                    <div className="absolute right-0 mt-2 w-64 glass-panel shadow-apple-lg overflow-hidden">
+                    <div className="absolute right-0 mt-2 w-64 z-20 bg-white rounded-2xl border border-black/5 shadow-apple-lg overflow-hidden">
                       <div className="px-4 py-3.5 border-b border-black/5">
                         <p className="font-semibold text-primary-apple">{user?.name}</p>
                         <p className="text-sm text-secondary-apple">{user?.email}</p>
                       </div>
                       <div className="py-1">
+                        {variant === 'client' && (
+                          <CreditsMenuItem credits={creditBalance} onNavigate={() => setUserMenuOpen(false)} />
+                        )}
                         <button
                           onClick={handleLogout}
                           className="w-full flex items-center gap-3 px-4 py-3 text-sm text-apple-red hover:bg-apple-red/5 transition-colors"
@@ -273,13 +278,10 @@ export default function Layout({ children, variant }: LayoutProps) {
   );
 }
 
-// Credits Bar Component - Displayed in top header for client
-function CreditsBar() {
-  const fx = useCurrency();
-  const navigate = useNavigate();
-
+function useCreditBalance(enabled = true) {
   const { data: creditsData, isLoading } = useQuery({
     queryKey: ['credits-balance'],
+    enabled,
     queryFn: async () => {
       const response = await api.get('/credits');
       return response.data;
@@ -288,48 +290,49 @@ function CreditsBar() {
 
   const credits = creditsData?.data || { balance: 0, used: 0, total: 0 };
   const balance = credits.balance ?? credits.total - credits.used;
-  const percentage = credits.total > 0 ? Math.round((credits.used / credits.total) * 100) : 0;
+  return { isLoading, display: formatWalletCredits(balance) };
+}
+
+// Buy button in the top header for client. The balance itself lives in the
+// user menu, so the header stays uncluttered.
+function CreditsBar() {
+  const navigate = useNavigate();
 
   return (
-    <>
-      {/* Desktop Credits Bar */}
-      <div className="hidden md:flex items-center gap-3 px-4 py-2 rounded-xl bg-wa-soft/50 backdrop-blur-sm border border-wa-green/20">
-        <div className="flex items-center gap-2">
-          <Coins className="w-4 h-4 text-wa-green" />
-          <span className="text-sm font-medium text-primary-apple">Credits:</span>
-        </div>
-        <div className="flex items-center gap-2">
-          <span className="text-sm font-bold text-wa-green">{formatCredits(balance)}</span>
-          <span className="text-xs text-ios-muted">({creditsToMoney(balance, fx)})</span>
-          {credits.total > 0 && (
-            <div className="w-20 h-1.5 bg-black/10 rounded-full overflow-hidden">
-              <div
-                className="h-full bg-wa-gradient rounded-full transition-all"
-                style={{ width: `${Math.min(percentage, 100)}%` }}
-              />
-            </div>
-          )}
-        </div>
-        <button
-          onClick={() => navigate('/credits')}
-          className="px-3 py-1.5 bg-wa-gradient text-white text-xs font-medium rounded-lg hover:opacity-90 transition-opacity shadow-wa flex items-center gap-1"
-        >
-          <Plus className="w-3 h-3" />
-          Buy
-        </button>
-      </div>
+    <button
+      onClick={() => navigate('/credits')}
+      className="px-3 py-1.5 bg-wa-gradient text-white text-xs font-medium rounded-lg hover:opacity-90 transition-opacity shadow-wa flex items-center gap-1"
+    >
+      <Plus className="w-3 h-3" />
+      Buy
+    </button>
+  );
+}
 
-      {/* Mobile Credits Button */}
-      <button
-        onClick={() => navigate('/credits')}
-        className="md:hidden relative p-2.5 hover:bg-black/5 rounded-xl transition-colors"
-      >
-        <Coins className="w-5 h-5 text-wa-green" />
-        <span className="absolute -top-1 -right-1 w-5 h-5 bg-wa-gradient text-white text-[10px] font-bold rounded-full flex items-center justify-center shadow-wa">
-          {isLoading ? '...' : Math.min(balance, 999)}
-        </span>
-      </button>
-    </>
+// Credit balance row in the user menu, just above Sign Out.
+function CreditsMenuItem({
+  onNavigate,
+  credits,
+}: {
+  onNavigate: () => void;
+  credits: ReturnType<typeof useCreditBalance>;
+}) {
+  const navigate = useNavigate();
+  const { isLoading, display } = credits;
+
+  return (
+    <button
+      onClick={() => {
+        onNavigate();
+        navigate('/credits');
+      }}
+      className="w-full flex items-center gap-3 px-4 py-3 text-sm hover:bg-black/5 transition-colors"
+    >
+      <Coins className="w-4 h-4 text-wa-green" />
+      <span className="font-medium text-primary-apple">Credits:</span>
+      <span className="font-bold text-wa-green">{isLoading ? '...' : display.credits}</span>
+      {!isLoading && <span className="text-xs text-ios-muted">({display.money})</span>}
+    </button>
   );
 }
 

@@ -143,20 +143,18 @@ export async function quotePackage(
   countryCode = 'IN'
 ) {
   const breakdown = await priceWithFees(prisma, pkg.priceMinor, 'CREDIT_PURCHASE', pkg.currency);
-  const usage = await messagesPerCredits(prisma, pkg.credits, countryCode);
-
-  const fxRow = await prisma.platformSetting.findUnique({ where: { key: 'fx_usd_rate' } });
-  const fx = Number(fxRow?.value ?? 88.5);
-  // Read the peg rather than assuming 10,000. Hardcoding it here meant the
-  // value ratio — the one number that says whether a pack agrees with the rate
-  // card — did not move when the peg was changed to fix exactly that.
-  const { getCreditsPerUsd } = await import('./creditService.js');
-  const creditWorthMinor = (1 / getCreditsPerUsd()) * fx * 100;
-  const paidPerCreditMinor = pkg.credits > 0 ? breakdown.totalMinor / pkg.credits : 0;
+  // The message ledger stores paise; package credits are the customer-facing
+  // rupee amount. Derive the wallet grant from the base price so an old package
+  // row cannot silently award a different credit-to-rupee ratio.
+  const ledgerCredits = pkg.priceMinor;
+  const credits = pkg.priceMinor / 100;
+  const usage = await messagesPerCredits(prisma, ledgerCredits, countryCode);
+  const creditWorthMinor = 100;
+  const paidPerCreditMinor = credits > 0 ? breakdown.totalMinor / credits : 0;
 
   return {
     ...breakdown,
-    credits: pkg.credits,
+    credits,
     messages: usage.messages,
     perMessageCredits: usage.perMessageCredits,
     perMessageMinor: usage.messages > 0 ? Math.round(breakdown.totalMinor / usage.messages) : null,

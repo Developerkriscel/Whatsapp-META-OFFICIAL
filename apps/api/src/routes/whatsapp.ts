@@ -23,7 +23,7 @@ import {
   type MetaOAuthConfig,
 } from '../services/metaOAuth.js';
 import { encryptSecret, decryptSecret, decryptIfPresent, resolveAccessToken } from '../services/credentialEncryption.js';
-import { resolveEffectiveWabaId } from '../services/metaTemplate.js';
+import { resolveEffectiveWabaId, checkWabaAccess } from '../services/metaTemplate.js';
 import { detectCountryFromPhone } from '../services/phoneCountry.js';
 
 /**
@@ -1533,6 +1533,22 @@ export async function registerWhatsAppRoutes(app: FastifyInstance): Promise<void
     const newSecret = body.appSecret && body.appSecret.length >= 10 ? encryptSecret(body.appSecret) : existing?.appSecret;
     const newToken = body.accessToken && body.accessToken.length >= 20 ? encryptSecret(body.accessToken) : existing?.accessToken;
 
+    // Refuse a WABA the token cannot reach. Saving it anyway is what let
+    // template submissions fail later with "Object with ID ... does not exist".
+    // If Meta is unreachable we save regardless rather than block the user.
+    const tokenToCheck = body.accessToken && body.accessToken.length >= 20
+      ? body.accessToken
+      : decryptIfPresent(existing?.accessToken);
+    if (body.wabaId && tokenToCheck) {
+      const access = await checkWabaAccess(tokenToCheck, body.wabaId);
+      if (!access.ok && access.reachable) {
+        return reply.status(400).send({
+          success: false,
+          error: { code: 'WABA_NOT_ACCESSIBLE', message: access.message },
+        });
+      }
+    }
+
     await app.prisma.whatsAppCredentials.upsert({
       where: { tenantId: request.authUser.tenantId },
       update: {
@@ -1611,6 +1627,23 @@ export async function registerWhatsAppRoutes(app: FastifyInstance): Promise<void
       }
     }
 
+    // A token valid for the app can still be locked out of the WABA, which only
+    // surfaced when a template submission failed. Check the same WABA that
+    // template submission uses.
+    if (connectionValid && accessToken) {
+      const wabaId = await resolveEffectiveWabaId(app.prisma, request.authUser.tenantId, creds?.wabaId);
+      if (!wabaId) {
+        connectionValid = false;
+        apiError = 'No WhatsApp Business Account ID is saved. Add your WABA ID and save again.';
+      } else {
+        const access = await checkWabaAccess(accessToken, wabaId);
+        if (!access.ok) {
+          connectionValid = false;
+          apiError = access.message;
+        }
+      }
+    }
+
     // Update test result in database
     await app.prisma.whatsAppCredentials.upsert({
       where: { tenantId: request.authUser.tenantId },
@@ -1634,7 +1667,7 @@ export async function registerWhatsAppRoutes(app: FastifyInstance): Promise<void
         valid: connectionValid,
         configured: isConfigured,
         message: connectionValid ? 'Credentials are valid and connected!'
-                   : (isConfigured ? 'Invalid credentials'
+                   : (isConfigured ? (apiError || 'Invalid credentials')
                    : 'Please add credentials first'),
         lastError: apiError,
         testedAt: new Date().toISOString(),

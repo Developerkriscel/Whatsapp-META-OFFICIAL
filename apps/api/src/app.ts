@@ -194,6 +194,23 @@ export async function buildApp(): Promise<FastifyInstance> {
       });
     }
 
+    // A unique-constraint clash (Prisma P2002) is the user's input colliding
+    // with an existing row, not a server fault. Routes pre-check the common
+    // cases, but two simultaneous requests can both pass the check, and the
+    // loser used to get a bare 500.
+    if ((error as any)?.code === 'P2002') {
+      const meta = (error as any).meta || {};
+      const target: string[] = Array.isArray(meta.target) ? meta.target : [String(meta.target || '')];
+      const isTemplateName = meta.modelName === 'Template' && target.some((t) => t.includes('name'));
+      return reply.status(409).send({
+        success: false,
+        error: {
+          code: isTemplateName ? 'DUPLICATE_TEMPLATE_NAME' : 'DUPLICATE',
+          message: isTemplateName ? 'Template name must be unique.' : 'This record already exists.',
+        },
+      });
+    }
+
     if (error.statusCode) {
       return reply.status(error.statusCode).send({
         success: false,

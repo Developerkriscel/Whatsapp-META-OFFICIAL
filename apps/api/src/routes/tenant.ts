@@ -3,7 +3,7 @@
 import { FastifyInstance } from 'fastify';
 import { Prisma } from '@prisma/client';
 import { z } from 'zod';
-import { syncTemplatesFromMeta, submitTemplateToMeta, fetchMetaTemplates, resolveEffectiveWabaId, uploadTemplateHeaderSample } from '../services/metaTemplate.js';
+import { syncTemplatesFromMeta, submitTemplateToMeta, fetchMetaTemplates, resolveEffectiveWabaId, resolveWabaToken, uploadTemplateHeaderSample, localTemplateStatus } from '../services/metaTemplate.js';
 import { decryptSecret } from '../services/credentialEncryption.js';
 import { detectCountryFromPhone } from '../services/phoneCountry.js';
 import { checkTemplateContent, getAISuggestion } from '../services/aiAssist.js';
@@ -53,6 +53,52 @@ function buildSegmentContactWhere(
 
   if (clauses.length === 0) return {};
   return matchType === 'any' ? { OR: clauses } : { AND: clauses };
+}
+
+async function getCampaignEligibleContactIds(
+  prisma: any,
+  tenantId: string,
+  audienceType: 'all' | 'segment' | 'contacts',
+  contactIds: string[],
+  segmentIds: string[],
+): Promise<string[]> {
+  const baseWhere: Prisma.ContactWhereInput = {
+    tenantId,
+    isActive: true,
+    consentStatus: 'OPTED_IN',
+  };
+
+  if (audienceType === 'contacts') {
+    if (contactIds.length === 0) return [];
+    const contacts = await prisma.contact.findMany({
+      where: { ...baseWhere, id: { in: contactIds } },
+      select: { id: true },
+    });
+    return contacts.map((contact: { id: string }) => contact.id);
+  }
+
+  if (audienceType === 'segment') {
+    if (segmentIds.length === 0) return [];
+    const segments = await prisma.segment.findMany({
+      where: { id: { in: segmentIds }, tenantId },
+    });
+    const segmentsWhere = segments.map((segment: { query: unknown }) =>
+      buildSegmentContactWhere(segment.query as { type?: string; conditions?: SegmentCondition[] }),
+    );
+    if (segmentsWhere.length === 0) return [];
+
+    const contacts = await prisma.contact.findMany({
+      where: { ...baseWhere, OR: segmentsWhere },
+      select: { id: true },
+    });
+    return contacts.map((contact: { id: string }) => contact.id);
+  }
+
+  const contacts = await prisma.contact.findMany({
+    where: baseWhere,
+    select: { id: true },
+  });
+  return contacts.map((contact: { id: string }) => contact.id);
 }
 
 function buildSegmentCondition(cond: SegmentCondition): Prisma.ContactWhereInput | null {
@@ -241,7 +287,7 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
         id: p.id,
         name: p.name,
         description: p.description,
-        credits: p.credits,
+        credits: q.credits,
         isPopular: p.isPopular,
         currency: q.currency,
         baseMinor: q.baseMinor,
@@ -919,9 +965,23 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
       city: z.string().optional(),
       country: z.string().optional(),
       tags: z.array(z.string()).optional(),
+      consent: z.object({
+        confirmed: z.literal(true),
+        source: z.enum(['website_form', 'checkout', 'in_person', 'email', 'phone', 'whatsapp', 'other']),
+        reference: z.string().trim().max(500).optional(),
+      }).optional(),
     });
 
-    const { tags, email, ...rest } = schema.parse(request.body);
+    const { tags, email, consent, ...rest } = schema.parse(request.body);
+    const consentData = consent ? {
+      consentStatus: 'OPTED_IN' as const,
+      optInAt: new Date(),
+      optOutAt: null,
+      blocked: false,
+      consentSource: consent.source,
+      consentIp: request.ip,
+      consentReference: consent.reference || `agent:${request.authUser.id}`,
+    } : {};
 
     // Normalize phone number: remove spaces, dashes, parentheses
     const normalizedPhone = normalizePhone(rest.phone);
@@ -955,6 +1015,7 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
           email: email ?? existingContact.email,
           company: rest.company ?? existingContact.company,
           country: rest.country ?? existingContact.country,
+          ...(existingContact.consentStatus === 'UNKNOWN' && !existingContact.blocked ? consentData : {}),
         },
       });
       return reply.status(200).send({
@@ -1016,6 +1077,7 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
         city: rest.city,
         country: rest.country || detectCountryFromPhone(normalizedPhone, contactTenant?.defaultCountry || 'IN'),
         tenantId: request.authUser.tenantId,
+        ...consentData,
       },
     });
 
@@ -1296,6 +1358,11 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
     }
 
     const { contactId } = z.object({ contactId: z.string() }).parse(request.params);
+    const consent = z.object({
+      confirmed: z.literal(true),
+      source: z.enum(['website_form', 'checkout', 'in_person', 'email', 'phone', 'whatsapp', 'other']),
+      reference: z.string().trim().max(500).optional(),
+    }).parse(request.body);
 
     const contact = await app.prisma.contact.findFirst({
       where: { id: contactId, tenantId: request.authUser.tenantId },
@@ -1310,10 +1377,11 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
       data: {
         consentStatus: 'OPTED_IN',
         optInAt: new Date(),
+        optOutAt: null,
         blocked: false,
-        consentSource: 'manual',
+        consentSource: consent.source,
         consentIp: request.ip,
-        consentReference: `agent:${request.authUser.id}`,
+        consentReference: consent.reference || `agent:${request.authUser.id}`,
       },
     });
 
@@ -1374,21 +1442,56 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
 
     const schema = z.object({
       contactIds: z.array(z.string()).min(1).max(1000),
+      confirmed: z.literal(true),
+      source: z.enum(['website_form', 'checkout', 'in_person', 'email', 'phone', 'whatsapp', 'other']),
+      reference: z.string().trim().max(500).optional(),
     });
 
-    const { contactIds } = schema.parse(request.body);
+    const { contactIds, source, reference } = schema.parse(request.body);
 
     const result = await app.prisma.contact.updateMany({
       where: {
         id: { in: contactIds },
         tenantId: request.authUser.tenantId,
-        consentStatus: { not: 'OPTED_IN' },
+        consentStatus: 'UNKNOWN',
+        isActive: true,
+        blocked: false,
       },
       data: {
         consentStatus: 'OPTED_IN',
         optInAt: new Date(),
+        consentSource: source,
+        consentIp: request.ip,
+        consentReference: reference || `bulk-confirmed-by:${request.authUser.id}`,
+      },
+    });
+
+    return { success: true, data: { updated: result.count } };
+  });
+
+  app.post('/contacts/bulk-opt-in-existing', { preHandler: [app.requirePermission('contacts', 'update')] }, async (request, reply) => {
+    if (!request.authUser.tenantId) {
+      return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
+    }
+
+    const confirmation = z.object({
+      confirmed: z.literal(true),
+      source: z.literal('in_person'),
+    }).parse(request.body);
+
+    const result = await app.prisma.contact.updateMany({
+      where: {
+        tenantId: request.authUser.tenantId,
+        consentStatus: 'UNKNOWN',
+        isActive: true,
         blocked: false,
-        consentSource: 'bulk_import',
+      },
+      data: {
+        consentStatus: 'OPTED_IN',
+        optInAt: new Date(),
+        consentSource: confirmation.source,
+        consentIp: request.ip,
+        consentReference: `in-person-consent-confirmed-by:${request.authUser.id};original-date-not-recorded`,
       },
     });
 
@@ -2355,26 +2458,13 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
       });
     }
 
-    // Calculate total recipients for tracking
-    let totalRecipients = 0;
-    if (body.audienceType === 'contacts' && body.contactIds) {
-      totalRecipients = body.contactIds.length;
-    } else if (body.audienceType === 'segment' && body.segmentIds) {
-      const segments = await app.prisma.segment.findMany({
-        where: { id: { in: body.segmentIds }, tenantId: request.authUser.tenantId },
-      });
-      const segmentWhere: Prisma.ContactWhereInput = {
-        OR: segments.map(s => buildSegmentContactWhere(s.query as any)),
-      };
-      totalRecipients = await app.prisma.contact.count({
-        where: { tenantId: request.authUser.tenantId, ...segmentWhere },
-      });
-    } else if (body.audienceType === 'all') {
-      // Count all active contacts for 'all' audience type
-      totalRecipients = await app.prisma.contact.count({
-        where: { tenantId: request.authUser.tenantId, isActive: true },
-      });
-    }
+    const totalRecipients = (await getCampaignEligibleContactIds(
+      app.prisma,
+      request.authUser.tenantId!,
+      body.audienceType,
+      body.contactIds || [],
+      body.segmentIds || [],
+    )).length;
 
     const campaign = await app.prisma.campaign.create({
       data: {
@@ -2523,6 +2613,30 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
       });
     }
 
+    // Consent can change after campaign creation. Recompute eligible contacts
+    // immediately before launch so unknown or opted-out records never count
+    // toward quotas or get dispatched.
+    const eligibleContactIds = await getCampaignEligibleContactIds(
+      app.prisma,
+      tenantId,
+      campaign.audienceType as 'all' | 'segment' | 'contacts',
+      campaign.contactIds,
+      campaign.segmentIds,
+    );
+    await app.prisma.campaign.update({
+      where: { id: campaignId },
+      data: { totalRecipients: eligibleContactIds.length },
+    });
+    if (eligibleContactIds.length === 0) {
+      return reply.status(400).send({
+        success: false,
+        error: {
+          code: 'NO_OPTED_IN_RECIPIENTS',
+          message: 'No active contacts with explicit opt-in consent match this campaign. Record consent before sending.',
+        },
+      });
+    }
+
     // Validate plan limits
     if (tenant.plan) {
       const maxCampaignsPerDay = tenant.plan.maxCampaignsPerDay;
@@ -2552,7 +2666,7 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
     const { getRateCredits } = await import('../services/creditService.js') as any;
     const templateCategory = campaign.template?.category || 'UTILITY';
     const costPerMessage = getRateCredits('US', templateCategory); // Estimate using US rate
-    const requiredCredits = campaign.totalRecipients * costPerMessage;
+    const requiredCredits = eligibleContactIds.length * costPerMessage;
 
     const creditBalance = await app.prisma.tenantCredit.findUnique({
       where: { tenantId },
@@ -2580,7 +2694,7 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
     const tierCheck = await checkTierCapacity(
       app.prisma,
       campaign.phoneNumberId!,
-      campaign.totalRecipients,
+      eligibleContactIds.length,
     );
 
     if (!tierCheck.withinTier && !force) {
@@ -2593,7 +2707,7 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
           limit: tierCheck.usage.limit,
           alreadyMessaged24h: tierCheck.usage.uniqueCustomers24h,
           remaining: tierCheck.usage.remaining,
-          recipients: campaign.totalRecipients,
+          recipients: eligibleContactIds.length,
         },
       });
     }
@@ -2609,7 +2723,7 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
       console.error(`Campaign ${campaignId} send error:`, err);
     });
 
-    return { success: true, data: { message: 'Campaign sending started', recipients: campaign.totalRecipients } };
+    return { success: true, data: { message: 'Campaign sending started', recipients: eligibleContactIds.length } };
   });
 
   app.post('/campaigns/:campaignId/cancel', { preHandler: [app.requirePermission('campaigns', 'update')] }, async (request, reply) => {
@@ -2857,7 +2971,7 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
 
   app.post('/templates', { preHandler: [app.requirePermission('templates', 'create')] }, async (request, reply) => {
     const schema = z.object({
-      name: z.string().min(1),
+      name: z.string().trim().min(1),
       category: z.enum(['MARKETING', 'UTILITY', 'AUTHENTICATION']),
       language: z.string().default('en_US'),
       body: z.object({ text: z.string() }),
@@ -2881,6 +2995,20 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
     });
 
     const body = schema.parse(request.body);
+
+    const duplicateTemplate = await app.prisma.template.findFirst({
+      where: {
+        tenantId: request.authUser.tenantId!,
+        name: { equals: body.name, mode: 'insensitive' },
+      },
+      select: { id: true },
+    });
+    if (duplicateTemplate) {
+      return reply.status(409).send({
+        success: false,
+        error: { code: 'DUPLICATE_TEMPLATE_NAME', message: 'Template name must be unique.' },
+      });
+    }
 
     if (body.phoneNumberId) {
       const owned = await app.prisma.phoneNumber.findFirst({
@@ -2913,7 +3041,7 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
   app.patch('/templates/:templateId', { preHandler: [app.requirePermission('templates', 'update')] }, async (request, reply) => {
     const { templateId } = z.object({ templateId: z.string() }).parse(request.params);
     const body = z.object({
-      name: z.string().optional(),
+      name: z.string().trim().min(1).optional(),
       category: z.enum(['MARKETING', 'UTILITY', 'AUTHENTICATION']).optional(),
       language: z.string().optional(),
       body: z.object({ text: z.string() }).optional(),
@@ -2922,6 +3050,31 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
       buttons: z.array(z.object({ type: z.string(), text: z.string() })).optional().nullable(),
       status: z.enum(['DRAFT', 'PENDING', 'APPROVED', 'REJECTED']).optional(),
     }).parse(request.body);
+
+    const existingTemplate = await app.prisma.template.findFirst({
+      where: { id: templateId, tenantId: request.authUser.tenantId },
+      select: { id: true },
+    });
+    if (!existingTemplate) {
+      return reply.status(404).send({ success: false, error: { code: 'NOT_FOUND' } });
+    }
+
+    if (body.name) {
+      const duplicateTemplate = await app.prisma.template.findFirst({
+        where: {
+          tenantId: request.authUser.tenantId!,
+          id: { not: templateId },
+          name: { equals: body.name, mode: 'insensitive' },
+        },
+        select: { id: true },
+      });
+      if (duplicateTemplate) {
+        return reply.status(409).send({
+          success: false,
+          error: { code: 'DUPLICATE_TEMPLATE_NAME', message: 'Template name must be unique.' },
+        });
+      }
+    }
 
     const template = await app.prisma.template.update({
       where: { id: templateId, tenantId: request.authUser.tenantId },
@@ -3046,9 +3199,11 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
       const wabaId = await resolveEffectiveWabaId(
         app.prisma, request.authUser.tenantId!, credentials?.wabaId, template.phoneNumberId,
       );
-      if (credentials?.accessToken && wabaId) {
+      const token = wabaId
+        ? await resolveWabaToken(app.prisma, request.authUser.tenantId!, wabaId, credentials?.accessToken)
+        : null;
+      if (token && wabaId) {
         try {
-          const token = decryptSecret(credentials.accessToken);
           const normalised = template.name.toLowerCase().replace(/[^a-z0-9_]/g, '_');
           const res = await fetch(
             `https://graph.facebook.com/v21.0/${wabaId}/message_templates?name=${encodeURIComponent(normalised)}&access_token=${encodeURIComponent(token)}`,
@@ -3087,8 +3242,11 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
       where: { tenantId: request.authUser.tenantId! },
     });
     const effectiveWabaId = await resolveEffectiveWabaId(app.prisma, request.authUser.tenantId!, credentials?.wabaId, template.phoneNumberId);
+    const metaToken = effectiveWabaId
+      ? await resolveWabaToken(app.prisma, request.authUser.tenantId!, effectiveWabaId, credentials?.accessToken)
+      : null;
 
-    if (credentials?.accessToken && effectiveWabaId) {
+    if (metaToken && effectiveWabaId) {
       try {
         // Meta rejects any component containing {{n}} variables with
         // INVALID_FORMAT unless it also carries an "example" showing sample
@@ -3148,7 +3306,7 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
             const mimeType = MIME[ext] || 'application/octet-stream';
 
             const handle = await uploadTemplateHeaderSample(
-              decryptSecret(credentials.accessToken),
+              metaToken,
               appId,
               { buffer, mimeType, fileName: pathMod.basename(resolved) }
             );
@@ -3170,7 +3328,7 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
         if (template.footer) components.push({ type: 'FOOTER', ...(template.footer as any) });
         if (template.buttons) components.push({ type: 'BUTTONS', buttons: template.buttons as any });
 
-        const metaResult = await submitTemplateToMeta(decryptSecret(credentials.accessToken), effectiveWabaId, {
+        const metaResult = await submitTemplateToMeta(metaToken, effectiveWabaId, {
           name: template.name,
           category: template.category,
           language: template.language,
@@ -3179,10 +3337,24 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
 
         // Update with Meta template ID and normalized name (Meta stores it lowercased with underscores)
         const normalizedName = template.name.toLowerCase().replace(/[^a-z0-9_]/g, '_');
-        await app.prisma.template.update({
+        // Meta's reply already carries the review result — automated review often
+        // approves in seconds. Dropping it left every template at "Pending
+        // Review" until a webhook arrived, if one ever did.
+        const metaStatus = localTemplateStatus(metaResult.status);
+        const metaCategory = String(metaResult.category || '').toUpperCase();
+        const reviewedAt = new Date();
+        const submitted = await app.prisma.template.update({
           where: { id: templateId },
-          data: { metaTemplateId: metaResult.id, name: normalizedName },
+          data: {
+            metaTemplateId: metaResult.id,
+            name: normalizedName,
+            ...(metaStatus ? { status: metaStatus } : {}),
+            ...(['MARKETING', 'UTILITY', 'AUTHENTICATION'].includes(metaCategory) ? { category: metaCategory as any } : {}),
+            approvedAt: metaStatus === 'APPROVED' ? reviewedAt : undefined,
+            rejectedAt: metaStatus === 'REJECTED' ? reviewedAt : undefined,
+          },
         });
+        return { success: true, data: submitted };
       } catch (error: any) {
         // If Meta submission fails, revert to DRAFT
         await app.prisma.template.update({
@@ -3250,7 +3422,11 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
     });
     const effectiveWabaId = await resolveEffectiveWabaId(app.prisma, request.authUser.tenantId, credentials?.wabaId, phoneNumberId);
 
-    if (!credentials?.accessToken || !effectiveWabaId) {
+    const metaToken = effectiveWabaId
+      ? await resolveWabaToken(app.prisma, request.authUser.tenantId, effectiveWabaId, credentials?.accessToken)
+      : null;
+
+    if (!metaToken || !effectiveWabaId) {
       return reply.status(400).send({
         success: false,
         error: {
@@ -3261,7 +3437,7 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
     }
 
     try {
-      const templates = await fetchMetaTemplates(decryptSecret(credentials.accessToken), effectiveWabaId);
+      const templates = await fetchMetaTemplates(metaToken, effectiveWabaId);
 
       return {
         success: true,
@@ -3319,9 +3495,11 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
       const wabaId = await resolveEffectiveWabaId(
         app.prisma, request.authUser.tenantId!, credentials?.wabaId, template.phoneNumberId,
       );
-      if (credentials?.accessToken && wabaId) {
+      const token = wabaId
+        ? await resolveWabaToken(app.prisma, request.authUser.tenantId!, wabaId, credentials?.accessToken)
+        : null;
+      if (token && wabaId) {
         try {
-          const token = decryptSecret(credentials.accessToken);
           // Meta deletes by name, which removes every language for it.
           const res = await fetch(
             `https://graph.facebook.com/v21.0/${wabaId}/message_templates?name=${encodeURIComponent(template.name)}&access_token=${encodeURIComponent(token)}`,
@@ -5131,39 +5309,28 @@ async function sendCampaignMessagesInner(
     return;
   }
 
-  // Build audience contacts
-  let contactIds: string[] = [];
+  // Recheck consent at dispatch time: explicit opt-in is required for every
+  // campaign audience, including scheduled campaigns and campaigns created
+  // before this consent gate was added.
+  let contactIds = await getCampaignEligibleContactIds(
+    app.prisma,
+    tenantId,
+    campaign.audienceType as 'all' | 'segment' | 'contacts',
+    campaign.contactIds,
+    campaign.segmentIds,
+  );
 
-  if (campaign.audienceType === 'contacts' && campaign.contactIds.length > 0) {
-    // Filter out opted-out contacts. Scoped by tenant: an unscoped `id IN (...)`
-    // here would message another tenant's customers and copy their numbers into
-    // this tenant's message log.
-    const contacts = await app.prisma.contact.findMany({
-      where: { id: { in: campaign.contactIds }, tenantId, consentStatus: { not: 'OPTED_OUT' } },
-      select: { id: true },
+  await app.prisma.campaign.update({
+    where: { id: campaignId },
+    data: { totalRecipients: contactIds.length },
+  });
+  if (contactIds.length === 0) {
+    console.log(`[Campaign] ${campaignId}: no active contacts with explicit opt-in consent; nothing sent`);
+    await app.prisma.campaign.update({
+      where: { id: campaignId },
+      data: { status: 'COMPLETED', completedAt: new Date() },
     });
-    contactIds = contacts.map(c => c.id);
-  } else if (campaign.audienceType === 'segment' && campaign.segmentIds.length > 0) {
-    // Evaluate segments live against current contact data (excluding opted-out)
-    const segments = await app.prisma.segment.findMany({
-      where: { id: { in: campaign.segmentIds }, tenantId },
-    });
-    const segmentContacts = await app.prisma.contact.findMany({
-      where: {
-        tenantId,
-        consentStatus: { not: 'OPTED_OUT' },
-        OR: segments.map(s => buildSegmentContactWhere(s.query as any)),
-      },
-      select: { id: true },
-    });
-    contactIds = segmentContacts.map(c => c.id);
-  } else if (campaign.audienceType === 'all') {
-    // Fetch all active contacts for 'all' audience type (excluding opted-out)
-    const allContacts = await app.prisma.contact.findMany({
-      where: { tenantId, isActive: true, consentStatus: { not: 'OPTED_OUT' } },
-      select: { id: true },
-    });
-    contactIds = allContacts.map(c => c.id);
+    return;
   }
 
   // Resume-safety: exclude contacts who already have a message logged for this

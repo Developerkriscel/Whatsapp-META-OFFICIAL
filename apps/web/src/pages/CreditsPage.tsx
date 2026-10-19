@@ -128,10 +128,8 @@ export default function CreditsPage() {
     },
   });
 
-  // Balance is only ever granted against a confirmed payment, so this opens a
-  // checkout rather than adding anything itself. `credits` is in paise, which
-  // since the unit change is exactly the rupee amount times 100 — a top-up adds
-  // precisely what it costs, with no exchange in between.
+  // Balance is only granted after confirmed payment. The internal ledger stores
+  // paise, while the customer-facing unit is one credit per rupee.
   const buy = useMutation({
     mutationFn: async (arg: { packageId?: string; rupees?: number }) => {
       const res = await api.post('/credits/checkout/create-order', {
@@ -369,7 +367,7 @@ export default function CreditsPage() {
       <div className="card-apple p-5">
         <h2 className="font-semibold text-ios-dark">Add balance</h2>
         <p className="text-xs text-ios-muted mt-1">
-          What you pay is what lands in your balance.
+          ₹1 of base top-up adds 1 credit. Applicable fees may be charged on top.
         </p>
 
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-4">

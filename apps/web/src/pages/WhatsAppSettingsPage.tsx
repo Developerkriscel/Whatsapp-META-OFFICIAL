@@ -551,7 +551,7 @@ export default function WhatsAppSettingsPage() {
         accessToken: addForm.accessToken,
       });
     } catch (e: any) {
-      setFormErrors({ phoneNumber: e?.message || 'Failed saving credentials' });
+      setFormErrors({ phoneNumber: e?.response?.data?.error?.message || e?.message || 'Failed saving credentials' });
     }
   };
 
@@ -1116,7 +1116,7 @@ export default function WhatsAppSettingsPage() {
               </p>
             </div>
 
-            <div className="flex gap-3 pt-4">
+            <div className="flex flex-wrap gap-3 pt-4">
               {!isEditingCredentials ? (
                 <>
                   <button
@@ -1151,6 +1151,11 @@ export default function WhatsAppSettingsPage() {
                   >
                     Cancel
                   </button>
+                  {saveCredentialsMutation.isError && (
+                    <p className="text-sm text-apple-red w-full">
+                      {(saveCredentialsMutation.error as any)?.response?.data?.error?.message || 'Failed to save credentials'}
+                    </p>
+                  )}
                 </>
               )}
               {phones.length > 0 && !isEditingCredentials && (
