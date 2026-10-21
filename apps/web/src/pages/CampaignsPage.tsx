@@ -157,6 +157,8 @@ export default function CampaignsPage() {
   const [viewingCampaignId, setViewingCampaignId] = useState<string | null>(null);
   const [phoneSetupCampaignId, setPhoneSetupCampaignId] = useState<string | null>(null);
   const [phoneSetupSelectedId, setPhoneSetupSelectedId] = useState('');
+  const [templateSetupCampaignId, setTemplateSetupCampaignId] = useState<string | null>(null);
+  const [templateSetupSelectedId, setTemplateSetupSelectedId] = useState('');
   const [notification, setNotification] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
   const queryClient = useQueryClient();
 
@@ -368,12 +370,34 @@ export default function CampaignsPage() {
       showNotification('success', 'Campaign launched! Messages are being sent.');
     },
     onError: (error: any, campaignId: string) => {
+      if (error.response?.data?.error?.code === 'NO_TEMPLATE') {
+        setTemplateSetupCampaignId(campaignId);
+        setTemplateSetupSelectedId('');
+        return;
+      }
       if (error.response?.data?.error?.code === 'NO_PHONE') {
         setPhoneSetupCampaignId(campaignId);
         setPhoneSetupSelectedId('');
         return;
       }
       const message = error.response?.data?.error?.message || 'Failed to launch campaign';
+      showNotification('error', message);
+    },
+  });
+
+  const assignCampaignTemplateMutation = useMutation({
+    mutationFn: async ({ campaignId, templateId }: { campaignId: string; templateId: string }) => {
+      await api.patch(`/campaigns/${campaignId}`, { templateId });
+      return campaignId;
+    },
+    onSuccess: (campaignId) => {
+      setTemplateSetupCampaignId(null);
+      setTemplateSetupSelectedId('');
+      queryClient.invalidateQueries({ queryKey: ['campaigns'] });
+      sendMutation.mutate(campaignId);
+    },
+    onError: (error: any) => {
+      const message = error.response?.data?.error?.message || 'Failed to assign template';
       showNotification('error', message);
     },
   });
@@ -428,7 +452,7 @@ export default function CampaignsPage() {
     id: t.id,
     name: t.name,
     category: t.category,
-    status: t.status,
+    status: t.status?.toLowerCase() || 'pending',
     preview: t.body?.text || t.body || '',
     // Only IMAGE, VIDEO and DOCUMENT headers carry a file. A TEXT header is
     // still a header, and treating it as one that accepts media would fail
@@ -922,6 +946,79 @@ export default function CampaignsPage() {
 
         {viewingCampaignId && (
           <CampaignDetailModal campaignId={viewingCampaignId} onClose={() => setViewingCampaignId(null)} />
+        )}
+
+        {templateSetupCampaignId && (
+          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-[9999] p-4">
+            <div className="bg-white rounded-apple-xl w-full max-w-md p-6 shadow-2xl">
+              <div className="flex items-start justify-between gap-4 mb-2">
+                <div>
+                  <h3 className="text-lg font-semibold text-ios-dark">Choose a message template</h3>
+                  <p className="text-sm text-ios-secondary mt-1">
+                    This campaign has no template assigned. WhatsApp requires an approved template for broadcast campaigns.
+                  </p>
+                </div>
+                <button
+                  onClick={() => { setTemplateSetupCampaignId(null); setTemplateSetupSelectedId(''); }}
+                  className="p-1 hover:bg-ios-gray rounded-apple-lg"
+                  aria-label="Close template selection"
+                >
+                  <X className="w-5 h-5 text-ios-muted" />
+                </button>
+              </div>
+
+              {templates.filter((t) => t.status === 'approved').length === 0 ? (
+                <div className="mt-4 rounded-apple-lg border border-apple-orange/30 bg-apple-orange/10 p-4 text-sm text-ios-secondary">
+                  No approved templates found. Create and get a template approved in WhatsApp Settings, then try again.
+                </div>
+              ) : (
+                <div className="mt-4 space-y-2 max-h-64 overflow-y-auto">
+                  {templates.filter((t) => t.status === 'approved').map((template) => (
+                    <label
+                      key={template.id}
+                      className={`flex items-center gap-3 rounded-apple-lg border p-3 cursor-pointer transition ${
+                        templateSetupSelectedId === template.id ? 'border-wa-green bg-wa-green/5' : 'border-black/10 hover:border-wa-green/40'
+                      }`}
+                    >
+                      <input
+                        type="radio"
+                        name="campaign-template-pick"
+                        value={template.id}
+                        checked={templateSetupSelectedId === template.id}
+                        onChange={() => setTemplateSetupSelectedId(template.id)}
+                        className="accent-wa-green"
+                      />
+                      <span>
+                        <span className="block text-sm font-medium text-ios-dark">{template.name}</span>
+                        <span className="block text-xs text-ios-muted truncate max-w-[280px]">{template.preview}</span>
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              )}
+
+              <div className="flex justify-end gap-2 mt-5">
+                <button
+                  onClick={() => { setTemplateSetupCampaignId(null); setTemplateSetupSelectedId(''); }}
+                  className="btn-apple btn-apple-outline"
+                >
+                  Cancel
+                </button>
+                {templates.some((t) => t.status === 'approved') && (
+                  <button
+                    onClick={() => assignCampaignTemplateMutation.mutate({
+                      campaignId: templateSetupCampaignId,
+                      templateId: templateSetupSelectedId,
+                    })}
+                    disabled={!templateSetupSelectedId || assignCampaignTemplateMutation.isPending}
+                    className="btn-apple btn-wa-green disabled:opacity-50"
+                  >
+                    {assignCampaignTemplateMutation.isPending ? 'Saving…' : 'Save template & launch'}
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
         )}
 
         {phoneSetupCampaignId && (
