@@ -1263,10 +1263,13 @@ export async function registerWhatsAppRoutes(app: FastifyInstance): Promise<void
             ? 'unknown'
             : 'pending';
 
+    const businessId = creds?.businessId || tenant?.metaBusinessId || null;
+
     return {
       success: true,
       data: {
         businessVerified,
+        businessId,
         // null means "we couldn't read it from Meta", which is different from
         // false and should be shown as such rather than as a failed check.
         greenTickEnabled: officialBusinessAccount,

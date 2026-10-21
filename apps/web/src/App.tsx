@@ -29,6 +29,7 @@ import SuperAdminPlans from './pages/SuperAdminPlans';
 import BotFlowsPage from './pages/BotFlowsPage';
 import WhatsAppSettingsPage from './pages/WhatsAppSettingsPage';
 import WhatsAppAccountsPage from './pages/WhatsAppAccountsPage';
+import CreateTemplatePage from './pages/CreateTemplatePage';
 import CreditsPage from './pages/CreditsPage';
 import PolicyPage from './pages/PolicyPage';
 import ContactPage from './pages/ContactPage';
@@ -126,6 +127,7 @@ function ClientLayout() {
         <Route path="/conversations" element={<ConversationsPage />} />
         <Route path="/campaigns" element={<CampaignsPage />} />
         <Route path="/templates" element={<TemplatesPage />} />
+        <Route path="/templates/create" element={<CreateTemplatePage />} />
         <Route path="/segments" element={<SegmentsPage />} />
         <Route path="/analytics" element={<AnalyticsPage />} />
         <Route path="/team" element={<TeamPage />} />

@@ -6,16 +6,15 @@ services:
     container_name: whatsapp-saas-postgres
     restart: always
     environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgrespassword123
-      POSTGRES_DB: whatsapp_saas
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgrespassword123}
+      POSTGRES_DB: ${POSTGRES_DB:-whatsapp_saas}
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./database/rls:/docker-entrypoint-initdb.d
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -25,7 +24,7 @@ services:
     container_name: whatsapp-saas-redis
     restart: always
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     volumes:
       - redis_data:/data
     command: redis-server --appendonly yes
@@ -42,19 +41,17 @@ services:
     container_name: whatsapp-saas-api
     restart: always
     ports:
-      - "3001:3001"
+      - "127.0.0.1:3001:3001"
+    env_file:
+      - .env.production
     environment:
       NODE_ENV: production
       PORT: 3001
       HOST: "0.0.0.0"
-      DATABASE_URL: "postgresql://postgres:postgrespassword123@postgres:5432/whatsapp_saas?schema=public"
+      DATABASE_URL: "postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgrespassword123}@postgres:5432/${POSTGRES_DB:-whatsapp_saas}?schema=public"
       REDIS_URL: "redis://redis:6379"
-      JWT_SECRET: "your-super-secret-jwt-key-min-32-characters-long"
-      JWT_ACCESS_EXPIRES_IN: "15m"
-      JWT_REFRESH_EXPIRES_IN: "7d"
-      CORS_ORIGIN: "*"
-      WHATSAPP_MOCK_MODE: "true"
-      STRIPE_MOCK_MODE: "true"
+    volumes:
+      - api_uploads:/app/apps/api/uploads
     depends_on:
       postgres:
         condition: service_healthy
@@ -68,10 +65,11 @@ services:
     container_name: whatsapp-saas-web
     restart: always
     ports:
-      - "8080:80"
+      - "80:80"
     depends_on:
       - api
 
 volumes:
   postgres_data:
   redis_data:
+  api_uploads:

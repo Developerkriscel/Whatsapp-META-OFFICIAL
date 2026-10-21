@@ -393,7 +393,7 @@ export default function CreditsPage() {
           <label className="flex-1">
             <span className="block text-xs font-medium text-ios-secondary mb-1">Or any amount</span>
             <div className="relative">
-              <span className="absolute left-3 top-1/2 -translate-y-1/2 text-ios-muted text-sm">{s}</span>
+              <span className="absolute left-1 top-1/2 -translate-y-1/2 text-ios-muted text-sm">{s}</span>
               <input
                 type="number" min={1} step="1" value={topUp}
                 onChange={(e) => setTopUp(e.target.value)}

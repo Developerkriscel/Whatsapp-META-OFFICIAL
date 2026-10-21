@@ -140,7 +140,7 @@ export default function SuperAdminCreditSettings() {
           <label className="block">
             <span className="block text-xs font-medium text-ios-secondary mb-1">One credit is worth</span>
             <div className="relative">
-              <span className="absolute left-3 top-1/2 -translate-y-1/2 text-ios-muted text-sm">
+              <span className="absolute left-1 top-1/2 -translate-y-1/2 text-ios-muted text-sm">
                 {symbol}
               </span>
               <input

@@ -9,5 +9,6 @@ dist/
 test-screenshots/
 
 # Local environment secrets
+.env.production
 apps/api/.env
 apps/web/.env

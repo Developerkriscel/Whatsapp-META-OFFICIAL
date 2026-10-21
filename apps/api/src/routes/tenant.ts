@@ -2996,6 +2996,13 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
 
     const body = schema.parse(request.body);
 
+    if (!request.authUser.tenantId) {
+      return reply.status(401).send({
+        success: false,
+        error: { code: 'UNAUTHORIZED', message: 'Tenant context required to create templates' },
+      });
+    }
+
     const duplicateTemplate = await app.prisma.template.findFirst({
       where: {
         tenantId: request.authUser.tenantId!,
@@ -3020,22 +3027,27 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
       }
     }
 
-    const template = await app.prisma.template.create({
-      data: {
-        tenantId: request.authUser.tenantId!,
-        name: body.name,
-        category: body.category,
-        language: body.language,
-        body: body.body,
-        header: body.header as any,
-        footer: body.footer as any,
-        buttons: body.buttons as any,
-        phoneNumberId: body.phoneNumberId,
-        status: 'DRAFT',
-      },
-    });
+    try {
+      const template = await app.prisma.template.create({
+        data: {
+          tenantId: request.authUser.tenantId!,
+          name: body.name,
+          category: body.category,
+          language: body.language,
+          body: body.body,
+          header: body.header as any,
+          footer: body.footer as any,
+          buttons: body.buttons as any,
+          phoneNumberId: body.phoneNumberId,
+          status: 'DRAFT',
+        },
+      });
 
-    return reply.status(201).send({ success: true, data: template });
+      return reply.status(201).send({ success: true, data: template });
+    } catch (err: any) {
+      app.log.error({ msg: 'Template create failed', code: err?.code, meta: err?.meta, message: err?.message });
+      throw err;
+    }
   });
 
   app.patch('/templates/:templateId', { preHandler: [app.requirePermission('templates', 'update')] }, async (request, reply) => {
@@ -4521,15 +4533,33 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
     const { randomBytes } = await import('crypto');
     const queryHash = randomBytes(16).toString('hex');
 
+    const rules = body.rules || { type: 'all', conditions: [] };
+
     const segment = await app.prisma.segment.create({
       data: {
         tenantId: request.authUser.tenantId!,
         name: body.name,
         description: body.description || null,
-        query: body.rules || { type: 'all', conditions: [] },
+        query: rules,
         queryHash,
       },
     });
+
+    const segmentWhere = buildSegmentContactWhere(rules);
+    const where: Prisma.ContactWhereInput = { tenantId: request.authUser.tenantId!, ...segmentWhere };
+    const matchingContacts = await app.prisma.contact.findMany({ where, select: { id: true } });
+    const totalContacts = matchingContacts.length;
+
+    if (totalContacts > 0) {
+      await app.prisma.$transaction([
+        app.prisma.contactSegment.createMany({
+          data: matchingContacts.map(c => ({ segmentId: segment.id, contactId: c.id })),
+          skipDuplicates: true,
+        }),
+        app.prisma.segment.update({ where: { id: segment.id }, data: { totalContacts } }),
+      ]);
+      segment.totalContacts = totalContacts;
+    }
 
     return reply.status(201).send({ success: true, data: segment });
   });
@@ -4580,6 +4610,23 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
         }),
       },
     });
+
+    if (body.rules) {
+      const segmentWhere = buildSegmentContactWhere(body.rules);
+      const where: Prisma.ContactWhereInput = { tenantId: request.authUser.tenantId!, ...segmentWhere };
+      const matchingContacts = await app.prisma.contact.findMany({ where, select: { id: true } });
+      const totalContacts = matchingContacts.length;
+
+      await app.prisma.$transaction([
+        app.prisma.contactSegment.deleteMany({ where: { segmentId } }),
+        app.prisma.contactSegment.createMany({
+          data: matchingContacts.map(c => ({ segmentId, contactId: c.id })),
+          skipDuplicates: true,
+        }),
+        app.prisma.segment.update({ where: { id: segmentId }, data: { totalContacts } }),
+      ]);
+      segment.totalContacts = totalContacts;
+    }
 
     return { success: true, data: segment };
   });

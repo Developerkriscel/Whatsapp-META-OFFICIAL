@@ -109,6 +109,18 @@ export default function SegmentsPage() {
     queryFn: async () => {
       if (!previewSegment) return null;
       const response = await api.get(`/segments/${previewSegment.id}/preview`);
+      const preview = response.data?.data;
+      if (preview && typeof preview.total === 'number') {
+        queryClient.setQueryData(['segments'], (old: any) => {
+          if (!old?.data) return old;
+          return {
+            ...old,
+            data: old.data.map((s: any) =>
+              s.id === previewSegment.id ? { ...s, totalContacts: preview.total } : s
+            ),
+          };
+        });
+      }
       return response.data;
     },
     enabled: !!previewSegment,
@@ -118,8 +130,8 @@ export default function SegmentsPage() {
   const createMutation = useMutation({
     mutationFn: async (payload: typeof form) => {
       const conditions = payload.conditions
-        .filter(c => c.field && c.operator && c.value)
-        .map(c => ({ field: c.field, operator: c.operator, value: c.value }));
+        .filter(c => c.field && c.operator && (['is_empty', 'is_not_empty'].includes(c.operator) || c.value))
+        .map(c => ({ field: c.field, operator: c.operator, value: ['is_empty', 'is_not_empty'].includes(c.operator) ? '_' : c.value }));
 
       const response = await api.post('/segments', {
         name: payload.name,
@@ -143,7 +155,10 @@ export default function SegmentsPage() {
       showNotification('success', 'Segment created successfully!');
     },
     onError: (error: any) => {
-      const message = error.response?.data?.error?.message || 'Failed to create segment';
+      const code = error.response?.data?.error?.code;
+      const message = code === 'DUPLICATE' || code === 'DUPLICATE_TEMPLATE_NAME'
+        ? 'A segment with this name already exists. Choose a different name.'
+        : error.response?.data?.error?.message || 'Failed to create segment';
       showNotification('error', message);
     },
   });
@@ -152,8 +167,8 @@ export default function SegmentsPage() {
   const updateMutation = useMutation({
     mutationFn: async ({ id, payload }: { id: string; payload: typeof form }) => {
       const conditions = payload.conditions
-        .filter(c => c.field && c.operator && c.value)
-        .map(c => ({ field: c.field, operator: c.operator, value: c.value }));
+        .filter(c => c.field && c.operator && (['is_empty', 'is_not_empty'].includes(c.operator) || c.value))
+        .map(c => ({ field: c.field, operator: c.operator, value: ['is_empty', 'is_not_empty'].includes(c.operator) ? '_' : c.value }));
 
       const response = await api.patch(`/segments/${id}`, {
         name: payload.name,
@@ -611,7 +626,7 @@ export default function SegmentsPage() {
             <div className="flex items-center justify-between mb-4">
               <div>
                 <h3 className="text-lg font-semibold text-ios-dark">Preview: {previewSegment.name}</h3>
-                <p className="text-sm text-ios-muted">{previewSegment.totalContacts.toLocaleString()} contacts match</p>
+                <p className="text-sm text-ios-muted">{(preview?.total ?? previewSegment.totalContacts).toLocaleString()} contacts match</p>
               </div>
               <button
                 onClick={() => setPreviewSegment(null)}

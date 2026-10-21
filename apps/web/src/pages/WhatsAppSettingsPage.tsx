@@ -69,6 +69,7 @@ interface QualityReport {
 
 interface BusinessVerification {
   businessVerified: boolean;
+  businessId?: string | null;
   // null means Meta didn't return a value — genuinely unknown, which is not the
   // same as false. The tax-ID fields were removed entirely; they were hardcoded
   // literals that could never change.
@@ -831,6 +832,103 @@ export default function WhatsAppSettingsPage() {
       {/* Verification Tab */}
       {activeTab === 'verification' && (
         <div className="space-y-6">
+          {/* Why verification matters — shown only when not yet verified */}
+          {!verification.businessVerified && (
+            <div className="card-apple p-5 md:p-6 border-l-4 border-apple-orange">
+              <div className="flex items-start gap-4">
+                <div className="w-10 h-10 rounded-apple-xl bg-apple-orange/15 flex items-center justify-center shrink-0">
+                  <AlertTriangle className="w-5 h-5 text-apple-orange" />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <h3 className="text-base font-semibold text-ios-dark">Your business is not verified with Meta</h3>
+                  <p className="text-sm text-ios-secondary mt-1">
+                    <strong>This is why your templates take 24+ hours to get approved.</strong> Verified businesses get template approvals in minutes because Meta trusts them. Without verification, every template goes through a manual review queue.
+                  </p>
+                  <div className="mt-3 p-3 bg-ios-gray/50 rounded-apple-lg">
+                    <p className="text-xs font-semibold text-ios-dark mb-2">What verification unlocks:</p>
+                    <ul className="text-xs text-ios-secondary space-y-1">
+                      <li className="flex items-center gap-2"><Zap className="w-3 h-3 text-apple-green shrink-0" /> Template approvals in minutes instead of 24+ hours</li>
+                      <li className="flex items-center gap-2"><Users className="w-3 h-3 text-apple-green shrink-0" /> Higher messaging limits (1,000+ unique contacts/day)</li>
+                      <li className="flex items-center gap-2"><ShieldCheck className="w-3 h-3 text-apple-green shrink-0" /> Eligibility for the green tick (Official Business Account)</li>
+                      <li className="flex items-center gap-2"><Shield className="w-3 h-3 text-apple-green shrink-0" /> Account protected against impersonation</li>
+                    </ul>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Action: Start / Complete Business Verification */}
+          <div className="card-apple p-5 md:p-6">
+            <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+              <div className="flex items-start gap-4 min-w-0">
+                <div
+                  className={`w-12 h-12 rounded-apple-xl flex items-center justify-center shrink-0 ${verification.businessVerified ? 'bg-apple-green/15' : 'bg-[#1877F2]/10'}`}
+                >
+                  {verification.businessVerified
+                    ? <CheckCircle className="w-6 h-6 text-apple-green" />
+                    : <Shield className="w-6 h-6 text-[#1877F2]" />}
+                </div>
+                <div className="min-w-0">
+                  <h3 className="text-base font-semibold text-ios-dark">
+                    {verification.businessVerified ? 'Business Verified' : 'Verify Your Business with Meta'}
+                  </h3>
+                  <p className="text-sm text-ios-muted mt-1 max-w-xl">
+                    {verification.businessVerified
+                      ? 'Your business is verified. Templates are fast-tracked for approval by Meta.'
+                      : 'Open Meta Business Manager to submit your business documents (registration certificate, utility bill, etc.). Verification usually takes 1-3 business days.'}
+                  </p>
+                </div>
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                <button
+                  onClick={() => refetch()}
+                  disabled={isLoading}
+                  className="btn-apple btn-apple-outline flex items-center gap-2 text-sm"
+                >
+                  <RefreshCw className={`w-4 h-4 ${isLoading ? 'animate-spin' : ''}`} />
+                  Check Status
+                </button>
+                <a
+                  href={verification.businessId
+                    ? `https://business.facebook.com/settings/security/?business_id=${verification.businessId}`
+                    : 'https://business.facebook.com/settings/security/'}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="shrink-0 inline-flex items-center justify-center gap-2 px-5 h-10 rounded-lg text-white text-[15px] font-semibold transition-colors"
+                  style={{ backgroundColor: verification.businessVerified ? '#25D366' : '#1877F2' }}
+                  onMouseEnter={(e) => e.currentTarget.style.backgroundColor = verification.businessVerified ? '#1DA851' : '#166FE5'}
+                  onMouseLeave={(e) => e.currentTarget.style.backgroundColor = verification.businessVerified ? '#25D366' : '#1877F2'}
+                >
+                  <ExternalLink className="w-4 h-4" />
+                  {verification.businessVerified ? 'View in Meta' : 'Start Verification'}
+                </a>
+              </div>
+            </div>
+
+            {/* Step-by-step guide for unverified businesses */}
+            {!verification.businessVerified && (
+              <div className="mt-5 pt-5 border-t border-black/5">
+                <p className="text-xs font-semibold text-ios-muted uppercase tracking-wide mb-3">How to verify (3 steps)</p>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                  {[
+                    { step: '1', title: 'Open Meta Business Settings', desc: 'Click "Start Verification" above. Log in with the Facebook account that owns your WhatsApp Business Account.' },
+                    { step: '2', title: 'Upload business documents', desc: 'Meta will ask for a business registration certificate, utility bill, or bank statement that shows your legal business name and address.' },
+                    { step: '3', title: 'Wait for review', desc: 'Meta reviews within 1-3 business days. Once approved, your templates will be fast-tracked automatically.' },
+                  ].map(({ step, title, desc }) => (
+                    <div key={step} className="p-3 bg-ios-gray/50 rounded-apple-lg">
+                      <div className="flex items-center gap-2 mb-1.5">
+                        <span className="w-6 h-6 rounded-full bg-[#1877F2]/10 text-[#1877F2] flex items-center justify-center text-xs font-bold">{step}</span>
+                        <p className="text-sm font-medium text-ios-dark">{title}</p>
+                      </div>
+                      <p className="text-xs text-ios-muted leading-relaxed">{desc}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+
           {/* Verification Status Cards */}
           <div className="grid grid-cols-2 gap-4">
             <div className="card-apple p-6">

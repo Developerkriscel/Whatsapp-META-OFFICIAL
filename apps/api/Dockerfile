@@ -9,9 +9,18 @@ COPY database ./database
 COPY apps/api ./apps/api
 
 RUN pnpm install --frozen-lockfile
-RUN cd apps/api && npx prisma generate --schema=../../database/schema.prisma
+RUN cd apps/api && npx prisma generate
 RUN pnpm --filter api build
+
+FROM node:20-alpine AS runner
+RUN npm install -g pnpm@8.15.0
+
+WORKDIR /app
+
+COPY --from=base /app /app
+
+RUN mkdir -p /app/apps/api/uploads
 
 EXPOSE 3001
 
-CMD ["pnpm", "--filter", "api", "start"]
+CMD ["sh", "-c", "cd apps/api && npx prisma migrate deploy && cd /app && pnpm --filter api start"]

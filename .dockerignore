@@ -1,0 +1,12 @@
+node_modules
+.git
+.env
+.env.local
+*.md
+.vscode
+.claude
+dist
+apps/api/dist
+apps/web/dist
+apps/api/uploads
+segment-flow.md

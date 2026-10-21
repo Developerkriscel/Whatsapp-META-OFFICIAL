@@ -1,4 +1,5 @@
 import { useState, useRef } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../api/client';
 import { Plus, Search, X, FileText, Send, Check, Clock, AlertCircle, Copy, Edit3, SendHorizontal, CheckCircle2, Loader2, Trash2 } from 'lucide-react';
@@ -50,7 +51,7 @@ const LANGUAGE_LABELS: Record<string, string> = {
 };
 
 export default function TemplatesPage() {
-  const [showCreate, setShowCreate] = useState(false);
+  const navigate = useNavigate();
   const [showEdit, setShowEdit] = useState<Template | null>(null);
   const [search, setSearch] = useState('');
   const [category, setCategory] = useState<string>('all');
@@ -65,52 +66,16 @@ export default function TemplatesPage() {
     language: 'en_US',
     bodyText: '',
     phoneNumberId: '',
-    // A header is optional, and is either text or one piece of media. Media
-    // needs a sample file: Meta shows it to a reviewer, and will not approve a
-    // media header without one.
     headerFormat: 'NONE' as 'NONE' | 'TEXT' | 'IMAGE' | 'VIDEO' | 'DOCUMENT',
     headerText: '',
     headerSampleUrl: '',
     headerSamplePath: '',
     headerSampleName: '',
   });
-  const [sampleUploading, setSampleUploading] = useState(false);
-  const [sampleError, setSampleError] = useState('');
-  const sampleFileRef = useRef<HTMLInputElement>(null);
 
   const emptyForm = {
     name: '', category: 'MARKETING' as const, language: 'en_US', bodyText: '', phoneNumberId: '',
     headerFormat: 'NONE' as const, headerText: '', headerSampleUrl: '', headerSamplePath: '', headerSampleName: '',
-  };
-
-  const ACCEPT_BY_FORMAT: Record<string, string> = {
-    IMAGE: 'image/jpeg,image/png',
-    VIDEO: 'video/mp4,video/3gpp',
-    DOCUMENT: 'application/pdf',
-  };
-
-  const uploadHeaderSample = async (file: File) => {
-    setSampleError('');
-    setSampleUploading(true);
-    try {
-      const body = new FormData();
-      body.append('file', file);
-      const res = await api.post('/uploads/campaign-media', body, {
-        headers: { 'Content-Type': 'multipart/form-data' },
-      });
-      const up = res.data?.data;
-      setForm((f) => ({
-        ...f,
-        headerSampleUrl: up.url,
-        headerSamplePath: up.path,
-        headerSampleName: up.originalName || file.name,
-      }));
-    } catch (err: any) {
-      setSampleError(err?.response?.data?.error?.message || 'Upload failed. Please try again.');
-    } finally {
-      setSampleUploading(false);
-      if (sampleFileRef.current) sampleFileRef.current.value = '';
-    }
   };
   const queryClient = useQueryClient();
 
@@ -144,49 +109,6 @@ export default function TemplatesPage() {
     // Matches the polling pattern already used for live status elsewhere
     // (Conversations, WhatsApp Settings, Credits).
     refetchInterval: 15000,
-  });
-
-  const createMutation = useMutation({
-    mutationFn: async (payload: typeof form) => {
-      const response = await api.post('/templates', {
-        name: payload.name,
-        category: payload.category,
-        language: payload.language,
-        body: { text: payload.bodyText },
-        phoneNumberId: payload.phoneNumberId || undefined,
-        ...(payload.headerFormat === 'NONE'
-          ? {}
-          : payload.headerFormat === 'TEXT'
-            ? { header: { type: 'TEXT', format: 'TEXT', text: payload.headerText } }
-            : {
-                header: {
-                  type: payload.headerFormat,
-                  format: payload.headerFormat,
-                  sampleUrl: payload.headerSampleUrl,
-                  samplePath: payload.headerSamplePath,
-                },
-              }),
-      });
-      return response.data;
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['templates'] });
-      setShowCreate(false);
-      setForm(emptyForm);
-      setTemplateNameError('');
-      setSampleError('');
-      showNotification('success', 'Template created successfully!');
-    },
-    onError: (error: any) => {
-      const apiError = error.response?.data?.error;
-      if (apiError?.code === 'DUPLICATE_TEMPLATE_NAME') {
-        setTemplateNameError(apiError.message || 'This template name is already in use. Choose another.');
-        requestAnimationFrame(() => templateModalRef.current?.scrollTo({ top: 0, behavior: 'smooth' }));
-        return;
-      }
-      const message = apiError?.message || 'Failed to create template';
-      showNotification('error', message);
-    },
   });
 
   const updateMutation = useMutation({
@@ -342,7 +264,7 @@ export default function TemplatesPage() {
           <p className="text-ios-secondary mt-1">Create and manage WhatsApp message templates</p>
         </div>
         <button
-          onClick={() => { setTemplateNameError(''); setShowCreate(true); }}
+          onClick={() => navigate('/templates/create')}
           className="btn-apple btn-wa-green flex items-center gap-2"
         >
           <Plus className="w-4 h-4" />
@@ -431,7 +353,7 @@ export default function TemplatesPage() {
         <div className="card-apple p-12 text-center">
           <FileText className="w-12 h-12 text-ios-muted mx-auto mb-4" />
           <p className="text-ios-secondary">No templates found</p>
-          <button onClick={() => setShowCreate(true)} className="mt-4 text-wa-green hover:text-wa-green/80">
+          <button onClick={() => navigate('/templates/create')} className="mt-4 text-wa-green hover:text-wa-green/80">
             Create your first template →
           </button>
         </div>
@@ -461,218 +383,6 @@ export default function TemplatesPage() {
               </div>
             </div>
           ))}
-        </div>
-      )}
-
-      {/* Create Modal */}
-      {showCreate && (
-        <div className="fixed inset-0 bg-black/40 backdrop-blur-xl flex items-center justify-center z-50">
-          <div ref={templateModalRef} className="glass-card p-6 w-[520px] shadow-apple-xl max-h-[90vh] overflow-y-auto">
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="font-semibold text-ios-dark">Create Template</h3>
-              <button onClick={() => { setShowCreate(false); setTemplateNameError(''); }} className="p-1 hover:bg-ios-gray rounded-apple-lg transition">
-                <X className="w-5 h-5 text-ios-muted" />
-              </button>
-            </div>
-            <div className="space-y-4">
-              <div>
-                <label className="block text-sm font-medium text-ios-secondary mb-1">Template Name *</label>
-                <p className="mb-2 text-xs text-red-600">The template name must be unique. Please ensure that the name has not been used for any previously created WhatsApp message template.</p>
-                <input
-                  type="text"
-                  placeholder="e.g., welcome_message"
-                  value={form.name}
-                  onChange={(e) => { setForm({ ...form, name: e.target.value }); setTemplateNameError(''); }}
-                  className="input-apple w-full"
-                  aria-invalid={!!templateNameError}
-                />
-                {templateNameError && <p role="alert" className="mt-1 text-xs text-red-600">{templateNameError}</p>}
-              </div>
-              {phoneNumbers.length > 1 && (
-                <div>
-                  <label className="block text-sm font-medium text-ios-secondary mb-1">Submit Under Number *</label>
-                  <select
-                    value={form.phoneNumberId}
-                    onChange={(e) => setForm({ ...form, phoneNumberId: e.target.value })}
-                    className="input-apple w-full"
-                  >
-                    <option value="">Select a connected number…</option>
-                    {phoneNumbers.map((p) => (
-                      <option key={p.id} value={p.id}>
-                        {p.displayName || p.phoneNumber} — {p.phoneNumber}
-                      </option>
-                    ))}
-                  </select>
-                  <p className="text-xs text-ios-muted mt-1">
-                    Templates only exist within one WhatsApp Business Account — pick the number whose account this template should be submitted to.
-                  </p>
-                </div>
-              )}
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-sm font-medium text-ios-secondary mb-1">Category</label>
-                  <select
-                    value={form.category}
-                    onChange={(e) => setForm({ ...form, category: e.target.value as any })}
-                    className="input-apple w-full"
-                  >
-                    <option value="MARKETING">Marketing</option>
-                    <option value="UTILITY">Utility</option>
-                    <option value="AUTHENTICATION">Authentication</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-ios-secondary mb-1">Language</label>
-                  <select
-                    value={form.language}
-                    onChange={(e) => setForm({ ...form, language: e.target.value })}
-                    className="input-apple w-full"
-                  >
-                    <option value="en_US">English (US)</option>
-                    <option value="en_GB">English (UK)</option>
-                    <option value="es">Spanish</option>
-                    <option value="pt_BR">Portuguese (BR)</option>
-                    <option value="ar">Arabic</option>
-                    <option value="hi">Hindi</option>
-                  </select>
-                </div>
-              </div>
-              {/* Header — optional, and the only way a template can ever carry
-                  an image. Without one, media attached to a campaign is
-                  rejected by Meta for every recipient. */}
-              <div>
-                <label className="block text-sm font-medium text-ios-secondary mb-1">Header (optional)</label>
-                <div className="grid grid-cols-5 gap-2">
-                  {(['NONE', 'TEXT', 'IMAGE', 'VIDEO', 'DOCUMENT'] as const).map((f) => (
-                    <button
-                      key={f}
-                      type="button"
-                      onClick={() => setForm({
-                        ...form, headerFormat: f,
-                        // Switching away from media should not leave a sample
-                        // behind that would be submitted with the wrong format.
-                        ...(f === 'TEXT' || f === 'NONE'
-                          ? { headerSampleUrl: '', headerSamplePath: '', headerSampleName: '' }
-                          : { headerText: '' }),
-                      })}
-                      className={`py-1.5 text-xs rounded-apple-lg border transition ${
-                        form.headerFormat === f
-                          ? 'border-wa-green bg-wa-green/10 text-wa-green font-medium'
-                          : 'border-black/10 text-ios-muted hover:border-wa-green/40'
-                      }`}
-                    >
-                      {f === 'NONE' ? 'None' : f.charAt(0) + f.slice(1).toLowerCase()}
-                    </button>
-                  ))}
-                </div>
-
-                {form.headerFormat === 'TEXT' && (
-                  <input
-                    type="text"
-                    placeholder="e.g. Your order is confirmed"
-                    value={form.headerText}
-                    onChange={(e) => setForm({ ...form, headerText: e.target.value })}
-                    maxLength={60}
-                    className="input-apple w-full mt-2"
-                  />
-                )}
-
-                {form.headerFormat !== 'NONE' && form.headerFormat !== 'TEXT' && (
-                  <div className="mt-2 space-y-2">
-                    <p className="text-xs text-ios-muted">
-                      Meta reviews a sample of the {form.headerFormat.toLowerCase()} before approving the
-                      template. Campaigns can then send a different file of the same type.
-                    </p>
-                    <input
-                      ref={sampleFileRef}
-                      type="file"
-                      accept={ACCEPT_BY_FORMAT[form.headerFormat]}
-                      onChange={(e) => {
-                        const f = e.target.files?.[0];
-                        if (f) uploadHeaderSample(f);
-                      }}
-                      className="block w-full text-sm text-ios-muted file:mr-3 file:py-1.5 file:px-3 file:rounded-apple-lg file:border-0 file:bg-wa-green/10 file:text-wa-green"
-                    />
-                    {sampleUploading && <p className="text-xs text-ios-muted">Uploading sample…</p>}
-                    {sampleError && <p className="text-xs text-red-600">{sampleError}</p>}
-                    {form.headerSampleUrl && (
-                      <div className="flex items-center gap-2 text-xs">
-                        <CheckCircle2 className="w-3.5 h-3.5 text-wa-green" />
-                        <span className="text-ios-dark truncate">{form.headerSampleName}</span>
-                        <button
-                          type="button"
-                          onClick={() => setForm({ ...form, headerSampleUrl: '', headerSamplePath: '', headerSampleName: '' })}
-                          className="text-ios-muted hover:text-red-600 underline"
-                        >
-                          remove
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-ios-secondary mb-1">Message Body *</label>
-                <textarea
-                  placeholder="Hi {{1}}, welcome to our service!"
-                  value={form.bodyText}
-                  onChange={(e) => setForm({ ...form, bodyText: e.target.value })}
-                  rows={4}
-                  className="input-apple w-full resize-none"
-                />
-                <p className="text-xs text-ios-muted mt-1">Use {'{{1}}'}, {'{{2}}'} for variables</p>
-                <TemplateQualityPanel
-                  category={form.category}
-                  bodyText={form.bodyText}
-                  onApplySuggestion={(text) => setForm({ ...form, bodyText: text })}
-                />
-              </div>
-
-              {/* What Meta will actually render, while there is still time to
-                  change it. The sample image doubles as the preview image —
-                  it is the one Meta approves the header against. */}
-              {form.bodyText.trim() && (
-                <div>
-                  <label className="block text-sm font-medium text-ios-secondary mb-1">Preview</label>
-                  <WhatsAppPreview
-                    body={form.bodyText}
-                    headerFormat={form.headerFormat === 'NONE' ? null : form.headerFormat}
-                    headerText={form.headerText}
-                    mediaUrl={form.headerSampleUrl}
-                    mediaName={form.headerSampleName}
-                    businessName={
-                      phoneNumbers.find((p: any) => p.id === form.phoneNumberId)?.displayName
-                      || phoneNumbers[0]?.displayName
-                      || 'Your Business'
-                    }
-                  />
-                </div>
-              )}
-
-              <div className="flex gap-2 pt-2">
-                <button
-                  onClick={() => createMutation.mutate(form)}
-                  disabled={
-                    !form.name.trim() || !form.bodyText.trim()
-                    || (phoneNumbers.length > 1 && !form.phoneNumberId)
-                    || createMutation.isPending
-                    || sampleUploading
-                    // Meta will not approve a media header without a sample, so
-                    // there is no point letting the template be created.
-                    || (['IMAGE', 'VIDEO', 'DOCUMENT'].includes(form.headerFormat) && !form.headerSamplePath)
-                    || (form.headerFormat === 'TEXT' && !form.headerText.trim())
-                  }
-                  className="flex-1 btn-apple btn-wa-green disabled:opacity-50"
-                >
-                  {createMutation.isPending ? 'Creating...' : 'Create Template'}
-                </button>
-                <button onClick={() => setShowCreate(false)} className="flex-1 btn-apple btn-apple-outline">
-                  Cancel
-                </button>
-              </div>
-            </div>
-          </div>
         </div>
       )}
 
