@@ -8,7 +8,7 @@ import {
   Building2, Search, Plus, X, Ban, CheckCircle, Users, CreditCard,
   Settings, ChevronDown, Shield, Coins, Copy, Check, Phone,
   FileText, Send, MessageSquare, UserCheck, ArrowUp, ArrowDown,
-  TrendingDown, Zap, Eye, EyeOff, Minus, AlertTriangle, Pencil } from 'lucide-react';
+  TrendingDown, Zap, Eye, EyeOff, Minus, AlertTriangle, Pencil, Trash2, Clock } from 'lucide-react';
 
 interface TenantUser {
   id: string;
@@ -144,6 +144,7 @@ export default function SuperAdminTenantsPage() {
             <option value="ACTIVE">Active</option>
             <option value="TRIAL">Trial</option>
             <option value="SUSPENDED">Suspended</option>
+            <option value="PENDING_DELETION">Pending Deletion</option>
           </select>
         </div>
 
@@ -272,6 +273,7 @@ interface TenantDetailModalProps {
 function TenantDetailModal({ tenantId, onClose }: TenantDetailModalProps) {
   const [tab, setTab] = useState<'overview' | 'users' | 'credits' | 'billing'>('overview');
   const [showSuspendConfirm, setShowSuspendConfirm] = useState(false);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const queryClient = useQueryClient();
 
   const { data: tenantData, isLoading } = useQuery({
@@ -323,6 +325,48 @@ function TenantDetailModal({ tenantId, onClose }: TenantDetailModalProps) {
     },
   });
 
+  const deleteMutation = useMutation({
+    mutationFn: async () => {
+      const r = await api.delete(`/superadmin/tenants/${tenantId}`);
+      return r.data.data;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['superadmin-tenants'] });
+      queryClient.invalidateQueries({ queryKey: ['superadmin-tenant-detail', tenantId] });
+      setShowDeleteConfirm(false);
+    },
+    onError: (err: any) => {
+      alert(err.response?.data?.error?.message || 'Failed to schedule deletion');
+    },
+  });
+
+  const purgeMutation = useMutation({
+    mutationFn: async () => {
+      await api.post(`/superadmin/tenants/${tenantId}/purge`, { force: true });
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['superadmin-tenants'] });
+      setShowDeleteConfirm(false);
+      onClose();
+    },
+    onError: (err: any) => {
+      alert(err.response?.data?.error?.message || 'Failed to purge tenant');
+    },
+  });
+
+  const cancelDeletionMutation = useMutation({
+    mutationFn: async () => {
+      await api.post(`/superadmin/tenants/${tenantId}/cancel-deletion`);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['superadmin-tenants'] });
+      queryClient.invalidateQueries({ queryKey: ['superadmin-tenant-detail', tenantId] });
+    },
+    onError: (err: any) => {
+      alert(err.response?.data?.error?.message || 'Failed to cancel deletion');
+    },
+  });
+
   if (isLoading) {
     return createPortal(
       <div className="fixed inset-0 bg-black/60 backdrop-blur-md flex items-center justify-center z-[9999]">
@@ -358,7 +402,15 @@ function TenantDetailModal({ tenantId, onClose }: TenantDetailModalProps) {
             >
               {tenantAccess(tenant).label}
             </span>
-            {tenant.status === 'ACTIVE' || tenant.status === 'TRIAL' ? (
+            {tenant.status === 'PENDING_DELETION' ? (
+              <button
+                onClick={() => cancelDeletionMutation.mutate()}
+                disabled={cancelDeletionMutation.isPending}
+                className="px-3 py-1 text-xs border border-wa-green/30 text-wa-green rounded-apple-lg hover:bg-wa-green/10 disabled:opacity-50"
+              >
+                {cancelDeletionMutation.isPending ? 'Restoring...' : 'Cancel Deletion'}
+              </button>
+            ) : tenant.status === 'ACTIVE' || tenant.status === 'TRIAL' ? (
               <button
                 onClick={() => setShowSuspendConfirm(true)}
                 disabled={suspendMutation.isPending}
@@ -375,6 +427,12 @@ function TenantDetailModal({ tenantId, onClose }: TenantDetailModalProps) {
                 Reactivate
               </button>
             )}
+            <button
+              onClick={() => setShowDeleteConfirm(true)}
+              className="px-3 py-1 text-xs border border-red-500/30 text-red-500 rounded-apple-lg hover:bg-red-500/10 flex items-center gap-1"
+            >
+              <Trash2 className="w-3 h-3" /> Delete
+            </button>
             <button
               onClick={async () => {
                 try {
@@ -456,6 +514,41 @@ Use this only once they are actually on a plan — it removes the trial deadline
           );
         })()}
 
+        {/* Pending deletion banner */}
+        {tenant.status === 'PENDING_DELETION' && (
+          <div className="px-6 py-4 bg-red-500/5 border-b border-red-500/20 flex-shrink-0">
+            <div className="flex items-start gap-2.5">
+              <Clock className="w-4 h-4 text-red-500 shrink-0 mt-0.5" />
+              <div className="min-w-0 flex-1">
+                <p className="text-sm font-medium text-ios-dark">
+                  This tenant is scheduled for permanent deletion
+                  {tenant.scheduledPurgeAt && (
+                    <> on {new Date(tenant.scheduledPurgeAt).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })}</>
+                  )}
+                </p>
+                <p className="text-xs text-ios-secondary mt-0.5">
+                  All data will be permanently removed after the grace period. You can cancel or purge immediately.
+                </p>
+                <div className="flex items-center gap-2 mt-2.5">
+                  <button
+                    onClick={() => cancelDeletionMutation.mutate()}
+                    disabled={cancelDeletionMutation.isPending}
+                    className="px-2.5 py-1 text-xs border border-wa-green/40 text-wa-green rounded-apple-lg hover:bg-wa-green/10 disabled:opacity-50"
+                  >
+                    {cancelDeletionMutation.isPending ? 'Restoring...' : 'Cancel Deletion'}
+                  </button>
+                  <button
+                    onClick={() => setShowDeleteConfirm(true)}
+                    className="px-2.5 py-1 text-xs bg-red-500 text-white rounded-apple-lg hover:bg-red-600"
+                  >
+                    Purge Now
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Tabs */}
         <div className="flex border-b border-black/5 px-6 flex-shrink-0">
           <button
@@ -528,6 +621,87 @@ Use this only once they are actually on a plan — it removes the trial deadline
               Suspend Tenant
             </button>
           </div>
+        </div>
+      </div>
+    )}
+    {showDeleteConfirm && (
+      <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-[10000] p-4">
+        <div className="bg-white rounded-apple-xl w-full max-w-sm shadow-2xl p-6">
+          <div className="flex items-center gap-2 mb-2">
+            <div className="w-8 h-8 bg-red-500/20 text-red-500 rounded-apple-lg flex items-center justify-center">
+              <Trash2 className="w-4 h-4" />
+            </div>
+            <h3 className="font-semibold text-lg text-ios-dark">Delete {tenant.name}?</h3>
+          </div>
+
+          {tenant.status === 'PENDING_DELETION' ? (
+            <>
+              <p className="text-sm text-ios-muted mb-2">
+                This tenant is already scheduled for deletion
+                {tenant.scheduledPurgeAt && (
+                  <> on {new Date(tenant.scheduledPurgeAt).toLocaleDateString()}</>
+                )}.
+              </p>
+              <p className="text-sm text-red-500 font-medium mb-5">
+                Purging now will permanently destroy all data — messages, contacts, templates, campaigns, users, and credits. This cannot be undone.
+              </p>
+              <div className="flex gap-3">
+                <button
+                  onClick={() => setShowDeleteConfirm(false)}
+                  className="flex-1 px-4 py-2 text-sm font-medium border border-black/10 rounded-apple-lg hover:bg-ios-gray"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={() => purgeMutation.mutate()}
+                  disabled={purgeMutation.isPending}
+                  className="flex-1 px-4 py-2 text-sm font-medium bg-red-500 text-white rounded-apple-lg hover:bg-red-600 disabled:opacity-50"
+                >
+                  {purgeMutation.isPending ? 'Purging...' : 'Purge Now'}
+                </button>
+              </div>
+            </>
+          ) : (
+            <>
+              <p className="text-sm text-ios-muted mb-5">
+                Choose how to proceed. Scheduling gives a 30-day grace period where the tenant can be restored. Force purge permanently destroys all data immediately.
+              </p>
+              <div className="space-y-2">
+                <button
+                  onClick={() => deleteMutation.mutate()}
+                  disabled={deleteMutation.isPending || purgeMutation.isPending}
+                  className="w-full px-4 py-3 text-sm font-medium border border-red-500/30 text-red-500 rounded-apple-lg hover:bg-red-500/10 disabled:opacity-50 text-left"
+                >
+                  <span className="font-semibold">Schedule deletion (30 days)</span>
+                  <br />
+                  <span className="text-xs text-ios-muted">Tenant is marked as pending — can be cancelled anytime within the grace period</span>
+                </button>
+                <button
+                  onClick={() => {
+                    if (confirm(`FINAL WARNING: This will permanently destroy ALL data for "${tenant.name}" right now. This CANNOT be undone. Are you absolutely sure?`)) {
+                      deleteMutation.mutate(undefined, {
+                        onSuccess: () => {
+                          purgeMutation.mutate();
+                        },
+                      });
+                    }
+                  }}
+                  disabled={deleteMutation.isPending || purgeMutation.isPending}
+                  className="w-full px-4 py-3 text-sm font-medium bg-red-500 text-white rounded-apple-lg hover:bg-red-600 disabled:opacity-50 text-left"
+                >
+                  <span className="font-semibold">Force purge immediately</span>
+                  <br />
+                  <span className="text-xs text-white/70">Permanently deletes all tenant data — cannot be undone</span>
+                </button>
+                <button
+                  onClick={() => setShowDeleteConfirm(false)}
+                  className="w-full px-4 py-2 text-sm font-medium border border-black/10 rounded-apple-lg hover:bg-ios-gray"
+                >
+                  Cancel
+                </button>
+              </div>
+            </>
+          )}
         </div>
       </div>
     )}
