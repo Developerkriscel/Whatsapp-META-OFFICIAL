@@ -93,7 +93,7 @@ const sections = {
         paragraphs: [
           'You may submit a refund request within 7 calendar days of the payment date. Include the account email, transaction or order reference, purchase date, and a short explanation when you contact Info@kriscel.com.',
           'We will review each request and notify you of the decision. Submitting a request does not itself cancel an active subscription; request cancellation separately from Billing in your account to prevent future renewals.',
-          'If a refund is approved, it will be returned through the original payment method. The time for the funds to appear depends on the payment provider and your financial institution.',
+          'If a refund is approved, it will be returned through the original payment method within 5-7 business days of approval. The exact time for the funds to appear in your account may vary depending on your financial institution.',
         ],
       },
       {
