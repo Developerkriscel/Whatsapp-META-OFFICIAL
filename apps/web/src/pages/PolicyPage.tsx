@@ -22,9 +22,9 @@ const sections = {
       {
         heading: 'Plans, billing, and cancellation',
         paragraphs: [
-          'Plan features, limits, price, currency, and billing interval are shown before you confirm a purchase. Cashfree plan prices are charged in INR using the configured USD-to-INR rate. Cashfree checkout adds GST at the configured 18% rate to the converted plan price and shows the base price, GST, and total before payment.',
-          'Stripe plan purchases are recurring subscriptions and renew for the selected billing interval until cancelled. You can request cancellation from Billing in your account. Cancellation takes effect at the end of the current paid billing period, and access continues until then.',
-          'Cashfree plan purchases are one-time prepaid purchases for the selected one-month or one-year term. They do not automatically renew. Access ends when the paid term expires unless you purchase another term.',
+          'Plan features, limits, price, currency, and billing interval are shown before you confirm a purchase. Plan prices charged in INR use the configured USD-to-INR conversion rate. Checkout adds GST at the configured 18% rate to the converted plan price and shows the base price, GST, and total before payment.',
+          'Recurring subscription purchases renew for the selected billing interval until cancelled. You can request cancellation from Billing in your account. Cancellation takes effect at the end of the current paid billing period, and access continues until then.',
+          'Prepaid plan purchases are one-time payments for the selected one-month or one-year term and do not automatically renew. Access ends when the paid term expires unless you purchase another term.',
           'Payment processing is handled by the payment provider shown at checkout. You authorize the applicable provider to process the payment for the amount displayed before you confirm.',
         ],
       },
@@ -92,21 +92,21 @@ const sections = {
         heading: 'Refund request window',
         paragraphs: [
           'You may submit a refund request within 7 calendar days of the payment date. Include the account email, transaction or order reference, purchase date, and a short explanation when you contact Info@kriscel.com.',
-          'We will review each request and notify you of the decision. Submitting a request does not itself cancel a Stripe subscription; request cancellation separately from Billing in your account to prevent future renewals.',
+          'We will review each request and notify you of the decision. Submitting a request does not itself cancel an active subscription; request cancellation separately from Billing in your account to prevent future renewals.',
           'If a refund is approved, it will be returned through the original payment method. The time for the funds to appear depends on the payment provider and your financial institution.',
         ],
       },
       {
-        heading: 'Cancelling a Stripe subscription',
+        heading: 'Cancelling a subscription',
         paragraphs: [
-          'You can cancel a Stripe subscription from the Billing page in your account. Cancellation stops future renewals at the end of the current paid billing period; your plan remains available until that period ends.',
+          'You can cancel a subscription from the Billing page in your account. Cancellation stops future renewals at the end of the current paid billing period; your plan remains available until that period ends.',
           'Cancellation alone does not automatically issue a refund. You may separately request a refund within the 7-calendar-day window described above.',
         ],
       },
       {
-        heading: 'Cashfree prepaid plans',
+        heading: 'Prepaid plans',
         paragraphs: [
-          'Cashfree plan purchases are one-time payments for the selected one-month or one-year term and do not auto-renew. The plan remains available through its displayed validity period.',
+          'Prepaid plan purchases are one-time payments for the selected one-month or one-year term and do not auto-renew. The plan remains available through its displayed validity period.',
           'You may submit a refund request within 7 calendar days of the payment date using the process above. Purchasing another term is required to continue service after the current term expires.',
         ],
       },

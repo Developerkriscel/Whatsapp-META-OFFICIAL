@@ -293,7 +293,7 @@ export default function PricingPage() {
                         </p>
                         {interval === 'annual' && <p>Annual total {formatInr(quote!.totalInr)}/year</p>}
                         <p>
-                          Cashfree total {formatInr(quote!.totalInr)}{interval === 'monthly' ? '/month' : '/year'} including GST
+                          Total {formatInr(quote!.totalInr)}{interval === 'monthly' ? '/month' : '/year'} including GST
                         </p>
                       </div>
                     </>
@@ -429,20 +429,20 @@ export default function PricingPage() {
                 a: 'Yes, upgrade or downgrade at any time. Changes are prorated.',
               },
               {
-                q: 'How are Cashfree plan prices calculated?',
-                a: 'Cashfree plan prices are charged in INR using the configured USD-to-INR conversion rate. The amount is rounded to the nearest paise.',
+                q: 'How are plan prices calculated?',
+                a: 'Plan prices are charged in INR using the configured USD-to-INR conversion rate. The amount is rounded to the nearest paise.',
               },
               {
                 q: 'Are taxes included?',
-                a: 'For Cashfree plan checkout, an 18% GST amount is added to the displayed base plan price and itemized before payment.',
+                a: 'An 18% GST amount is added to the displayed base plan price and itemized before payment.',
               },
               {
                 q: 'Can I message my customers?',
                 a: 'The service supports customer communications. You are responsible for obtaining required consent and following WhatsApp, Meta, and applicable messaging rules.',
               },
               {
-                q: 'Do Cashfree plans renew automatically?',
-                a: 'No. Cashfree plan purchases are prepaid for the selected term and do not auto-renew.',
+                q: 'Do prepaid plans renew automatically?',
+                a: 'No. Prepaid plan purchases are for the selected term and do not auto-renew.',
               },
             ].map((faq) => (
               <div key={faq.q} className="card-apple p-5">
@@ -487,7 +487,7 @@ export default function PricingPage() {
       {/* Footer */}
       <footer className="relative py-12 text-center">
         <p className="mx-auto mb-5 max-w-3xl px-4 text-xs text-secondary-apple">
-          Cashfree plan prices are shown in INR using the configured USD-to-INR rate. Checkout adds 18% GST to
+          Plan prices are shown in INR using the configured USD-to-INR rate. Checkout adds 18% GST to
           the base plan price and shows the tax amount and total before payment.
         </p>
         <nav aria-label="Legal and business information" className="mb-4 flex flex-wrap justify-center gap-x-6 gap-y-2 text-sm">

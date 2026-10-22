@@ -24,11 +24,15 @@ export default function ContactPage() {
             Contact us about Kriscel WA, plans, billing, privacy, or payment questions.
           </p>
 
-          <h2 className="mt-8 text-xl font-semibold text-primary-apple">Kriscel Tech Pvt Ltd</h2>
+          <h2 className="mt-8 text-xl font-semibold text-primary-apple">Kriscel Tech Private Limited</h2>
+          <div className="mt-4 flex flex-wrap gap-x-6 gap-y-1 text-sm text-secondary-apple">
+            <span><span className="font-medium text-primary-apple">CIN:</span> U63121DL2026PTC462568</span>
+            <span><span className="font-medium text-primary-apple">GSTIN:</span> 07AAMCK5483E1Z9</span>
+          </div>
           <address className="mt-5 space-y-5 not-italic">
             <p className="flex items-start gap-3 text-secondary-apple">
               <MapPin aria-hidden="true" className="mt-1 h-5 w-5 shrink-0 text-wa-green" />
-              <span>229, Bharthal, Sector 26, Dwarka, South West Delhi, 110077, India</span>
+              <span>Plot No 229, Bharthal, Near Dada Deepu Chowk, Sector 26, Dwarka, South West Delhi, 110077, India</span>
             </p>
             <p className="flex items-center gap-3 text-secondary-apple">
               <Phone aria-hidden="true" className="h-5 w-5 shrink-0 text-wa-green" />
