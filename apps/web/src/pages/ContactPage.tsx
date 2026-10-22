@@ -43,6 +43,21 @@ export default function ContactPage() {
               <a className="hover:text-wa-green" href="mailto:Info@kriscel.com">Info@kriscel.com</a>
             </p>
           </address>
+
+          <hr className="my-8 border-black/5" />
+
+          <h2 className="text-xl font-semibold text-primary-apple">Grievance Officer</h2>
+          <div className="mt-4 space-y-3 text-secondary-apple">
+            <p><span className="font-medium text-primary-apple">Name:</span> Sunny (Director)</p>
+            <p className="flex items-center gap-3">
+              <Mail aria-hidden="true" className="h-5 w-5 shrink-0 text-wa-green" />
+              <a className="hover:text-wa-green" href="mailto:info@kriscel.com">info@kriscel.com</a>
+            </p>
+            <p className="flex items-center gap-3">
+              <Phone aria-hidden="true" className="h-5 w-5 shrink-0 text-wa-green" />
+              <a className="hover:text-wa-green" href="tel:+919971364324">+91 99713 64324</a>
+            </p>
+          </div>
         </article>
       </div>
     </main>
