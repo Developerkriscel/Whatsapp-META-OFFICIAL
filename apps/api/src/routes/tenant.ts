@@ -2986,7 +2986,7 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
         samplePath: z.string().optional(),
       }).optional(),
       footer: z.string().optional(),
-      buttons: z.array(z.object({ type: z.string(), text: z.string() })).optional(),
+      buttons: z.array(z.object({ type: z.string(), text: z.string(), url: z.string().optional(), phone_number: z.string().optional() })).optional(),
       // Which connected number's WABA to submit this under — required to
       // disambiguate when a tenant has numbers on more than one WABA;
       // optional (and auto-resolved at submit time) for the common
@@ -3059,7 +3059,7 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
       body: z.object({ text: z.string() }).optional(),
       header: z.object({ type: z.string(), text: z.string().optional() }).optional().nullable(),
       footer: z.string().optional().nullable(),
-      buttons: z.array(z.object({ type: z.string(), text: z.string() })).optional().nullable(),
+      buttons: z.array(z.object({ type: z.string(), text: z.string(), url: z.string().optional(), phone_number: z.string().optional() })).optional().nullable(),
       status: z.enum(['DRAFT', 'PENDING', 'APPROVED', 'REJECTED']).optional(),
     }).parse(request.body);
 
@@ -3337,7 +3337,10 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
           ...(template.body as any),
           ...(bodyVars.length ? { example: { body_text: [bodyVars.map(exampleFor)] } } : {}),
         });
-        if (template.footer) components.push({ type: 'FOOTER', ...(template.footer as any) });
+        if (template.footer) {
+          const footerText = typeof template.footer === 'string' ? template.footer : (template.footer as any).text;
+          if (footerText) components.push({ type: 'FOOTER', text: footerText });
+        }
         if (template.buttons) components.push({ type: 'BUTTONS', buttons: template.buttons as any });
 
         const metaResult = await submitTemplateToMeta(metaToken, effectiveWabaId, {

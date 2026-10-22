@@ -168,7 +168,12 @@ export default function CreateTemplatePage() {
       if (buttons.length > 0) {
         payload.buttons = buttons
           .filter(b => b.text.trim())
-          .map(b => ({ type: b.type, text: b.text }));
+          .map(b => {
+            const btn: any = { type: b.type, text: b.text };
+            if (b.type === 'URL' && b.url) btn.url = b.url;
+            if (b.type === 'PHONE_NUMBER' && b.phone_number) btn.phone_number = b.phone_number;
+            return btn;
+          });
       }
 
       if (headerType === 'TEXT' && headerText.trim()) {
