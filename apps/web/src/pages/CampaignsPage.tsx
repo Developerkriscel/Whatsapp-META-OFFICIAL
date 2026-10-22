@@ -159,6 +159,8 @@ export default function CampaignsPage() {
   const [phoneSetupSelectedId, setPhoneSetupSelectedId] = useState('');
   const [templateSetupCampaignId, setTemplateSetupCampaignId] = useState<string | null>(null);
   const [templateSetupSelectedId, setTemplateSetupSelectedId] = useState('');
+  const [mediaSetupCampaignId, setMediaSetupCampaignId] = useState<string | null>(null);
+  const [mediaSetupFormat, setMediaSetupFormat] = useState('');
   const [notification, setNotification] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
   const queryClient = useQueryClient();
 
@@ -375,6 +377,11 @@ export default function CampaignsPage() {
         setTemplateSetupSelectedId('');
         return;
       }
+      if (error.response?.data?.error?.code === 'TEMPLATE_NEEDS_MEDIA') {
+        setMediaSetupCampaignId(campaignId);
+        setMediaSetupFormat(error.response?.data?.error?.requiredFormat || 'IMAGE');
+        return;
+      }
       if (error.response?.data?.error?.code === 'NO_PHONE') {
         setPhoneSetupCampaignId(campaignId);
         setPhoneSetupSelectedId('');
@@ -398,6 +405,29 @@ export default function CampaignsPage() {
     },
     onError: (error: any) => {
       const message = error.response?.data?.error?.message || 'Failed to assign template';
+      showNotification('error', message);
+    },
+  });
+
+  const assignCampaignMediaMutation = useMutation({
+    mutationFn: async ({ campaignId, file }: { campaignId: string; file: File }) => {
+      const body = new FormData();
+      body.append('file', file);
+      const res = await api.post('/uploads/campaign-media', body, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+      });
+      const uploaded = res.data?.data;
+      await api.patch(`/campaigns/${campaignId}`, { mediaUrl: uploaded.url, mediaPath: uploaded.path });
+      return campaignId;
+    },
+    onSuccess: (campaignId) => {
+      setMediaSetupCampaignId(null);
+      setMediaSetupFormat('');
+      queryClient.invalidateQueries({ queryKey: ['campaigns'] });
+      sendMutation.mutate(campaignId);
+    },
+    onError: (error: any) => {
+      const message = error.response?.data?.error?.message || 'Failed to upload media';
       showNotification('error', message);
     },
   });
@@ -1015,6 +1045,61 @@ export default function CampaignsPage() {
                   >
                     {assignCampaignTemplateMutation.isPending ? 'Saving…' : 'Save template & launch'}
                   </button>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {mediaSetupCampaignId && (
+          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-[9999] p-4">
+            <div className="bg-white rounded-apple-xl w-full max-w-md p-6 shadow-2xl">
+              <div className="flex items-start justify-between gap-4 mb-2">
+                <div>
+                  <h3 className="text-lg font-semibold text-ios-dark">Attach {mediaSetupFormat === 'VIDEO' ? 'a video' : mediaSetupFormat === 'DOCUMENT' ? 'a document' : 'an image'}</h3>
+                  <p className="text-sm text-ios-secondary mt-1">
+                    This campaign's template requires {mediaSetupFormat === 'VIDEO' ? 'a video' : mediaSetupFormat === 'DOCUMENT' ? 'a document' : 'an image'} header. Upload one to continue.
+                  </p>
+                </div>
+                <button
+                  onClick={() => { setMediaSetupCampaignId(null); setMediaSetupFormat(''); }}
+                  className="p-1 hover:bg-ios-gray rounded-apple-lg"
+                  aria-label="Close media upload"
+                >
+                  <X className="w-5 h-5 text-ios-muted" />
+                </button>
+              </div>
+
+              <div className="mt-4">
+                <label className="flex flex-col items-center justify-center gap-3 p-8 border-2 border-dashed border-black/15 rounded-apple-lg cursor-pointer hover:border-wa-green/50 hover:bg-wa-green/5 transition">
+                  <Image className="w-10 h-10 text-ios-muted" />
+                  <span className="text-sm text-ios-secondary">Click to select {mediaSetupFormat === 'VIDEO' ? 'a video' : mediaSetupFormat === 'DOCUMENT' ? 'a file' : 'an image'}</span>
+                  <input
+                    type="file"
+                    className="hidden"
+                    accept={mediaSetupFormat === 'VIDEO' ? 'video/*' : mediaSetupFormat === 'DOCUMENT' ? '.pdf' : 'image/*'}
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      if (file && mediaSetupCampaignId) {
+                        assignCampaignMediaMutation.mutate({ campaignId: mediaSetupCampaignId, file });
+                      }
+                    }}
+                  />
+                </label>
+              </div>
+
+              <div className="flex justify-end gap-2 mt-5">
+                <button
+                  onClick={() => { setMediaSetupCampaignId(null); setMediaSetupFormat(''); }}
+                  className="btn-apple btn-apple-outline"
+                >
+                  Cancel
+                </button>
+                {assignCampaignMediaMutation.isPending && (
+                  <span className="flex items-center gap-2 text-sm text-ios-muted">
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    Uploading…
+                  </span>
                 )}
               </div>
             </div>
