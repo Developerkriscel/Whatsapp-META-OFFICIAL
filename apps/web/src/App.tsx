@@ -177,6 +177,7 @@ function App() {
         <Route path="/terms" element={<PolicyPage type="terms" />} />
         <Route path="/privacy" element={<PolicyPage type="privacy" />} />
         <Route path="/refund-policy" element={<PolicyPage type="refund" />} />
+        <Route path="/refund" element={<Navigate to="/refund-policy" replace />} />
         <Route path="/" element={<HomeRoute />} />
 
         {/* Super Admin routes */}
