@@ -352,6 +352,59 @@ export async function registerSuperadminCreditRoutes(app: FastifyInstance): Prom
   });
 
   // ============================================
+  // GET ALL TENANT TRANSACTIONS (paginated)
+  // ============================================
+
+  app.get('/tenants/:tenantId/transactions', async (request, reply) => {
+    const { tenantId } = z.object({ tenantId: z.string() }).parse(request.params);
+    const query = z.object({
+      limit: z.coerce.number().min(1).max(5000).default(5000),
+      offset: z.coerce.number().min(0).default(0),
+    }).parse(request.query);
+
+    const credit = await app.prisma.tenantCredit.findUnique({
+      where: { tenantId },
+      select: { id: true },
+    });
+
+    if (!credit) {
+      return reply.status(404).send({ success: false, error: { code: 'NOT_FOUND' } });
+    }
+
+    const [transactions, total] = await Promise.all([
+      app.prisma.tenantCreditTransaction.findMany({
+        where: { credit: { tenantId } },
+        orderBy: { createdAt: 'asc' },
+        skip: query.offset,
+        take: query.limit,
+        select: {
+          id: true,
+          type: true,
+          amount: true,
+          description: true,
+          referenceId: true,
+          referenceType: true,
+          balanceAfter: true,
+          createdAt: true,
+        },
+      }),
+      app.prisma.tenantCreditTransaction.count({
+        where: { credit: { tenantId } },
+      }),
+    ]);
+
+    return {
+      success: true,
+      data: {
+        transactions,
+        total,
+        limit: query.limit,
+        offset: query.offset,
+      },
+    };
+  });
+
+  // ============================================
   // ADD CREDITS TO TENANT
   // ============================================
 
