@@ -1598,6 +1598,40 @@ export async function registerSuperadminRoutes(app: FastifyInstance): Promise<vo
   });
 
   // ============================================
+  // RECOUNT ALL CAMPAIGNS FOR A TENANT
+  // ============================================
+
+  app.post('/tenants/:tenantId/recount-campaigns', async (request, reply) => {
+    const { tenantId } = z.object({ tenantId: z.string() }).parse(request.params);
+
+    const campaigns = await app.prisma.campaign.findMany({
+      where: { tenantId },
+      select: { id: true, name: true },
+    });
+
+    const { recountCampaign } = await import('./tenant.js');
+    const results = [];
+
+    for (const campaign of campaigns) {
+      const stats = await recountCampaign(app, campaign.id);
+      results.push({ id: campaign.id, name: campaign.name, ...stats });
+    }
+
+    const totalSent = results.reduce((s, r) => s + r.sent, 0);
+    const totalDelivered = results.reduce((s, r) => s + r.delivered, 0);
+    const totalFailed = results.reduce((s, r) => s + r.failed, 0);
+
+    return {
+      success: true,
+      data: {
+        campaignsRecounted: results.length,
+        totals: { sent: totalSent, delivered: totalDelivered, failed: totalFailed },
+        campaigns: results,
+      },
+    };
+  });
+
+  // ============================================
   // DELETE TENANT USER
   // ============================================
 

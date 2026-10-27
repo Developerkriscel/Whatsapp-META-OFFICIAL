@@ -485,23 +485,19 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
         where: {
           tenantId,
           direction: 'OUTGOING',
+          status: { in: ['SENT', 'DELIVERED', 'READ'] },
           createdAt: { gte: new Date(new Date().setDate(1)) },
         },
       }),
       app.prisma.user.count({ where: { tenantId, isActive: true, role: { in: ['AGENT', 'MANAGER', 'ADMIN', 'OWNER'] } } }),
     ]);
 
-    // Calculate delivery rate
     const messageStats = await app.prisma.message.groupBy({
       by: ['status'],
-      where: { tenantId, direction: 'OUTGOING', createdAt: { gte: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) } },
+      where: { tenantId, direction: 'OUTGOING', status: { in: ['SENT', 'DELIVERED', 'READ'] }, createdAt: { gte: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) } },
       _count: true,
     });
 
-    // status is terminal, not cumulative: a message that was read is READ, not
-    // DELIVERED. Counting only DELIVERED excluded every message that had been
-    // read, which is why the dashboard could show a read rate higher than its
-    // delivery rate — impossible, since reading requires delivery.
     const countOf = (...wanted: string[]) =>
       messageStats.filter((m) => wanted.includes(m.status)).reduce((n, m) => n + m._count, 0);
 
@@ -669,6 +665,7 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
         where: {
           tenantId,
           direction: 'OUTGOING',
+          status: { in: ['SENT', 'DELIVERED', 'READ'] },
           createdAt: { gte: new Date(new Date().setDate(1)) },
         },
       }),
@@ -677,14 +674,10 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
 
     const messageStats = await app.prisma.message.groupBy({
       by: ['status'],
-      where: { tenantId, direction: 'OUTGOING', createdAt: { gte: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) } },
+      where: { tenantId, direction: 'OUTGOING', status: { in: ['SENT', 'DELIVERED', 'READ'] }, createdAt: { gte: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) } },
       _count: true,
     });
 
-    // status is terminal, not cumulative: a message that was read is READ, not
-    // DELIVERED. Counting only DELIVERED excluded every message that had been
-    // read, which is why the dashboard could show a read rate higher than its
-    // delivery rate — impossible, since reading requires delivery.
     const countOf = (...wanted: string[]) =>
       messageStats.filter((m) => wanted.includes(m.status)).reduce((n, m) => n + m._count, 0);
 

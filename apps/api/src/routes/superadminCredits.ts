@@ -405,6 +405,185 @@ export async function registerSuperadminCreditRoutes(app: FastifyInstance): Prom
   });
 
   // ============================================
+  // TENANT LEDGER — Day-by-day credit + campaign breakdown
+  // ============================================
+
+  app.get('/tenants/:tenantId/ledger', async (request, reply) => {
+    const { tenantId } = z.object({ tenantId: z.string() }).parse(request.params);
+
+    const tenant = await app.prisma.tenant.findUnique({
+      where: { id: tenantId },
+      select: { id: true, name: true },
+    });
+    if (!tenant) {
+      return reply.status(404).send({ success: false, error: { code: 'NOT_FOUND' } });
+    }
+
+    const credit = await app.prisma.tenantCredit.findUnique({
+      where: { tenantId },
+      select: { id: true, balance: true, totalPurchased: true, totalUsed: true },
+    });
+
+    // Get the meta cost rate (India default)
+    const indiaRate = await app.prisma.creditRate.findFirst({
+      where: { countryCode: 'IN', isActive: true },
+      select: { marketingCredits: true, metaMarketingCredits: true },
+    });
+    const ourChargePerMsg = indiaRate?.marketingCredits ?? 114;
+    const metaCostPerMsg = indiaRate?.metaMarketingCredits ?? 87;
+
+    const [transactions, campaigns, messageCounts] = await Promise.all([
+      app.prisma.tenantCreditTransaction.findMany({
+        where: { credit: { tenantId } },
+        orderBy: { createdAt: 'asc' },
+        select: {
+          id: true,
+          type: true,
+          amount: true,
+          description: true,
+          referenceId: true,
+          referenceType: true,
+          balanceAfter: true,
+          createdAt: true,
+        },
+      }),
+      app.prisma.campaign.findMany({
+        where: { tenantId, status: { not: 'DRAFT' } },
+        orderBy: { createdAt: 'asc' },
+        select: {
+          id: true,
+          name: true,
+          status: true,
+          totalRecipients: true,
+          totalSent: true,
+          totalDelivered: true,
+          totalRead: true,
+          totalFailed: true,
+          createdAt: true,
+          completedAt: true,
+        },
+      }),
+      app.prisma.message.groupBy({
+        by: ['status'],
+        where: { tenantId, direction: 'OUTGOING' },
+        _count: { _all: true },
+      }),
+    ]);
+
+    // Build campaign map by ID for quick lookup
+    const campaignMap = new Map(campaigns.map(c => [c.id, c]));
+
+    // Build day-by-day map
+    type DayEntry = {
+      txns: typeof transactions;
+      campaignIds: Set<string>;
+    };
+    const dayMap: Record<string, DayEntry> = {};
+
+    const ensureDay = (day: string) => {
+      if (!dayMap[day]) dayMap[day] = { txns: [], campaignIds: new Set() };
+    };
+
+    for (const txn of transactions) {
+      const day = txn.createdAt.toISOString().slice(0, 10);
+      ensureDay(day);
+      dayMap[day].txns.push(txn);
+      if (txn.referenceId && campaignMap.has(txn.referenceId)) {
+        dayMap[day].campaignIds.add(txn.referenceId);
+      }
+    }
+
+    // Also ensure campaigns without transactions show up
+    for (const camp of campaigns) {
+      const day = camp.createdAt.toISOString().slice(0, 10);
+      ensureDay(day);
+      dayMap[day].campaignIds.add(camp.id);
+    }
+
+    const days = Object.entries(dayMap)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([date, data]) => {
+        const lastTxn = data.txns[data.txns.length - 1];
+
+        // Sum charges and refunds for this day
+        let charged = 0;
+        let refunded = 0;
+        let creditIn = 0;
+        for (const t of data.txns) {
+          if (t.type === 'USAGE' && t.amount < 0) charged += Math.abs(t.amount);
+          else if (t.type === 'REFUND' && t.amount > 0) refunded += t.amount;
+          else if (t.amount > 0) creditIn += t.amount;
+        }
+
+        const netCost = charged - refunded;
+
+        // Get campaigns for this day
+        const dayCampaigns = [...data.campaignIds]
+          .map(id => campaignMap.get(id))
+          .filter(Boolean)
+          .map(c => ({
+            name: c!.name,
+            recipients: c!.totalRecipients,
+            sent: c!.totalSent,
+            failed: c!.totalFailed,
+            delivered: c!.totalDelivered,
+          }));
+
+        // Derive delivered count from what we charged (more reliable than stale campaign counters)
+        const chargedMsgCount = ourChargePerMsg > 0 ? Math.round(charged / ourChargePerMsg) : 0;
+        const metaCost = chargedMsgCount * metaCostPerMsg;
+        const ourProfit = netCost - metaCost;
+
+        return {
+          date,
+          campaigns: dayCampaigns,
+          weCharged: charged,
+          refunded,
+          netCost,
+          metaCost,
+          ourProfit,
+          balance: lastTxn?.balanceAfter ?? null,
+          creditIn,
+        };
+      });
+
+    // Message totals
+    const msgCount = (st: string) => messageCounts.find(m => m.status === st)?._count._all ?? 0;
+    const totalSent = msgCount('SENT') + msgCount('DELIVERED') + msgCount('READ');
+    const totalDelivered = msgCount('DELIVERED') + msgCount('READ');
+    const totalRead = msgCount('READ');
+    const totalFailed = msgCount('FAILED');
+
+    // Grand totals
+    const totalWeCharged = days.reduce((s, d) => s + d.weCharged, 0);
+    const totalRefunded = days.reduce((s, d) => s + d.refunded, 0);
+    const totalNetCost = days.reduce((s, d) => s + d.netCost, 0);
+    const totalMetaCost = days.reduce((s, d) => s + d.metaCost, 0);
+    const totalProfit = totalNetCost - totalMetaCost;
+
+    return {
+      success: true,
+      data: {
+        tenant: { id: tenant.id, name: tenant.name },
+        balance: credit?.balance ?? 0,
+        totalPurchased: credit?.totalPurchased ?? 0,
+        totalUsed: credit?.totalUsed ?? 0,
+        ourChargePerMsg,
+        metaCostPerMsg,
+        messages: { sent: totalSent, delivered: totalDelivered, read: totalRead, failed: totalFailed },
+        totals: {
+          weCharged: totalWeCharged,
+          refunded: totalRefunded,
+          netCost: totalNetCost,
+          metaCost: totalMetaCost,
+          profit: totalProfit,
+        },
+        days,
+      },
+    };
+  });
+
+  // ============================================
   // ADD CREDITS TO TENANT
   // ============================================
 

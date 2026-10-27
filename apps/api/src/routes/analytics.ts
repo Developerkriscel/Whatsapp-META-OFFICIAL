@@ -47,11 +47,11 @@ export async function registerInsightsRoutes(app: FastifyInstance): Promise<void
       // WhatsApp health
       phoneNumbers,
     ] = await Promise.all([
-      // Messages
-      app.prisma.message.count({ where: { tenantId, direction: 'OUTGOING' } }),
-      app.prisma.message.count({ where: { tenantId, direction: 'OUTGOING', createdAt: { gte: today } } }),
-      app.prisma.message.count({ where: { tenantId, direction: 'OUTGOING', createdAt: { gte: weekAgo } } }),
-      app.prisma.message.count({ where: { tenantId, direction: 'OUTGOING', createdAt: { gte: monthAgo } } }),
+      // Messages — only count what actually left the platform (matches superadmin dashboard)
+      app.prisma.message.count({ where: { tenantId, direction: 'OUTGOING', status: { in: ['SENT', 'DELIVERED', 'READ'] } } }),
+      app.prisma.message.count({ where: { tenantId, direction: 'OUTGOING', status: { in: ['SENT', 'DELIVERED', 'READ'] }, createdAt: { gte: today } } }),
+      app.prisma.message.count({ where: { tenantId, direction: 'OUTGOING', status: { in: ['SENT', 'DELIVERED', 'READ'] }, createdAt: { gte: weekAgo } } }),
+      app.prisma.message.count({ where: { tenantId, direction: 'OUTGOING', status: { in: ['SENT', 'DELIVERED', 'READ'] }, createdAt: { gte: monthAgo } } }),
       // Contacts
       app.prisma.contact.count({ where: { tenantId, isActive: true } }),
       app.prisma.contact.count({ where: { tenantId, isActive: true, consentStatus: 'OPTED_IN' } }),

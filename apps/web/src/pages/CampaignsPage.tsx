@@ -55,6 +55,7 @@ interface Campaign {
   sent: number;
   delivered: number;
   read: number;
+  failed: number;
   scheduledAt?: string;
   sentAt?: string;
   createdAt: string;
@@ -466,6 +467,7 @@ export default function CampaignsPage() {
     sent: c.totalSent || 0,
     delivered: c.totalDelivered || 0,
     read: c.totalRead || 0,
+    failed: c.totalFailed || 0,
     scheduledAt: c.scheduledAt,
     sentAt: c.completedAt,
     createdAt: c.createdAt,
@@ -780,7 +782,7 @@ export default function CampaignsPage() {
               <div>
                 <p className="text-sm text-ios-muted">Failed</p>
                 <p className="text-xl font-bold text-ios-dark">
-                  {campaigns.filter(c => ['failed', 'cancelled'].includes(c.status)).length}
+                  {campaigns.reduce((sum, c) => sum + c.failed, 0).toLocaleString()}
                 </p>
               </div>
             </div>

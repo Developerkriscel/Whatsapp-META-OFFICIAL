@@ -271,7 +271,7 @@ interface TenantDetailModalProps {
 }
 
 function TenantDetailModal({ tenantId, onClose }: TenantDetailModalProps) {
-  const [tab, setTab] = useState<'overview' | 'users' | 'credits' | 'billing'>('overview');
+  const [tab, setTab] = useState<'overview' | 'users' | 'credits' | 'billing' | 'ledger'>('overview');
   const [showSuspendConfirm, setShowSuspendConfirm] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const queryClient = useQueryClient();
@@ -585,6 +585,16 @@ Use this only once they are actually on a plan — it removes the trial deadline
           >
             Billing
           </button>
+          <button
+            onClick={() => setTab('ledger')}
+            className={`px-4 py-3 text-sm font-medium border-b-2 transition ${
+              tab === 'ledger' ? 'border-wa-green text-wa-green' : 'border-transparent text-ios-secondary hover:text-ios-dark'
+            }`}
+          >
+            <span className="flex items-center gap-1.5">
+              <FileText className="w-4 h-4" /> Ledger
+            </span>
+          </button>
         </div>
 
         {/* Tab Content */}
@@ -593,6 +603,7 @@ Use this only once they are actually on a plan — it removes the trial deadline
           {tab === 'users' && <UsersTab tenantId={tenantId} users={tenant.users || []} />}
           {tab === 'credits' && <CreditsTab tenantId={tenantId} tenantName={tenant.name} />}
           {tab === 'billing' && <BillingTab tenantId={tenantId} tenant={tenant} />}
+          {tab === 'ledger' && <LedgerTab tenantId={tenantId} tenantName={tenant.name} />}
         </div>
       </div>
     </div>
@@ -1829,6 +1840,174 @@ function BillingTab({ tenantId, tenant }: { tenantId: string; tenant: any }) {
         </div>,
         document.body,
       )}
+    </div>
+  );
+}
+
+// ============================================
+// Ledger Tab — Day-by-day credit + campaign log
+// ============================================
+
+function LedgerTab({ tenantId, tenantName }: { tenantId: string; tenantName: string }) {
+  const { data, isLoading } = useQuery({
+    queryKey: ['tenant-ledger', tenantId],
+    queryFn: async () => {
+      const r = await api.get(`/superadmin/tenants/${tenantId}/ledger`);
+      return r.data.data;
+    },
+    enabled: !!tenantId,
+  });
+
+  if (isLoading) {
+    return <div className="text-center py-12 text-ios-muted">Loading ledger...</div>;
+  }
+
+  if (!data || !data.days?.length) {
+    return <div className="text-center py-12 text-ios-muted">No credit activity found for this tenant.</div>;
+  }
+
+  const { balance, totalPurchased, totalUsed, messages, totals, ourChargePerMsg, metaCostPerMsg, days } = data;
+
+  const fmt = (paise: number) => {
+    const neg = paise < 0;
+    const abs = Math.abs(paise);
+    const rs = (abs / 100).toFixed(2);
+    return `${neg ? '-' : ''}₹${Number(rs).toLocaleString('en-IN', { minimumFractionDigits: 2 })}`;
+  };
+
+  const profitPct = totals?.netCost > 0 ? Math.round((totals.profit / totals.netCost) * 100) : 0;
+
+  return (
+    <div className="space-y-5">
+      {/* Summary Cards */}
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+        <div className="card-apple p-3 text-center">
+          <p className="text-xs text-ios-muted uppercase tracking-wide">Credits Given</p>
+          <p className="text-lg font-bold text-blue-600 mt-1">{fmt(totalPurchased ?? 0)}</p>
+        </div>
+        <div className="card-apple p-3 text-center">
+          <p className="text-xs text-ios-muted uppercase tracking-wide">Net Consumed</p>
+          <p className="text-lg font-bold text-red-500 mt-1">{fmt(totals?.netCost ?? 0)}</p>
+        </div>
+        <div className="card-apple p-3 text-center">
+          <p className="text-xs text-ios-muted uppercase tracking-wide">Meta Cost</p>
+          <p className="text-lg font-bold text-amber-600 mt-1">{fmt(totals?.metaCost ?? 0)}</p>
+        </div>
+        <div className="card-apple p-3 text-center">
+          <p className="text-xs text-ios-muted uppercase tracking-wide">Your Profit</p>
+          <p className={`text-lg font-bold mt-1 ${(totals?.profit ?? 0) >= 0 ? 'text-green-600' : 'text-red-500'}`}>{fmt(totals?.profit ?? 0)}</p>
+        </div>
+        <div className="card-apple p-3 text-center">
+          <p className="text-xs text-ios-muted uppercase tracking-wide">Balance</p>
+          <p className="text-lg font-bold text-purple-600 mt-1">{fmt(balance ?? 0)}</p>
+        </div>
+      </div>
+
+      {/* Rate Info */}
+      <div className="flex gap-4 text-xs text-ios-muted px-1">
+        <span>We charge: <strong className="text-ios-dark">{fmt(ourChargePerMsg)}/msg</strong></span>
+        <span>Meta costs: <strong className="text-ios-dark">{fmt(metaCostPerMsg)}/msg</strong></span>
+        <span>Margin: <strong className={profitPct >= 0 ? 'text-green-600' : 'text-red-500'}>{profitPct}%</strong></span>
+      </div>
+
+      {/* Day-by-day Table */}
+      <div className="card-apple overflow-hidden">
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="bg-gray-50 dark:bg-gray-800/50">
+                <th className="text-left px-2 py-2 font-semibold text-ios-muted uppercase text-[10px] tracking-wider">Date</th>
+                <th className="text-left px-2 py-2 font-semibold text-ios-muted uppercase text-[10px] tracking-wider">Campaign</th>
+                <th className="text-right px-2 py-2 font-semibold text-ios-muted uppercase text-[10px] tracking-wider">Rcpt</th>
+                <th className="text-right px-2 py-2 font-semibold text-ios-muted uppercase text-[10px] tracking-wider">Sent</th>
+                <th className="text-right px-2 py-2 font-semibold text-ios-muted uppercase text-[10px] tracking-wider">Fail</th>
+                <th className="text-right px-2 py-2 font-semibold text-ios-muted uppercase text-[10px] tracking-wider">We Charged</th>
+                <th className="text-right px-2 py-2 font-semibold text-green-600 uppercase text-[10px] tracking-wider">Refunded</th>
+                <th className="text-right px-2 py-2 font-semibold text-ios-muted uppercase text-[10px] tracking-wider">Net Cost</th>
+                <th className="text-right px-2 py-2 font-semibold text-amber-600 uppercase text-[10px] tracking-wider">Meta Cost</th>
+                <th className="text-right px-2 py-2 font-semibold text-ios-muted uppercase text-[10px] tracking-wider">Our Profit</th>
+                <th className="text-right px-2 py-2 font-semibold text-ios-muted uppercase text-[10px] tracking-wider">Balance</th>
+              </tr>
+            </thead>
+            <tbody>
+              {days.map((day: any, i: number) => {
+                const hasCreditIn = day.creditIn > 0;
+                const camps: any[] = day.campaigns || [];
+                const bgClass = hasCreditIn ? 'bg-green-50 dark:bg-green-900/20' : i % 2 === 0 ? 'bg-white dark:bg-transparent' : 'bg-gray-50/50 dark:bg-gray-800/20';
+
+                // Credit-in row (bonus/purchase)
+                const rows: any[] = [];
+
+                if (hasCreditIn) {
+                  rows.push(
+                    <tr key={`${day.date}-credit`} className="border-t border-gray-100 dark:border-gray-700/50 bg-green-50 dark:bg-green-900/20">
+                      <td className="px-2 py-1.5 font-medium whitespace-nowrap">{day.date}</td>
+                      <td className="px-2 py-1.5 text-green-600 font-medium" colSpan={4}>+ {fmt(day.creditIn)} credited</td>
+                      <td className="px-2 py-1.5" colSpan={5}></td>
+                      <td className="px-2 py-1.5 text-right font-semibold">{day.balance != null ? fmt(day.balance) : ''}</td>
+                    </tr>
+                  );
+                }
+
+                if (camps.length > 0) {
+                  camps.forEach((c: any, ci: number) => {
+                    rows.push(
+                      <tr key={`${day.date}-c${ci}`} className={`border-t border-gray-100 dark:border-gray-700/50 ${bgClass}`}>
+                        <td className="px-2 py-1.5 font-medium whitespace-nowrap">{hasCreditIn ? '' : (ci === 0 ? day.date : '')}</td>
+                        <td className="px-2 py-1.5 truncate max-w-[120px]" title={c.name}>{c.name}</td>
+                        <td className="px-2 py-1.5 text-right">{c.recipients}</td>
+                        <td className="px-2 py-1.5 text-right">{c.sent}</td>
+                        <td className="px-2 py-1.5 text-right text-red-500">{c.failed || ''}</td>
+                        {ci === 0 && (
+                          <>
+                            <td className="px-2 py-1.5 text-right" rowSpan={camps.length}>{day.weCharged > 0 ? fmt(day.weCharged) : ''}</td>
+                            <td className="px-2 py-1.5 text-right text-green-600" rowSpan={camps.length}>{day.refunded > 0 ? fmt(day.refunded) : ''}</td>
+                            <td className="px-2 py-1.5 text-right font-medium" rowSpan={camps.length}>{day.netCost > 0 ? fmt(day.netCost) : ''}</td>
+                            <td className="px-2 py-1.5 text-right text-amber-600" rowSpan={camps.length}>{day.metaCost > 0 ? fmt(day.metaCost) : ''}</td>
+                            <td className={`px-2 py-1.5 text-right font-semibold ${day.ourProfit >= 0 ? 'text-green-600' : 'text-red-500'}`} rowSpan={camps.length}>
+                              {day.netCost > 0 || day.metaCost > 0 ? fmt(day.ourProfit) : ''}
+                            </td>
+                            <td className="px-2 py-1.5 text-right font-semibold" rowSpan={camps.length}>{!hasCreditIn && day.balance != null ? fmt(day.balance) : ''}</td>
+                          </>
+                        )}
+                      </tr>
+                    );
+                  });
+                } else if (!hasCreditIn) {
+                  // Refund-only or other transaction day
+                  rows.push(
+                    <tr key={day.date} className={`border-t border-gray-100 dark:border-gray-700/50 ${bgClass}`}>
+                      <td className="px-2 py-1.5 font-medium whitespace-nowrap">{day.date}</td>
+                      <td className="px-2 py-1.5 text-ios-muted italic">(refunds/adjustments)</td>
+                      <td className="px-2 py-1.5 text-right text-ios-muted">—</td>
+                      <td className="px-2 py-1.5 text-right text-ios-muted">—</td>
+                      <td className="px-2 py-1.5 text-right text-ios-muted">—</td>
+                      <td className="px-2 py-1.5 text-right">{day.weCharged > 0 ? fmt(day.weCharged) : ''}</td>
+                      <td className="px-2 py-1.5 text-right text-green-600">{day.refunded > 0 ? fmt(day.refunded) : ''}</td>
+                      <td className="px-2 py-1.5 text-right font-medium">{day.netCost !== 0 ? fmt(day.netCost) : ''}</td>
+                      <td className="px-2 py-1.5 text-right text-amber-600"></td>
+                      <td className="px-2 py-1.5 text-right"></td>
+                      <td className="px-2 py-1.5 text-right font-semibold">{day.balance != null ? fmt(day.balance) : ''}</td>
+                    </tr>
+                  );
+                }
+
+                return rows;
+              })}
+              {/* Grand Total Row */}
+              <tr className="border-t-2 border-gray-300 dark:border-gray-600 bg-gray-100 dark:bg-gray-800 font-bold">
+                <td className="px-2 py-2" colSpan={5}>TOTAL</td>
+                <td className="px-2 py-2 text-right">{fmt(totals?.weCharged ?? 0)}</td>
+                <td className="px-2 py-2 text-right text-green-600">{fmt(totals?.refunded ?? 0)}</td>
+                <td className="px-2 py-2 text-right">{fmt(totals?.netCost ?? 0)}</td>
+                <td className="px-2 py-2 text-right text-amber-600">{fmt(totals?.metaCost ?? 0)}</td>
+                <td className={`px-2 py-2 text-right ${(totals?.profit ?? 0) >= 0 ? 'text-green-600' : 'text-red-500'}`}>{fmt(totals?.profit ?? 0)}</td>
+                <td className="px-2 py-2 text-right">{fmt(balance ?? 0)}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
     </div>
   );
 }
