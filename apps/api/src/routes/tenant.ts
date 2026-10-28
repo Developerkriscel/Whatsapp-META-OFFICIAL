@@ -3334,7 +3334,17 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
           const footerText = typeof template.footer === 'string' ? template.footer : (template.footer as any).text;
           if (footerText) components.push({ type: 'FOOTER', text: footerText });
         }
-        if (template.buttons) components.push({ type: 'BUTTONS', buttons: template.buttons as any });
+        if (template.buttons) {
+          const sanitizedButtons = (template.buttons as any[]).map((btn: any) => {
+            if (btn.type === 'PHONE_NUMBER' && btn.phone_number) {
+              let num = btn.phone_number.replace(/[\s\-\(\)\.]/g, '');
+              if (!num.startsWith('+')) num = '+' + num;
+              return { ...btn, phone_number: num };
+            }
+            return btn;
+          });
+          components.push({ type: 'BUTTONS', buttons: sanitizedButtons });
+        }
 
         const metaResult = await submitTemplateToMeta(metaToken, effectiveWabaId, {
           name: template.name,

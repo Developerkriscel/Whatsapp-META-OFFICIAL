@@ -17,7 +17,7 @@ export interface TemplateCheckInput {
   bodyText: string;
   headerText?: string;
   footerText?: string;
-  buttons?: { type: string; text: string }[];
+  buttons?: { type: string; text: string; phone_number?: string }[];
 }
 
 export interface TemplateCheckIssue {
@@ -131,6 +131,12 @@ export function checkTemplateContent(input: TemplateCheckInput): TemplateCheckRe
   for (const btn of input.buttons ?? []) {
     if (btn.text && btn.text.length > 25) {
       push('error', 'BUTTON_TEXT_TOO_LONG', `Button "${btn.text}" is ${btn.text.length} characters — Meta's limit is 25.`, 'buttons');
+    }
+    if (btn.type === 'PHONE_NUMBER' && btn.phone_number) {
+      const digits = btn.phone_number.replace(/[\s\-\(\)\.+]/g, '');
+      if (!/^\d{7,15}$/.test(digits)) {
+        push('error', 'INVALID_PHONE_NUMBER', `Button phone number "${btn.phone_number}" is not valid — use international format like +15551234567.`, 'buttons');
+      }
     }
   }
   if ((input.buttons?.length ?? 0) > 10) {
