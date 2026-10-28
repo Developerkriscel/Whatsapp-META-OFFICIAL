@@ -35,7 +35,60 @@ interface TemplateButton {
   text: string;
   url?: string;
   phone_number?: string;
+  country_code?: string;
 }
+
+const COUNTRY_CODES = [
+  { code: '+91', country: 'India', flag: '🇮🇳' },
+  { code: '+1', country: 'USA / Canada', flag: '🇺🇸' },
+  { code: '+44', country: 'UK', flag: '🇬🇧' },
+  { code: '+971', country: 'UAE', flag: '🇦🇪' },
+  { code: '+966', country: 'Saudi Arabia', flag: '🇸🇦' },
+  { code: '+61', country: 'Australia', flag: '🇦🇺' },
+  { code: '+49', country: 'Germany', flag: '🇩🇪' },
+  { code: '+33', country: 'France', flag: '🇫🇷' },
+  { code: '+39', country: 'Italy', flag: '🇮🇹' },
+  { code: '+34', country: 'Spain', flag: '🇪🇸' },
+  { code: '+55', country: 'Brazil', flag: '🇧🇷' },
+  { code: '+52', country: 'Mexico', flag: '🇲🇽' },
+  { code: '+81', country: 'Japan', flag: '🇯🇵' },
+  { code: '+82', country: 'South Korea', flag: '🇰🇷' },
+  { code: '+86', country: 'China', flag: '🇨🇳' },
+  { code: '+65', country: 'Singapore', flag: '🇸🇬' },
+  { code: '+60', country: 'Malaysia', flag: '🇲🇾' },
+  { code: '+62', country: 'Indonesia', flag: '🇮🇩' },
+  { code: '+63', country: 'Philippines', flag: '🇵🇭' },
+  { code: '+66', country: 'Thailand', flag: '🇹🇭' },
+  { code: '+84', country: 'Vietnam', flag: '🇻🇳' },
+  { code: '+880', country: 'Bangladesh', flag: '🇧🇩' },
+  { code: '+92', country: 'Pakistan', flag: '🇵🇰' },
+  { code: '+94', country: 'Sri Lanka', flag: '🇱🇰' },
+  { code: '+977', country: 'Nepal', flag: '🇳🇵' },
+  { code: '+27', country: 'South Africa', flag: '🇿🇦' },
+  { code: '+234', country: 'Nigeria', flag: '🇳🇬' },
+  { code: '+254', country: 'Kenya', flag: '🇰🇪' },
+  { code: '+20', country: 'Egypt', flag: '🇪🇬' },
+  { code: '+7', country: 'Russia', flag: '🇷🇺' },
+  { code: '+90', country: 'Turkey', flag: '🇹🇷' },
+  { code: '+48', country: 'Poland', flag: '🇵🇱' },
+  { code: '+31', country: 'Netherlands', flag: '🇳🇱' },
+  { code: '+46', country: 'Sweden', flag: '🇸🇪' },
+  { code: '+41', country: 'Switzerland', flag: '🇨🇭' },
+  { code: '+351', country: 'Portugal', flag: '🇵🇹' },
+  { code: '+353', country: 'Ireland', flag: '🇮🇪' },
+  { code: '+64', country: 'New Zealand', flag: '🇳🇿' },
+  { code: '+57', country: 'Colombia', flag: '🇨🇴' },
+  { code: '+54', country: 'Argentina', flag: '🇦🇷' },
+  { code: '+56', country: 'Chile', flag: '🇨🇱' },
+  { code: '+51', country: 'Peru', flag: '🇵🇪' },
+  { code: '+974', country: 'Qatar', flag: '🇶🇦' },
+  { code: '+965', country: 'Kuwait', flag: '🇰🇼' },
+  { code: '+973', country: 'Bahrain', flag: '🇧🇭' },
+  { code: '+968', country: 'Oman', flag: '🇴🇲' },
+  { code: '+962', country: 'Jordan', flag: '🇯🇴' },
+  { code: '+961', country: 'Lebanon', flag: '🇱🇧' },
+  { code: '+972', country: 'Israel', flag: '🇮🇱' },
+] as const;
 
 const BODY_MAX = 1028;
 
@@ -145,7 +198,14 @@ export default function CreateTemplatePage() {
   };
 
   const updateButton = (index: number, updates: Partial<TemplateButton>) => {
-    setButtons(buttons.map((b, i) => i === index ? { ...b, ...updates } : b));
+    setButtons(buttons.map((b, i) => {
+      if (i !== index) return b;
+      const merged = { ...b, ...updates };
+      if (updates.type === 'PHONE_NUMBER' && !merged.country_code) {
+        merged.country_code = '+91';
+      }
+      return merged;
+    }));
   };
 
   const removeButton = (index: number) => {
@@ -570,13 +630,36 @@ export default function CreateTemplatePage() {
                     />
                   )}
                   {btn.type === 'PHONE_NUMBER' && (
-                    <input
-                      type="tel"
-                      placeholder="+1234567890"
-                      value={btn.phone_number || ''}
-                      onChange={(e) => updateButton(i, { phone_number: e.target.value })}
-                      className="input-apple w-full text-sm"
-                    />
+                    <div className="flex items-center gap-2">
+                      <select
+                        value={btn.country_code || '+91'}
+                        onChange={(e) => {
+                          const cc = e.target.value;
+                          const local = (btn.phone_number || '').replace(/^\+?\d*\s*/, '').replace(/[^\d]/g, '');
+                          updateButton(i, { country_code: cc, phone_number: cc + local });
+                        }}
+                        className="input-apple text-sm text-black"
+                        style={{ width: '90px', minWidth: '90px', flex: 'none' }}
+                      >
+                        {COUNTRY_CODES.map((c) => (
+                          <option key={c.code} value={c.code}>
+                            {c.country} ({c.code})
+                          </option>
+                        ))}
+                      </select>
+                      <input
+                        type="tel"
+                        placeholder="9876543210"
+                        value={(btn.phone_number || '').replace(btn.country_code || '+91', '').replace(/^\s+/, '')}
+                        onChange={(e) => {
+                          const local = e.target.value.replace(/[^\d]/g, '');
+                          const cc = btn.country_code || '+91';
+                          updateButton(i, { phone_number: cc + local });
+                        }}
+                        className="input-apple text-sm text-black"
+                        style={{ flex: '1 1 0%', minWidth: 0 }}
+                      />
+                    </div>
                   )}
                 </div>
                 <button

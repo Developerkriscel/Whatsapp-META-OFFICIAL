@@ -3334,11 +3334,15 @@ export async function registerTenantRoutes(app: FastifyInstance): Promise<void> 
           const footerText = typeof template.footer === 'string' ? template.footer : (template.footer as any).text;
           if (footerText) components.push({ type: 'FOOTER', text: footerText });
         }
-        if (template.buttons) {
+        if (Array.isArray(template.buttons) && template.buttons.length > 0) {
           const sanitizedButtons = (template.buttons as any[]).map((btn: any) => {
             if (btn.type === 'PHONE_NUMBER' && btn.phone_number) {
               let num = btn.phone_number.replace(/[\s\-\(\)\.]/g, '');
               if (!num.startsWith('+')) num = '+' + num;
+              const digits = num.replace(/\+/g, '');
+              if (!/^\d{7,15}$/.test(digits)) {
+                throw new Error(`Phone number "${btn.phone_number}" is not valid. Use full international format with country code, e.g. +919876543210.`);
+              }
               return { ...btn, phone_number: num };
             }
             return btn;
