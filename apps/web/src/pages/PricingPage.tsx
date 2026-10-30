@@ -439,8 +439,12 @@ export default function PricingPage() {
                 a: 'An 18% GST amount is added to the displayed base plan price and itemized before payment.',
               },
               {
+                q: 'Are Meta WhatsApp charges included?',
+                a: 'Yes. Each plan includes a defined monthly message allowance. Applicable Meta WhatsApp conversation charges for messages within your allowance are included in the subscription price. No additional per-message charges are applied for usage within the allowance.',
+              },
+              {
                 q: 'Can I message my customers?',
-                a: 'The service supports customer communications. You are responsible for obtaining required consent and following WhatsApp, Meta, and applicable messaging rules.',
+                a: 'Yes, the service supports customer communications to contacts who have explicitly opted in. You are responsible for obtaining required consent and following WhatsApp, Meta, and applicable messaging rules.',
               },
               {
                 q: 'Do prepaid plans renew automatically?',
@@ -490,7 +494,9 @@ export default function PricingPage() {
       <footer className="relative py-12 text-center">
         <p className="mx-auto mb-5 max-w-3xl px-4 text-xs text-secondary-apple">
           Plan prices are shown in INR using the configured USD-to-INR rate. Checkout adds 18% GST to
-          the base plan price and shows the tax amount and total before payment.
+          the base plan price and shows the tax amount and total before payment. Each plan includes a
+          monthly message allowance; applicable Meta WhatsApp conversation charges are included within
+          the plan price for messages sent within that allowance.
         </p>
         <nav aria-label="Legal and business information" className="mb-4 flex flex-wrap justify-center gap-x-6 gap-y-2 text-sm">
           <Link to="/contact" className="text-secondary-apple hover:text-wa-green">Contact Us</Link>
@@ -502,7 +508,7 @@ export default function PricingPage() {
           </Link>
         </nav>
         <p className="text-secondary-apple text-sm">
-          © {new Date().getFullYear()} Kriscel Tech Pvt Ltd. All rights reserved.
+          © {new Date().getFullYear()} Kriscel Tech Private Limited. All rights reserved.
         </p>
       </footer>
     </div>

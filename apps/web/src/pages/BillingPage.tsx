@@ -4,7 +4,7 @@
 
 import { useEffect, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { useSearchParams } from 'react-router-dom';
+import { useSearchParams, Link } from 'react-router-dom';
 import { api } from '../api/client';
 import { openCashfreeCheckout } from '../lib/checkout';
 import { useCurrency, formatMoney } from '../lib/money';
@@ -114,6 +114,7 @@ export default function BillingPage() {
   const [showUpgradeModal, setShowUpgradeModal] = useState<Plan | null>(null);
   const [showProration, setShowProration] = useState<ProrationPreview | null>(null);
   const [showCancelConfirm, setShowCancelConfirm] = useState(false);
+  const [termsAccepted, setTermsAccepted] = useState(false);
   const [notification, setNotification] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
 
   // Fetch billing data
@@ -299,6 +300,7 @@ export default function BillingPage() {
 
   const handleSelectPlan = (plan: Plan) => {
     setShowUpgradeModal(plan);
+    setTermsAccepted(false);
     if (billing?.paymentProvider !== 'cashfree' && prorationData?.data) {
       setShowProration(prorationData.data);
     }
@@ -882,11 +884,31 @@ export default function BillingPage() {
               </div>
             )}
 
+            <p className="text-xs text-ios-muted mb-3">
+              Each plan includes a monthly message allowance. Applicable Meta WhatsApp conversation
+              charges for messages within the allowance are included in the subscription price.
+            </p>
+
+            <label className="flex items-start gap-2 mb-4 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={termsAccepted}
+                onChange={(e) => setTermsAccepted(e.target.checked)}
+                className="mt-1 rounded border-black/20 text-wa-green focus:ring-wa-green"
+              />
+              <span className="text-xs text-ios-secondary">
+                I agree to the{' '}
+                <Link to="/terms" target="_blank" className="text-wa-green hover:underline">Terms and Conditions</Link>,{' '}
+                <Link to="/privacy" target="_blank" className="text-wa-green hover:underline">Privacy Policy</Link>, and{' '}
+                <Link to="/refund-policy" target="_blank" className="text-wa-green hover:underline">Return/Refund/Cancellation Policy</Link>.
+              </span>
+            </label>
+
             <div className="flex gap-2">
               <button
                 onClick={handleUpgrade}
-                disabled={checkoutMutation.isPending}
-                className="flex-1 py-3 btn-apple btn-wa-green rounded-apple-lg font-medium flex items-center justify-center gap-2"
+                disabled={checkoutMutation.isPending || !termsAccepted}
+                className="flex-1 py-3 btn-apple btn-wa-green rounded-apple-lg font-medium flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {checkoutMutation.isPending ? (
                   <Loader2 className="w-4 h-4 animate-spin" />

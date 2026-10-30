@@ -25,6 +25,7 @@ import {
   Home,
   BookOpen,
   RotateCcw,
+  ShieldCheck,
 } from 'lucide-react';
 import { useState } from 'react';
 import clsx from 'clsx';
@@ -63,6 +64,7 @@ const navItems = {
     { icon: MessageSquare, label: 'WhatsApp', path: '/whatsapp' },
     { icon: FileText, label: 'Chatbot Flows', path: '/flows' },
     { icon: BookOpen, label: 'Terms and Conditions', path: '/terms' },
+    { icon: ShieldCheck, label: 'Privacy Policy', path: '/privacy' },
     { icon: RotateCcw, label: 'Return/Refund/Cancellation Policy', path: '/refund-policy' },
   ],
 };
