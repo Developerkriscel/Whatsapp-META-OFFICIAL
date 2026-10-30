@@ -9,6 +9,7 @@ import { useQuery } from '@tanstack/react-query';
 import { Check, MessageSquare, Users, Bot, Zap, Shield } from 'lucide-react';
 import { api } from '../api/client';
 import { useAuth } from '../context/AuthContext';
+import kriscelKSrc from '../assets/kriscel-k.jpeg';
 
 const CASHFREE_PLAN_GST_RATE_PERCENT = 18;
 const FALLBACK_USD_TO_INR_RATE = 88.5;
@@ -157,10 +158,11 @@ export default function PricingPage() {
         <div className="glass-nav mx-auto max-w-7xl rounded-2xl">
           <div className="flex items-center justify-between h-14 px-5">
             <div className="flex items-center gap-3">
-              <div className="w-8 h-8 bg-wa-gradient rounded-lg flex items-center justify-center shadow-wa-green">
-                <span className="text-white font-bold text-xs">WA</span>
+              <div className="w-8 h-8 rounded-lg flex items-center justify-center shadow-wa-green">
+                {/* <span className="text-white font-bold text-xs">WA</span> */}
+                <img src={kriscelKSrc} alt="Kriscel" className="rounded-full object-contain shrink-0 w-9 h-9" />
               </div>
-              <span className="font-semibold text-primary-apple">Kriscel WA</span>
+              <span className="font-bold text-[15px]" style={{ color: 'rgb(20, 83, 45)' }}>Kriscel WA</span>
             </div>
             <div className="flex items-center gap-3">
               {user ? (

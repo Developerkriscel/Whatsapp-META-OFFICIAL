@@ -1,15 +1,18 @@
 import { Link } from 'react-router-dom';
 import { Mail, MapPin, Phone } from 'lucide-react';
-
+import kriscelKSrc from '../assets/kriscel-k.jpeg';
 export default function ContactPage() {
   return (
     <main className="min-h-screen bg-[var(--apple-bg)] px-4 py-10 sm:px-6">
       <div className="mx-auto max-w-4xl">
         <header className="mb-8 flex flex-wrap items-center justify-between gap-4">
-          <Link to="/pricing" className="font-semibold text-wa-green hover:opacity-80">
+  
+          <Link to="/pricing" className="flex items-center gap-3 font-bold text-[15px]" style={{ color: 'rgb(20, 83, 45)' }}>
+            <img src={kriscelKSrc} alt="Kriscel" className="rounded-full object-contain shrink-0 w-9 h-9" />
             Kriscel WA
           </Link>
           <nav aria-label="Public pages" className="flex flex-wrap gap-4 text-sm">
+            
             <Link to="/pricing" className="text-secondary-apple hover:text-wa-green">Pricing</Link>
             <Link to="/terms" className="text-secondary-apple hover:text-wa-green">Terms</Link>
             <Link to="/privacy" className="text-secondary-apple hover:text-wa-green">Privacy</Link>

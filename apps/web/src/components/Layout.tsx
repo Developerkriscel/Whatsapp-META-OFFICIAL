@@ -130,7 +130,7 @@ export default function Layout({ children, variant }: LayoutProps) {
               <div className="flex items-center gap-3 cursor-pointer" onClick={() => navigate('/')}>
                 {user && <HeaderAvatar kind={pickAvatarKind(user.id, user.avatarGender)} />}
                 <div>
-                  <h1 className="font-semibold text-wa-green text-sm leading-tight">Kriscel WA</h1>
+                  <h1 className="font-bold text-[15px]" style={{ color: 'rgb(20, 83, 45)' }}>Kriscel WA</h1>
                   <p className="text-xs text-secondary-apple leading-tight">Customer Support &amp; CRM Software</p>
                 </div>
               </div>

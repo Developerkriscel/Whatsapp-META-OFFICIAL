@@ -1,6 +1,6 @@
 import { Link } from 'react-router-dom';
 import { BookOpen, RotateCcw, ShieldCheck } from 'lucide-react';
-
+import kriscelKSrc from '../assets/kriscel-k.jpeg';
 type PolicyPageProps = {
   type: 'terms' | 'privacy' | 'refund';
 };
@@ -128,8 +128,9 @@ export default function PolicyPage({ type }: PolicyPageProps) {
     <main className="min-h-screen bg-[var(--apple-bg)] px-4 py-10 sm:px-6">
       <div className="mx-auto max-w-4xl">
         <header className="mb-8 flex flex-wrap items-center justify-between gap-4">
-          <Link to="/pricing" className="font-semibold text-wa-green hover:opacity-80">
-            Kriscel WA
+           
+          <Link to="/pricing" className="font-semibold text-[#14532D] flex items-center gap-3 hover:opacity-80">
+             <img src={kriscelKSrc} alt="Kriscel" className="rounded-full object-contain shrink-0 w-9 h-9" />Kriscel WA
           </Link>
           <nav aria-label="Policy pages" className="flex flex-wrap gap-4 text-sm">
             <Link to="/contact" className="text-secondary-apple hover:text-wa-green">
