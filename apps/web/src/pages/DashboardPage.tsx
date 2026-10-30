@@ -68,20 +68,20 @@ export default function DashboardPage() {
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-1">
         <div>
-          <h1 className="text-2xl font-bold text-gradient-wa">
+          <h1 className="text-xl sm:text-2xl font-bold text-gradient-wa">
             Good {new Date().getHours() < 12 ? 'morning' : new Date().getHours() < 18 ? 'afternoon' : 'evening'}, {user?.name?.split(' ')[0] || 'there'}
           </h1>
           <p className="text-ios-secondary mt-1">Here's what's happening today</p>
         </div>
-        <div className="text-right">
+        <div className="sm:text-right">
           <p className="text-sm text-wa-teal font-medium">{new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })}</p>
         </div>
       </div>
 
       {/* Stats Grid */}
-      <div className="grid grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
         {[
           { label: 'Total Contacts', value: overview.contacts.total.toLocaleString(), icon: Users, trend: null, color: 'text-wa-green' },
           { label: 'Messages Sent', value: overview.messaging.totalSent.toLocaleString(), icon: MessageSquare, trend: null, color: 'text-wa-teal' },
@@ -113,7 +113,7 @@ export default function DashboardPage() {
       )}
 
       {/* Quick Actions */}
-      <div className="grid grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
         {quickLinks.map((link, i) => (
           <Link key={i} to={link.href} className={`card-apple p-4 hover:border-wa-${link.color} transition cursor-pointer`}>
             <link.icon className={`w-6 h-6 text-wa-${link.color} mb-2`} />
@@ -124,7 +124,7 @@ export default function DashboardPage() {
       </div>
 
       {/* Messaging Summary */}
-      <div className="grid grid-cols-3 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 sm:gap-4">
         <div className="card-apple p-4">
           <h3 className="font-medium text-ios-dark mb-3">Delivery Rate</h3>
           <div className="flex items-center gap-3">

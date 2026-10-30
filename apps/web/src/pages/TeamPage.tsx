@@ -270,22 +270,22 @@ export default function TeamPage() {
       )}
 
       {/* Header */}
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
         <div>
-          <h1 className="text-2xl font-bold text-gradient-wa">Team Management</h1>
-          <p className="text-ios-secondary mt-1">Manage your team members and permissions</p>
+          <h1 className="text-xl sm:text-2xl font-bold text-gradient-wa">Team Management</h1>
+          <p className="text-sm sm:text-base text-ios-secondary mt-1">Manage your team members and permissions</p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
           <button
             onClick={() => setView(view === 'list' ? 'permissions' : 'list')}
-            className={`btn-apple flex items-center gap-2 ${view === 'permissions' ? 'btn-wa-green' : 'btn-apple-outline'}`}
+            className={`btn-apple flex items-center gap-2 whitespace-nowrap ${view === 'permissions' ? 'btn-wa-green' : 'btn-apple-outline'}`}
           >
             <Shield className="w-4 h-4" />
             {view === 'list' ? 'Permissions' : 'Team List'}
           </button>
           <button
             onClick={() => setShowInvite(true)}
-            className="btn-apple btn-wa-green flex items-center gap-2"
+            className="btn-apple btn-wa-green flex items-center gap-2 whitespace-nowrap"
           >
             <Plus className="w-4 h-4" />
             Invite Member
@@ -294,37 +294,38 @@ export default function TeamPage() {
       </div>
 
       {/* Stats */}
-      <div className="grid grid-cols-3 gap-4">
-        <div className="card-apple p-4">
-          <div className="flex items-center gap-3">
+      {/* On phones each card stacks icon over number so three still fit a row. */}
+      <div className="grid grid-cols-3 gap-2 sm:gap-4">
+        <div className="card-apple p-3 sm:p-4">
+          <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-3">
             <div className="w-10 h-10 bg-wa-green/20 text-wa-green rounded-apple-lg flex items-center justify-center">
               <Users className="w-5 h-5" />
             </div>
             <div>
               <p className="text-2xl font-bold text-ios-dark">{stats.total}</p>
-              <p className="text-sm text-ios-muted">Total Members</p>
+              <p className="text-xs sm:text-sm text-ios-muted">Members</p>
             </div>
           </div>
         </div>
-        <div className="card-apple p-4">
-          <div className="flex items-center gap-3">
+        <div className="card-apple p-3 sm:p-4">
+          <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-3">
             <div className="w-10 h-10 bg-apple-green/20 text-apple-green rounded-apple-lg flex items-center justify-center">
               <UserCheck className="w-5 h-5" />
             </div>
             <div>
               <p className="text-2xl font-bold text-ios-dark">{stats.active}</p>
-              <p className="text-sm text-ios-muted">Active</p>
+              <p className="text-xs sm:text-sm text-ios-muted">Active</p>
             </div>
           </div>
         </div>
-        <div className="card-apple p-4">
-          <div className="flex items-center gap-3">
+        <div className="card-apple p-3 sm:p-4">
+          <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-3">
             <div className="w-10 h-10 bg-apple-orange/20 text-apple-orange rounded-apple-lg flex items-center justify-center">
               <Clock className="w-5 h-5" />
             </div>
             <div>
               <p className="text-2xl font-bold text-ios-dark">{stats.pending}</p>
-              <p className="text-sm text-ios-muted">Pending</p>
+              <p className="text-xs sm:text-sm text-ios-muted">Pending</p>
             </div>
           </div>
         </div>
@@ -333,7 +334,7 @@ export default function TeamPage() {
       {view === 'list' ? (
         <>
           {/* Filters */}
-          <div className="card-apple p-4 flex items-center gap-4">
+          <div className="card-apple p-4 flex flex-col sm:flex-row sm:items-center gap-3 sm:gap-4">
             <div className="relative flex-1">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-ios-muted" />
               <input
@@ -369,8 +370,8 @@ export default function TeamPage() {
               <p className="text-sm text-ios-muted mt-1">Try adjusting your filters</p>
             </div>
           ) : (
-            <div className="card-apple overflow-hidden">
-              <table className="w-full">
+            <div className="card-apple overflow-x-auto">
+              <table className="w-full whitespace-nowrap">
                 <thead className="bg-ios-gray/50">
                   <tr className="text-left text-sm text-ios-muted">
                     <th className="px-6 py-3 font-medium">Member</th>
@@ -446,7 +447,7 @@ export default function TeamPage() {
         </>
       ) : (
         /* Permissions Matrix */
-        <div className="card-apple p-6 overflow-x-auto">
+        <div className="card-apple p-4 sm:p-6 overflow-x-auto">
           <h3 className="font-semibold text-ios-dark mb-4">Permissions Matrix</h3>
           <table className="w-full">
             <thead>
@@ -527,8 +528,8 @@ export default function TeamPage() {
 
       {/* Invite Modal */}
       {showInvite && (
-        <div className="fixed inset-0 bg-black/40 backdrop-blur-xl flex items-center justify-center z-50">
-          <div className="glass-card rounded-apple-xl w-full max-w-md p-6">
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-xl flex items-center justify-center z-50 p-4">
+          <div className="glass-card rounded-apple-xl w-full max-w-md p-5 sm:p-6 max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between mb-6">
               <h3 className="text-lg font-semibold text-ios-dark">Invite Team Member</h3>
               <button onClick={() => setShowInvite(false)} className="p-1 hover:bg-ios-gray rounded-apple-lg">
@@ -590,8 +591,8 @@ export default function TeamPage() {
 
       {/* Edit Member Modal */}
       {showEdit && (
-        <div className="fixed inset-0 bg-black/40 backdrop-blur-xl flex items-center justify-center z-50">
-          <div className="glass-card rounded-apple-xl w-full max-w-md p-6">
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-xl flex items-center justify-center z-50 p-4">
+          <div className="glass-card rounded-apple-xl w-full max-w-md p-5 sm:p-6 max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between mb-6">
               <h3 className="text-lg font-semibold text-ios-dark">Edit Member</h3>
               <button onClick={() => { setShowEdit(null); setConfirmRemove(false); }} className="p-1 hover:bg-ios-gray rounded-apple-lg">

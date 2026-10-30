@@ -90,7 +90,10 @@ export default function Layout({ children, variant }: LayoutProps) {
   };
 
   return (
-    <div className="min-h-screen bg-[var(--apple-bg)] relative overflow-hidden">
+    // overflow-x-clip (not overflow-hidden): clips the background blobs
+    // sideways without turning this wrapper into a scroll container, which
+    // cut off the bottom of long pages on mobile browsers.
+    <div className="min-h-screen bg-[var(--apple-bg)] relative overflow-x-clip">
       {/* Apple-style Background */}
       <div className="fixed inset-0 pointer-events-none">
         <div className="blob-apple-1 -top-40 -left-40" />
@@ -115,28 +118,28 @@ export default function Layout({ children, variant }: LayoutProps) {
       )}
 
       {/* Apple-style Top Header */}
-      <header className={clsx('fixed left-0 right-0 z-30 px-4 pt-3', isImpersonating ? 'top-9' : 'top-0')}>
+      <header className={clsx('fixed left-0 right-0 z-30 px-2 sm:px-4 pt-3', isImpersonating ? 'top-9' : 'top-0')}>
         <div className="glass-nav mx-auto rounded-2xl shadow-apple">
-          <div className="flex items-center justify-between h-14 px-5">
-            <div className="flex items-center gap-4">
+          <div className="flex items-center justify-between h-14 px-3 sm:px-5">
+            <div className="flex items-center gap-2 sm:gap-4 min-w-0">
               <button
                 onClick={() => setSidebarOpen(!sidebarOpen)}
-                className="lg:hidden p-2.5 hover:bg-black/5 rounded-xl transition-colors"
+                className="lg:hidden p-2 sm:p-2.5 hover:bg-black/5 rounded-xl transition-colors shrink-0"
               >
                 <Menu className="w-5 h-5 text-primary-apple" />
               </button>
 
               {/* Logo */}
-              <div className="flex items-center gap-3 cursor-pointer" onClick={() => navigate('/')}>
+              <div className="flex items-center gap-2 sm:gap-3 cursor-pointer min-w-0" onClick={() => navigate('/')}>
                 {user && <HeaderAvatar kind={pickAvatarKind(user.id, user.avatarGender)} />}
-                <div>
-                  <h1 className="font-bold text-[15px]" style={{ color: 'rgb(20, 83, 45)' }}>Kriscel WA</h1>
-                  <p className="text-xs text-secondary-apple leading-tight">Customer Support &amp; CRM Software</p>
+                <div className="min-w-0">
+                  <h1 className="font-bold text-[15px] truncate" style={{ color: 'rgb(20, 83, 45)' }}>Kriscel WA</h1>
+                  <p className="hidden sm:block text-xs text-secondary-apple leading-tight whitespace-nowrap">Customer Support &amp; CRM Software</p>
                 </div>
               </div>
             </div>
 
-            <div className="flex items-center gap-3">
+            <div className="flex items-center gap-2 sm:gap-3 shrink-0">
               {/* Credits Bar - Only for client variant */}
               {variant === 'client' && <CreditsBar />}
 
@@ -201,7 +204,8 @@ export default function Layout({ children, variant }: LayoutProps) {
         className={clsx(
           'fixed left-4 bottom-4 w-64 z-30 transition-all duration-300 lg:translate-x-0',
           isImpersonating ? 'top-[7.25rem]' : 'top-20',
-          sidebarOpen ? 'translate-x-0' : '-translate-x-full'
+          // Extra 2rem clears the left-4 offset so no sliver shows when closed.
+          sidebarOpen ? 'translate-x-0' : '-translate-x-[calc(100%+2rem)]'
         )}
       >
         <div className="glass-card h-full shadow-apple overflow-hidden flex flex-col">
@@ -256,7 +260,7 @@ export default function Layout({ children, variant }: LayoutProps) {
       {/* Mobile overlay */}
       {sidebarOpen && (
         <div
-          className="fixed inset-0 bg-black/10 backdrop-blur-xl z-30 lg:hidden"
+          className="fixed inset-0 bg-black/20 backdrop-blur-sm z-20 lg:hidden"
           onClick={() => setSidebarOpen(false)}
         />
       )}
@@ -271,7 +275,7 @@ export default function Layout({ children, variant }: LayoutProps) {
           `relative` alone (position only, no z-index) doesn't create that
           trap, so modals inside <main> now compare directly against the
           sidebar/header in the root stacking context and correctly win. */}
-      <main className={clsx('lg:pl-72 p-6 relative', isImpersonating ? 'pt-32' : 'pt-24')}>
+      <main className={clsx('lg:pl-72 px-4 sm:px-6 pb-16 sm:pb-6 relative', isImpersonating ? 'pt-32' : 'pt-24')}>
         <div className="w-full mx-auto">{children}</div>
       </main>
     </div>
@@ -304,7 +308,7 @@ function CreditsBar() {
       className="px-3 py-1.5 bg-wa-gradient text-white text-xs font-medium rounded-lg hover:opacity-90 transition-opacity shadow-wa flex items-center gap-1"
     >
       <Plus className="w-3 h-3" />
-      Buy
+      <span className="hidden sm:inline">Buy</span>
     </button>
   );
 }

@@ -515,9 +515,9 @@ export default function ContactsPage() {
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
         <div>
-          <h1 className="text-2xl font-bold text-ios-dark">Contacts</h1>
+          <h1 className="text-xl sm:text-2xl font-bold text-ios-dark">Contacts</h1>
           <p className="text-ios-secondary mt-1">
             {totalContacts.toLocaleString('en-IN')} total contact{totalContacts === 1 ? '' : 's'}
             {totalPages > 1 && (
@@ -528,14 +528,14 @@ export default function ContactsPage() {
             )}
           </p>
         </div>
-        <div className="flex items-center gap-2">
-          <button onClick={handleExport} className="btn-apple btn-apple-outline flex items-center gap-2 text-sm">
+        <div className="flex flex-wrap items-center gap-2">
+          <button onClick={handleExport} className="btn-apple btn-apple-outline flex items-center gap-2 text-sm whitespace-nowrap">
             <Download className="w-4 h-4" />
             Export CSV
           </button>
           <button
             onClick={() => { resetImport(); setShowImport(true); }}
-            className="btn-apple btn-apple-outline flex items-center gap-2 text-sm"
+            className="btn-apple btn-apple-outline flex items-center gap-2 text-sm whitespace-nowrap"
           >
             <Upload className="w-4 h-4" />
             Import CSV
@@ -544,7 +544,7 @@ export default function ContactsPage() {
             <button
               onClick={() => setShowDeleteConfirm(true)}
               disabled={deleteMutation.isPending}
-              className="btn-apple text-apple-red hover:bg-apple-red/10 flex items-center gap-2 text-sm"
+              className="btn-apple text-apple-red hover:bg-apple-red/10 flex items-center gap-2 text-sm whitespace-nowrap"
             >
               <Trash2 className="w-4 h-4" />
               Delete ({selected.length})
@@ -552,7 +552,7 @@ export default function ContactsPage() {
           )}
           <button
             onClick={openAdd}
-            className="btn-apple btn-wa-green flex items-center gap-2"
+            className="btn-apple btn-wa-green flex items-center gap-2 whitespace-nowrap"
           >
             <Plus className="w-4 h-4" />
             Add Contact
@@ -619,14 +619,14 @@ export default function ContactsPage() {
                           {(contact.name || contact.phone || '?').charAt(0)}
                         </div>
                         <div>
-                          <p className="font-medium text-ios-dark">{contact.name || contact.phone || '—'}</p>
+                          <p className="font-medium text-ios-dark whitespace-nowrap">{contact.name || contact.phone || '—'}</p>
                           {contact.lastMessage && <p className="text-xs text-ios-muted">{contact.lastMessage}</p>}
                         </div>
                       </div>
                     </td>
-                    <td className="px-4 py-3 text-ios-secondary font-mono text-xs">{contact.phone}</td>
-                    <td className="px-4 py-3 text-ios-secondary">{contact.email || '—'}</td>
-                    <td className="px-4 py-3 text-ios-secondary">{contact.company || '—'}</td>
+                    <td className="px-4 py-3 text-ios-secondary font-mono text-xs whitespace-nowrap">{contact.phone}</td>
+                    <td className="px-4 py-3 text-ios-secondary whitespace-nowrap">{contact.email || '—'}</td>
+                    <td className="px-4 py-3 text-ios-secondary whitespace-nowrap">{contact.company || '—'}</td>
                     <td className="px-4 py-3">
                       <div className="flex flex-wrap gap-1">
                         {contact.tags.map(tag => (

@@ -12,7 +12,7 @@ import {
   Search, Send, X, Check, RefreshCw, ChevronDown,
   UserPlus, Bot, CircleOff, CheckCircle, StickyNote,
   MessageSquare, Phone, Mail, Tag, Calendar, User,
-  AlertCircle, Info, Paperclip, Loader2,
+  AlertCircle, Info, Paperclip, Loader2, ArrowLeft,
 } from 'lucide-react';
 import { useToast } from '../components/Toast';
 
@@ -86,7 +86,8 @@ export default function ConversationsPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const [message, setMessage] = useState('');
   const [filter, setFilter] = useState<FilterType>('open');
-  const [showSidebar, setShowSidebar] = useState(true);
+  // Below lg the contact panel overlays the chat, so start it closed there.
+  const [showSidebar, setShowSidebar] = useState(() => window.innerWidth >= 1024);
   const [sidebarTab, setSidebarTab] = useState<SidebarTab>('info');
   const [noteText, setNoteText] = useState('');
   const [showAssignDropdown, setShowAssignDropdown] = useState(false);
@@ -451,10 +452,11 @@ export default function ConversationsPage() {
   // ─────────────────────────────────────────────────────
 
   return (
-    <div className="h-[calc(100vh-5rem)] flex rounded-apple-xl overflow-hidden border border-black/10 bg-white shadow-sm">
+    <div className="relative h-[calc(100dvh-10rem)] md:h-[calc(100vh-5rem)] flex rounded-apple-xl overflow-hidden border border-black/10 bg-white shadow-sm">
 
       {/* ── LEFT: Conversation List ──────────────────── */}
-      <div className="w-72 flex-shrink-0 flex flex-col border-r border-black/8 bg-white">
+      {/* On phones the list and the chat take turns filling the screen. */}
+      <div className={`${selected ? 'hidden md:flex' : 'flex'} w-full md:w-72 flex-shrink-0 flex-col border-r border-black/8 bg-white`}>
         {/* Header */}
         <div className="p-3 border-b border-black/5">
           <div className="flex items-center justify-between mb-2">
@@ -581,7 +583,14 @@ export default function ConversationsPage() {
       {selected && selectedFull ? (
         <div className="flex-1 flex flex-col min-w-0">
           {/* Chat Header */}
-          <div className="px-4 py-3 border-b border-black/5 flex items-center gap-3 bg-white">
+          <div className="px-2 sm:px-4 py-3 border-b border-black/5 flex items-center gap-2 sm:gap-3 bg-white">
+            <button
+              onClick={() => setSelected(null)}
+              className="md:hidden p-1.5 -ml-0.5 rounded-apple-lg hover:bg-ios-gray text-ios-secondary flex-shrink-0"
+              aria-label="Back to inbox"
+            >
+              <ArrowLeft className="w-5 h-5" />
+            </button>
             <div className="w-9 h-9 bg-wa-green/20 text-wa-green rounded-full flex items-center justify-center font-bold text-sm flex-shrink-0">
               {(selectedFull.contact.name || selectedFull.contact.phone || '?').charAt(0)}
             </div>
@@ -987,7 +996,7 @@ export default function ConversationsPage() {
         </div>
       ) : (
         /* Empty state */
-        <div className="flex-1 flex items-center justify-center bg-ios-gray/10">
+        <div className="hidden md:flex flex-1 items-center justify-center bg-ios-gray/10">
           <div className="text-center">
             <div className="w-16 h-16 bg-ios-gray rounded-full flex items-center justify-center mx-auto mb-4">
               <MessageSquare className="w-7 h-7 text-ios-muted" />
@@ -1000,9 +1009,16 @@ export default function ConversationsPage() {
 
       {/* ── RIGHT: Contact Info Sidebar ─────────────── */}
       {selected && selectedFull && showSidebar && (
-        <div className="w-60 flex-shrink-0 border-l border-black/8 flex flex-col bg-white overflow-hidden">
+        <div className="absolute inset-y-0 right-0 z-20 w-full sm:w-72 shadow-apple-lg lg:static lg:z-auto lg:w-60 lg:shadow-none flex-shrink-0 border-l border-black/8 flex flex-col bg-white overflow-hidden">
           {/* Sidebar tabs */}
           <div className="flex border-b border-black/5">
+            <button
+              onClick={() => setShowSidebar(false)}
+              className="lg:hidden px-3 text-ios-muted hover:text-ios-dark"
+              aria-label="Close contact info"
+            >
+              <X className="w-4 h-4" />
+            </button>
             {(
               [
                 { key: 'info', label: 'Contact', icon: User },

@@ -258,14 +258,14 @@ export default function TemplatesPage() {
         </div>
       )}
 
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
         <div>
-          <h1 className="text-2xl font-bold text-ios-dark">Templates</h1>
-          <p className="text-ios-secondary mt-1">Create and manage WhatsApp message templates</p>
+          <h1 className="text-xl sm:text-2xl font-bold text-ios-dark">Templates</h1>
+          <p className="text-sm sm:text-base text-ios-secondary mt-1">Create and manage WhatsApp message templates</p>
         </div>
         <button
           onClick={() => navigate('/templates/create')}
-          className="btn-apple btn-wa-green flex items-center gap-2"
+          className="btn-apple btn-wa-green flex items-center justify-center gap-2 whitespace-nowrap"
         >
           <Plus className="w-4 h-4" />
           New Template
@@ -273,7 +273,7 @@ export default function TemplatesPage() {
       </div>
 
       {/* Stats Summary */}
-      <div className="grid grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
         <div className="card-apple p-4">
           <p className="text-sm text-ios-muted">Total Templates</p>
           <p className="text-2xl font-bold text-ios-dark">{templates.length}</p>
@@ -287,7 +287,7 @@ export default function TemplatesPage() {
           <p className="text-2xl font-bold text-apple-orange">{templates.filter(t => t.status === 'PENDING').length}</p>
         </div>
         <div className="card-apple p-4">
-          <p className="text-sm text-ios-muted">Total Messages Sent</p>
+          <p className="text-sm text-ios-muted">Messages Sent</p>
           <p className="text-2xl font-bold text-ios-dark">{templates.reduce((sum, t) => sum + (t.totalSent || 0), 0).toLocaleString()}</p>
         </div>
       </div>
@@ -388,13 +388,13 @@ export default function TemplatesPage() {
 
       {/* Detail Modal */}
       {selectedTemplate && (
-        <div className="fixed inset-0 bg-black/40 backdrop-blur-xl flex items-center justify-center z-50">
-          <div ref={templateModalRef} className="glass-card p-6 w-[520px] shadow-apple-xl max-h-[90vh] overflow-y-auto">
-            <div className="flex items-center justify-between mb-4">
-              <div className="flex items-center gap-2">
-                <FileText className="w-5 h-5 text-wa-green" />
-                <h3 className="font-semibold text-ios-dark">{selectedTemplate.name}</h3>
-                <span className={`px-2 py-0.5 text-xs rounded-apple-full ${STATUS_COLORS[selectedTemplate.status]}`}>
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-xl flex items-center justify-center z-50 p-4">
+          <div ref={templateModalRef} className="glass-card p-4 sm:p-6 w-full max-w-[520px] shadow-apple-xl max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between gap-2 mb-4">
+              <div className="flex items-center gap-2 min-w-0">
+                <FileText className="w-5 h-5 text-wa-green shrink-0" />
+                <h3 className="font-semibold text-ios-dark truncate">{selectedTemplate.name}</h3>
+                <span className={`px-2 py-0.5 text-xs rounded-apple-full shrink-0 ${STATUS_COLORS[selectedTemplate.status]}`}>
                   {STATUS_LABELS[selectedTemplate.status]}
                 </span>
               </div>
@@ -588,8 +588,8 @@ export default function TemplatesPage() {
 
       {/* Edit Modal */}
       {showEdit && (
-        <div className="fixed inset-0 bg-black/40 backdrop-blur-xl flex items-center justify-center z-50">
-          <div className="glass-card p-6 w-[520px] shadow-apple-xl max-h-[90vh] overflow-y-auto">
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-xl flex items-center justify-center z-50 p-4">
+          <div className="glass-card p-4 sm:p-6 w-full max-w-[520px] shadow-apple-xl max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between mb-4">
               <h3 className="font-semibold text-ios-dark">Edit Template</h3>
               <button onClick={() => { setShowEdit(null); setTemplateNameError(''); }} className="p-1 hover:bg-ios-gray rounded-apple-lg transition">

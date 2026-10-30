@@ -677,16 +677,16 @@ export default function CampaignsPage() {
         )}
 
         {/* Header */}
-        <div className="flex items-center justify-between">
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
           <div>
-            <h1 className="text-2xl font-bold text-gradient-wa">Campaigns</h1>
+            <h1 className="text-xl sm:text-2xl font-bold text-gradient-wa">Campaigns</h1>
             <p className="text-ios-secondary mt-1">
               {filtered.length} {tab === 'all' ? 'total' : tab} campaigns
             </p>
           </div>
           <button
             onClick={() => setView('create')}
-            className="btn-apple bg-wa-gradient text-white flex items-center gap-2 shadow-wa hover:shadow-wa-hover transition"
+            className="btn-apple bg-wa-gradient text-white flex items-center justify-center gap-2 shadow-wa hover:shadow-wa-hover transition whitespace-nowrap"
           >
             <Plus className="w-4 h-4" />
             New Campaign
@@ -694,12 +694,12 @@ export default function CampaignsPage() {
         </div>
 
         {/* Tabs */}
-        <div className="flex gap-2 border-b border-black/10">
+        <div className="flex gap-1 sm:gap-2 border-b border-black/10 overflow-x-auto">
           {(['all', 'sent', 'scheduled', 'sending', 'draft'] as const).map((t) => (
             <button
               key={t}
               onClick={() => setTab(t)}
-              className={`px-4 py-2.5 text-sm font-medium transition relative ${
+              className={`px-3 sm:px-4 py-2.5 text-sm font-medium transition relative whitespace-nowrap flex-shrink-0 ${
                 tab === t
                   ? 'text-wa-green'
                   : 'text-ios-muted hover:text-ios-dark'
@@ -714,7 +714,7 @@ export default function CampaignsPage() {
         </div>
 
         {/* Campaign Stats */}
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 sm:gap-4">
           <div className="card-apple p-4">
             <div className="flex items-center gap-3">
               <div className="w-10 h-10 bg-wa-green/20 text-wa-green rounded-apple-lg flex items-center justify-center">
@@ -774,7 +774,7 @@ export default function CampaignsPage() {
               </div>
             </div>
           </div>
-          <div className="card-apple p-4">
+          <div className="card-apple p-4 col-span-2 sm:col-span-1">
             <div className="flex items-center gap-3">
               <div className="w-10 h-10 bg-apple-red/20 text-apple-red rounded-apple-lg flex items-center justify-center">
                 <AlertTriangle className="w-5 h-5" />
@@ -817,11 +817,11 @@ export default function CampaignsPage() {
                 <div
                   key={campaign.id}
                   onClick={() => setViewingCampaignId(campaign.id)}
-                  className="card-apple p-5 hover:shadow-apple-hover transition cursor-pointer"
+                  className="card-apple p-4 sm:p-5 hover:shadow-apple-hover transition cursor-pointer"
                 >
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-4">
-                      <div className={`w-12 h-12 rounded-apple-xl flex items-center justify-center ${
+                  <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                    <div className="flex items-center gap-3 sm:gap-4 min-w-0">
+                      <div className={`w-10 h-10 sm:w-12 sm:h-12 flex-shrink-0 rounded-apple-xl flex items-center justify-center ${
                         campaign.status === 'sent' ? 'bg-apple-green/20' :
                         campaign.status === 'scheduled' ? 'bg-wa-teal/20' :
                         campaign.status === 'sending' ? 'bg-wa-green/20' :
@@ -834,9 +834,9 @@ export default function CampaignsPage() {
                           'text-ios-muted'
                         }`} />
                       </div>
-                      <div>
-                        <h3 className="font-semibold text-ios-dark">{campaign.name}</h3>
-                        <div className="flex items-center gap-3 mt-1 text-sm text-ios-muted">
+                      <div className="min-w-0">
+                        <h3 className="font-semibold text-ios-dark truncate">{campaign.name}</h3>
+                        <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 mt-1 text-xs sm:text-sm text-ios-muted">
                           <span className="flex items-center gap-1">
                             <Users className="w-3.5 h-3.5" />
                             {campaign.segment}
@@ -861,10 +861,10 @@ export default function CampaignsPage() {
                       </div>
                     </div>
 
-                    <div className="flex items-center gap-4">
+                    <div className="flex items-center justify-between sm:justify-end gap-3 sm:gap-4">
                       {/* Stats */}
                       {campaign.status !== 'draft' && (
-                        <div className="flex items-center gap-6 text-sm">
+                        <div className="flex items-center gap-4 sm:gap-6 text-sm">
                           <div className="text-center">
                             <p className="font-semibold text-ios-dark">{campaign.sent.toLocaleString()}</p>
                             <p className="text-xs text-ios-muted">Sent</p>

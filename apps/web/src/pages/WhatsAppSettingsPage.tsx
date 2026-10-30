@@ -683,7 +683,7 @@ export default function WhatsAppSettingsPage() {
       {activeTab === 'phones' && (
         <>
           {/* Stats */}
-          <div className="grid grid-cols-4 gap-4">
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
             <div className="card-apple p-4">
               <p className="text-sm text-ios-muted">Total Phones</p>
               <p className="text-2xl font-bold text-ios-dark">{phones.length}</p>
@@ -704,8 +704,8 @@ export default function WhatsAppSettingsPage() {
 
           {/* Search & Actions */}
           <div className="card-apple p-4">
-            <div className="flex items-center justify-between gap-4">
-              <div className="relative flex-1 max-w-md">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 sm:gap-4">
+              <div className="relative flex-1 sm:max-w-md">
                 <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-ios-muted" />
                 <input
                   type="text"
@@ -718,14 +718,14 @@ export default function WhatsAppSettingsPage() {
               <div className="flex items-center gap-2">
                 <button
                   onClick={() => setShowBulkImport(true)}
-                  className="btn-apple btn-apple-outline flex items-center gap-2"
+                  className="btn-apple btn-apple-outline flex flex-1 sm:flex-none items-center justify-center gap-2 whitespace-nowrap"
                 >
                   <Upload className="w-4 h-4" />
                   Bulk Import
                 </button>
                 <button
                   onClick={() => setShowAddModal(true)}
-                  className="btn-apple btn-wa-green flex items-center gap-2"
+                  className="btn-apple btn-wa-green flex flex-1 sm:flex-none items-center justify-center gap-2 whitespace-nowrap"
                 >
                   <Plus className="w-4 h-4" />
                   Add Phone
@@ -756,11 +756,11 @@ export default function WhatsAppSettingsPage() {
                   return (
                     <div key={phone.id} className="p-4 hover:bg-ios-gray/30 transition border-b border-black/5 last:border-b-0">
                       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-                        <div className="flex items-start md:items-center gap-4">
-                          <div className="w-12 h-12 bg-wa-green/20 rounded-apple-xl flex items-center justify-center shrink-0">
-                            <Phone className="w-6 h-6 text-wa-green" />
+                        <div className="flex items-start md:items-center gap-3 sm:gap-4 min-w-0">
+                          <div className="w-10 h-10 sm:w-12 sm:h-12 bg-wa-green/20 rounded-apple-xl flex items-center justify-center shrink-0">
+                            <Phone className="w-5 h-5 sm:w-6 sm:h-6 text-wa-green" />
                           </div>
-                          <div>
+                          <div className="min-w-0">
                             <div className="flex flex-wrap items-center gap-2">
                               <p className="font-semibold text-ios-dark text-base">{phone.displayName || phone.phoneNumber}</p>
                               <span className={`px-2.5 py-0.5 text-xs font-semibold rounded-full ${status.bgColor} ${status.color}`}>
@@ -776,7 +776,7 @@ export default function WhatsAppSettingsPage() {
                             <div className="flex flex-wrap items-center gap-x-4 gap-y-1 mt-1 text-sm">
                               <span className="font-mono text-ios-dark font-medium">{phone.phoneNumber}</span>
                               {phone.metaPhoneId && (
-                                <span className="text-xs font-mono bg-slate-100 text-slate-700 px-2 py-0.5 rounded border border-slate-200 flex items-center gap-1">
+                                <span className="text-xs font-mono bg-slate-100 text-slate-700 px-2 py-0.5 rounded border border-slate-200 flex items-center gap-1 max-w-full break-all">
                                   <Shield className="w-3 h-3 text-wa-green" />
                                   Meta Phone ID: <code className="font-bold">{phone.metaPhoneId}</code>
                                 </span>
@@ -787,18 +787,20 @@ export default function WhatsAppSettingsPage() {
                             </div>
                           </div>
                         </div>
-                        <div className="flex items-center gap-2 shrink-0">
-                          <div className="flex gap-1 mr-2">
+                        {/* Phones: badges on the left, actions pushed right; wraps if still too narrow. */}
+                        <div className="flex flex-wrap items-center gap-2 min-w-0 sm:pl-16 md:pl-0 md:shrink-0">
+                          <div className="flex gap-1 mr-auto md:mr-2">
                             {phone.canSendMarketing && <span className="badge-apple badge-purple" title="Marketing Allowed">MKT</span>}
                             {phone.canSendUtility && <span className="badge-apple badge-green" title="Utility Allowed">UTL</span>}
                             {phone.canSendAuth && <span className="badge-apple badge-blue" title="Authentication Allowed">AUTH</span>}
                           </div>
                           <button
                             onClick={() => { setShowPhoneDetail(phone); setSelectedPhone(phone.id); }}
-                            className="btn-apple btn-apple-outline text-xs px-3 py-1.5 flex items-center gap-1.5"
+                            className="btn-apple btn-apple-outline text-xs px-3 py-1.5 flex items-center gap-1.5 whitespace-nowrap"
                           >
                             <Settings className="w-3.5 h-3.5" />
-                            Setup & Meta Config
+                            <span className="sm:hidden">Setup</span>
+                            <span className="hidden sm:inline">Setup & Meta Config</span>
                           </button>
                           <button
                             onClick={() => { setConfirmDeletePhone(phone); setDeletePhoneError(null); setDeleteBlockedByConversations(false); }}
@@ -810,9 +812,9 @@ export default function WhatsAppSettingsPage() {
                         </div>
                       </div>
                       {/* Daily usage bar */}
-                      <div className="mt-3 flex items-center gap-3 text-xs text-ios-muted bg-slate-50/80 p-2 rounded-apple-lg border border-slate-200/60">
+                      <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1.5 text-xs text-ios-muted bg-slate-50/80 p-2 rounded-apple-lg border border-slate-200/60">
                         <span className="font-medium text-slate-600">Daily Message Volume:</span>
-                        <div className="flex-1 h-2 bg-slate-200 rounded-full overflow-hidden max-w-[250px]">
+                        <div className="flex-1 min-w-[80px] h-2 bg-slate-200 rounded-full overflow-hidden max-w-[250px]">
                           <div
                             className={`h-full transition-all ${usagePct > 80 ? 'bg-apple-red' : usagePct > 60 ? 'bg-apple-orange' : 'bg-wa-green'}`}
                             style={{ width: `${usagePct}%` }}
@@ -1357,7 +1359,7 @@ export default function WhatsAppSettingsPage() {
               </div>
 
               {/* Metrics */}
-              <div className="grid grid-cols-4 gap-4">
+              <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
                 <div className="card-apple p-4 text-center">
                   <p className="text-3xl font-bold text-apple-green">{qualityReport.metrics.deliveryRate}%</p>
                   <p className="text-sm text-ios-muted">Delivery Rate</p>
