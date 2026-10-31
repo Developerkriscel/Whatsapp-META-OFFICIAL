@@ -15,7 +15,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { api } from '../api/client';
-import { openCashfreeCheckout } from '../lib/checkout';
+import { openCashfreeCheckout, openRazorpayCheckout } from '../lib/checkout';
 import {
   Wallet, TrendingUp, RotateCcw, Plus, Loader2, CheckCircle2, Info,
 } from 'lucide-react';
@@ -143,10 +143,29 @@ export default function CreditsPage() {
       setCheckoutError('');
       setCashfreeMessage(null);
     },
-    onSuccess: (order: any) => {
+    onSuccess: async (order: any) => {
       setTopUp('');
       setCheckoutError('');
-      if (order?.provider === 'cashfree' && order?.paymentSessionId) {
+      if (order?.provider === 'razorpay' && order?.keyId && order?.orderId) {
+        try {
+          const result = await openRazorpayCheckout({
+            keyId: order.keyId,
+            orderId: order.orderId,
+            amountMinor: order.amountMinor,
+            currency: order.currency,
+            credits: order.credits,
+          });
+          if (result.status === 'credited') {
+            await qc.invalidateQueries({ queryKey: ['billing-summary'] });
+          } else if (result.status === 'failed') {
+            setCheckoutError(result.message || 'Payment failed.');
+          } else if (result.status === 'dismissed') {
+            setCheckoutError('');
+          }
+        } catch (error: any) {
+          setCheckoutError(error.message || 'Could not open payment gateway.');
+        }
+      } else if (order?.provider === 'cashfree' && order?.paymentSessionId) {
         return openCashfreeCheckout(order.paymentSessionId, !!order.testMode)
           .catch((error: Error) => setCheckoutError(error.message));
       } else if (order?.checkoutUrl) {

@@ -93,6 +93,71 @@ export interface CheckoutOptions {
   businessName?: string;
 }
 
+export interface RazorpayCheckoutOptions {
+  keyId: string;
+  orderId: string;
+  amountMinor: number;
+  currency: string;
+  credits?: number;
+  description?: string;
+  prefill?: { name?: string; email?: string; contact?: string };
+  businessName?: string;
+  confirmUrl?: string;
+}
+
+export async function openRazorpayCheckout(opts: RazorpayCheckoutOptions): Promise<CheckoutResult> {
+  await loadCheckout();
+
+  const confirmUrl = opts.confirmUrl || '/credits/checkout/confirm';
+
+  return new Promise<CheckoutResult>((resolve) => {
+    const rzp = new (window as any).Razorpay({
+      key: opts.keyId,
+      order_id: opts.orderId,
+      amount: opts.amountMinor,
+      currency: opts.currency,
+      name: opts.businessName || 'Kriscel WA',
+      description: opts.description || (opts.credits ? `${opts.credits.toLocaleString('en-IN')} credits` : 'Payment'),
+      prefill: opts.prefill || {},
+      theme: { color: '#25D366' },
+
+      handler: async (response: any) => {
+        try {
+          const confirmed = await api.post(confirmUrl, {
+            orderId: response.razorpay_order_id,
+            paymentId: response.razorpay_payment_id,
+            signature: response.razorpay_signature,
+          });
+          const d = confirmed.data?.data;
+          resolve({
+            status: d?.credited || d?.activated ? 'credited' : 'pending',
+            credits: d?.credits,
+            balanceAfter: d?.balanceAfter,
+            message: d?.reason,
+          });
+        } catch (err: any) {
+          resolve({
+            status: 'pending',
+            message:
+              err?.response?.data?.error?.message
+              || 'Payment taken, waiting for confirmation. Your balance will update shortly.',
+          });
+        }
+      },
+
+      modal: {
+        ondismiss: () => resolve({ status: 'dismissed', message: 'Payment cancelled.' }),
+      },
+    });
+
+    rzp.on('payment.failed', (resp: any) => {
+      resolve({ status: 'failed', message: resp?.error?.description || 'The payment did not go through.' });
+    });
+
+    rzp.open();
+  });
+}
+
 export async function buyCredits(opts: CheckoutOptions): Promise<CheckoutResult> {
   const created = await api.post('/credits/checkout/create-order', {
     packageId: opts.packageId,

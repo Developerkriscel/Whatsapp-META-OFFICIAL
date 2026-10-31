@@ -6,7 +6,7 @@ import { useEffect, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useSearchParams, Link } from 'react-router-dom';
 import { api } from '../api/client';
-import { openCashfreeCheckout } from '../lib/checkout';
+import { openCashfreeCheckout, openRazorpayCheckout } from '../lib/checkout';
 import { useCurrency, formatMoney } from '../lib/money';
 import {
   CreditCard, Check, Download, ExternalLink, Loader2, AlertCircle,
@@ -149,13 +149,14 @@ export default function BillingPage() {
     queryKey: ['billing', 'proration', showUpgradeModal?.tier],
     queryFn: async () => {
       if (!showUpgradeModal) return null;
-      if (billingData?.data.paymentProvider === 'cashfree') return null;
+      const pp = billingData?.data.paymentProvider;
+      if (pp === 'cashfree' || pp === 'razorpay') return null;
       const response = await api.get('/billing/proration', {
         params: { newPlan: showUpgradeModal.tier }
       });
       return response.data;
     },
-    enabled: !!showUpgradeModal && billingData?.data.paymentProvider !== 'cashfree',
+    enabled: !!showUpgradeModal && billingData?.data.paymentProvider !== 'cashfree' && billingData?.data.paymentProvider !== 'razorpay',
   });
 
   // Mutations
@@ -164,9 +165,34 @@ export default function BillingPage() {
       const response = await api.post('/billing/checkout', { planTier, interval });
       return response.data;
     },
-    onSuccess: (data) => {
+    onSuccess: async (data) => {
       const checkout = data?.data;
-      if (checkout?.provider === 'cashfree' && checkout?.paymentSessionId) {
+      if (checkout?.provider === 'razorpay' && checkout?.keyId && checkout?.orderId) {
+        try {
+          const result = await openRazorpayCheckout({
+            keyId: checkout.keyId,
+            orderId: checkout.orderId,
+            amountMinor: checkout.amountMinor,
+            currency: checkout.currency,
+            description: 'Plan purchase',
+            confirmUrl: '/billing/checkout/confirm-razorpay',
+          });
+          if (result.status === 'credited') {
+            setNotification({ type: 'success', message: 'Plan activated successfully.' });
+            await Promise.all([
+              queryClient.invalidateQueries({ queryKey: ['billing'] }),
+              queryClient.invalidateQueries({ queryKey: ['billing', 'plans'] }),
+            ]);
+          } else if (result.status === 'pending') {
+            setNotification({ type: 'success', message: result.message || 'Payment received. Your plan will activate shortly.' });
+          } else if (result.status === 'failed') {
+            setNotification({ type: 'error', message: result.message || 'Payment failed.' });
+          }
+        } catch (error: any) {
+          setNotification({ type: 'error', message: error.message || 'Could not open payment gateway.' });
+        }
+        setShowUpgradeModal(null);
+      } else if (checkout?.provider === 'cashfree' && checkout?.paymentSessionId) {
         return openCashfreeCheckout(checkout.paymentSessionId, !!checkout.testMode).catch((error: Error) => {
           setNotification({ type: 'error', message: error.message });
         });
@@ -301,7 +327,7 @@ export default function BillingPage() {
   const handleSelectPlan = (plan: Plan) => {
     setShowUpgradeModal(plan);
     setTermsAccepted(false);
-    if (billing?.paymentProvider !== 'cashfree' && prorationData?.data) {
+    if (billing?.paymentProvider !== 'cashfree' && billing?.paymentProvider !== 'razorpay' && prorationData?.data) {
       setShowProration(prorationData.data);
     }
   };
@@ -595,7 +621,7 @@ export default function BillingPage() {
             const cashfreeTotal = interval === 'monthly'
               ? Number(plan.cashfreeMonthlyTotalInr)
               : Number(plan.cashfreeAnnualTotalInr);
-            const price = billing?.paymentProvider === 'cashfree'
+            const price = billing?.paymentProvider === 'cashfree' || billing?.paymentProvider === 'razorpay'
               ? interval === 'monthly' ? cashfreeTotal : cashfreeTotal / 12
               : stripePrice;
             const isCurrent = currentTier === plan.tier && !prepaidExpired;
@@ -626,12 +652,12 @@ export default function BillingPage() {
 
                 <div className="mt-4 mb-6">
                   <span className="text-4xl font-bold text-ios-dark">
-                    {billing?.paymentProvider === 'cashfree'
+                    {billing?.paymentProvider === 'cashfree' || billing?.paymentProvider === 'razorpay'
                       ? formatInr(price)
                       : `$${Number.isInteger(price) ? price : price.toFixed(0)}`}
                   </span>
                   <span className="text-ios-muted">/month</span>
-                  {billing?.paymentProvider === 'cashfree' ? (
+                  {billing?.paymentProvider === 'cashfree' || billing?.paymentProvider === 'razorpay' ? (
                     <div className="mt-2 space-y-1 text-xs text-ios-muted">
                       <p>Plan price: {formatInr(cashfreeBase)}{interval === 'monthly' ? '/month' : '/year'}</p>
                       <p>GST ({plan.cashfreeGstRatePercent}%): {formatInr(cashfreeGst)}{interval === 'monthly' ? '/month' : '/year'}</p>
@@ -657,7 +683,7 @@ export default function BillingPage() {
                       : 'bg-apple-orange/20 text-apple-orange hover:bg-apple-orange/30'
                   }`}
                 >
-                  {isCurrent ? 'Current Plan' : billing?.paymentProvider === 'cashfree' ? (
+                  {isCurrent ? 'Current Plan' : billing?.paymentProvider === 'cashfree' || billing?.paymentProvider === 'razorpay' ? (
                     <>Pay & activate <ArrowRight className="w-4 h-4" /></>
                   ) : isUpgrade ? (
                     <>Upgrade <ArrowRight className="w-4 h-4" /></>
@@ -822,7 +848,7 @@ export default function BillingPage() {
               </button>
             </div>
 
-            {billing?.paymentProvider === 'cashfree' && (
+            {(billing?.paymentProvider === 'cashfree' || billing?.paymentProvider === 'razorpay') && (
               <div className="mb-6 rounded-apple-lg bg-ios-gray p-4 text-sm">
                 <p className="mb-3 font-medium text-ios-dark">
                   {interval === 'monthly' ? 'Monthly payment summary' : 'Annual payment summary'}
@@ -853,12 +879,12 @@ export default function BillingPage() {
                     </span>
                   </div>
                 </div>
-                <p className="mt-2 text-xs text-ios-muted">One-time prepaid Cashfree plan; no automatic renewal.</p>
+                <p className="mt-2 text-xs text-ios-muted">One-time prepaid plan; no automatic renewal.</p>
               </div>
             )}
 
             {/* Proration Preview */}
-            {billing?.paymentProvider !== 'cashfree' && prorationData?.data && (
+            {billing?.paymentProvider !== 'cashfree' && billing?.paymentProvider !== 'razorpay' && prorationData?.data && (
               <div className="p-4 bg-ios-gray rounded-apple-lg mb-6">
                 <p className="text-sm font-medium text-ios-dark mb-3 flex items-center gap-2">
                   <Info className="w-4 h-4" />
@@ -914,7 +940,7 @@ export default function BillingPage() {
                   <Loader2 className="w-4 h-4 animate-spin" />
                 ) : (
                   <>
-                    {billing?.paymentProvider === 'cashfree'
+                    {billing?.paymentProvider === 'cashfree' || billing?.paymentProvider === 'razorpay'
                       ? `Pay for ${interval === 'monthly' ? '1 month' : '1 year'}`
                       : `Confirm ${getPlanOrder(currentTier) < getPlanOrder(showUpgradeModal.tier) ? 'Upgrade' : 'Change'}`}
                     <ArrowRight className="w-4 h-4" />

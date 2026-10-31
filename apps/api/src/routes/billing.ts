@@ -184,6 +184,55 @@ export async function registerBillingRoutes(app: FastifyInstance): Promise<void>
       where: { isActive: true, isDefault: true },
     }) ?? await app.prisma.paymentProvider.findFirst({ where: { isActive: true } });
 
+    if (activeProvider?.provider === 'razorpay') {
+      if (tenant.stripeSubId) {
+        return reply.status(409).send({
+          success: false,
+          error: {
+            code: 'ACTIVE_STRIPE_SUBSCRIPTION',
+            message: 'This workspace has an active Stripe subscription. Cancel it before purchasing a prepaid plan.',
+          },
+        });
+      }
+
+      const plan = await app.prisma.plan.findFirst({
+        where: { tier: body.planTier, isPublic: true, isActive: true },
+      });
+      if (!plan) {
+        return reply.status(404).send({ success: false, error: { code: 'PLAN_NOT_FOUND', message: 'Selected plan is not available.' } });
+      }
+
+      const amountUsd = Number(body.interval === 'monthly' ? plan.monthlyPrice : plan.annualPrice);
+      if (amountUsd <= 0) {
+        return reply.status(400).send({ success: false, error: { code: 'PLAN_NOT_PURCHASABLE', message: 'This plan is not available for online checkout.' } });
+      }
+
+      try {
+        const { createRazorpayPlanOrder } = await import('../services/payments.js');
+        const order = await createRazorpayPlanOrder(app.prisma, {
+          tenantId: tenant.id,
+          planId: plan.id,
+          planTier: plan.tier,
+          planName: plan.name,
+          interval: body.interval,
+          amountUsd,
+          customer: {
+            id: tenant.id,
+            name: tenant.name,
+            email: tenant.billingEmail || `${tenant.id}@whatsapp-saas.com`,
+            phone: null,
+          },
+        });
+        return { success: true, data: order };
+      } catch (error: any) {
+        request.log.error({ err: error }, 'Razorpay plan checkout order creation failed');
+        return reply.status(502).send({
+          success: false,
+          error: { code: 'CHECKOUT_FAILED', message: error.message || 'Could not create Razorpay checkout.' },
+        });
+      }
+    }
+
     if (activeProvider?.provider === 'cashfree') {
       if (tenant.stripeSubId) {
         return reply.status(409).send({
@@ -281,6 +330,45 @@ export async function registerBillingRoutes(app: FastifyInstance): Promise<void>
     return {
       success: true,
       data: session,
+    };
+  });
+
+  app.post('/billing/checkout/confirm-razorpay', { preHandler: [app.requirePermission('billing', 'update')] }, async (request, reply) => {
+    if (!request.authUser.tenantId) {
+      return reply.status(401).send({ success: false, error: { code: 'UNAUTHORIZED' } });
+    }
+    const body = z.object({
+      orderId: z.string().min(1),
+      paymentId: z.string().min(1),
+      signature: z.string().min(1),
+    }).parse(request.body);
+
+    const order = await app.prisma.paymentOrder.findFirst({
+      where: { providerOrderId: body.orderId, provider: 'razorpay', tenantId: request.authUser.tenantId },
+      select: { id: true },
+    });
+    if (!order) {
+      return reply.status(404).send({ success: false, error: { code: 'ORDER_NOT_FOUND', message: 'Razorpay plan order not found.' } });
+    }
+
+    const { confirmPayment } = await import('../services/payments.js');
+    const result = await confirmPayment(app.prisma, {
+      orderId: body.orderId,
+      paymentId: body.paymentId,
+      signature: body.signature,
+    });
+    const tenant = await app.prisma.tenant.findUnique({
+      where: { id: request.authUser.tenantId },
+      select: { planExpiresAt: true },
+    });
+    return {
+      success: true,
+      data: {
+        activated: result.credited,
+        alreadyConfirmed: result.reason === 'Already confirmed.' || result.reason === 'Already credited.',
+        planExpiresAt: tenant?.planExpiresAt,
+        reason: result.reason,
+      },
     };
   });
 

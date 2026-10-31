@@ -95,18 +95,25 @@ function planTermEnd(start: Date, interval: 'monthly' | 'annual'): Date {
 }
 
 async function activeProvider(prisma: PrismaClient) {
-  const provider = await prisma.paymentProvider.findFirst({
-    where: { isActive: true, isDefault: true },
-  }) ?? await prisma.paymentProvider.findFirst({ where: { isActive: true } });
+  const candidates = await prisma.paymentProvider.findMany({
+    where: { isActive: true },
+    orderBy: { isDefault: 'desc' },
+  });
 
-  if (!provider) throw new Error('No payment provider is active. Configure one in Superadmin → Credits → Commerce.');
+  if (!candidates.length) throw new Error('No payment provider is active. Configure one in Superadmin → Credits → Commerce.');
 
-  const secret = decryptIfPresent(provider.secretKey);
-  const publicKey = provider.publicKey;
-  if (!publicKey || !secret) {
-    throw new Error(`${provider.label} is active but its keys are incomplete.`);
+  for (const provider of candidates) {
+    try {
+      const secret = decryptIfPresent(provider.secretKey);
+      const publicKey = provider.publicKey;
+      if (!publicKey || !secret) continue;
+      return { provider, publicKey, secret };
+    } catch {
+      // Encrypted with a stale key — skip to the next provider.
+    }
   }
-  return { provider, publicKey, secret };
+
+  throw new Error('No payment provider has valid credentials. Re-save the keys in Superadmin → Credits → Commerce.');
 }
 
 /**
@@ -158,7 +165,6 @@ export async function createOrder(prisma: PrismaClient, input: CreateOrderInput)
       body: JSON.stringify({
         amount: amountMinor,
         currency: 'INR',
-        // Lets a payment be traced back to the tenant from the Razorpay dashboard.
         notes: { tenantId: input.tenantId, credits: String(credits) },
       }),
     });
@@ -232,6 +238,81 @@ export async function createOrder(prisma: PrismaClient, input: CreateOrderInput)
     currency: 'INR',
     credits,
     breakdown,
+    testMode: provider.testMode,
+  };
+}
+
+export async function createRazorpayPlanOrder(
+  prisma: PrismaClient,
+  input: CreatePlanOrderInput,
+): Promise<{ orderId: string; provider: string; keyId: string; amountMinor: number; currency: string; testMode: boolean }> {
+  const { provider, publicKey, secret } = await activeProvider(prisma);
+  if (provider.provider !== 'razorpay') {
+    throw new Error('Razorpay is not the active payment provider.');
+  }
+  if (!Number.isFinite(input.amountUsd) || input.amountUsd <= 0) {
+    throw new Error('This plan does not have a purchasable price.');
+  }
+
+  const currency = await getCurrencyContext(prisma);
+  const usdToInr = currency.currency === 'INR' ? currency.fxRate : EXCHANGE_RATES.INR;
+  const quote = quoteCashfreePlanPrice(input.amountUsd, usdToInr);
+  const { baseMinor, gstMinor, totalMinor: amountMinor } = quote;
+  if (amountMinor < 100) throw new Error('The minimum charge is ₹1.00.');
+
+  const auth = Buffer.from(`${publicKey}:${secret}`).toString('base64');
+  const res = await fetch('https://api.razorpay.com/v1/orders', {
+    method: 'POST',
+    headers: { Authorization: `Basic ${auth}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      amount: amountMinor,
+      currency: 'INR',
+      notes: {
+        tenantId: input.tenantId,
+        planId: input.planId,
+        planTier: input.planTier,
+        interval: input.interval,
+        kind: 'PLAN_PURCHASE',
+      },
+    }),
+  });
+
+  const responseBody: any = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(responseBody?.error?.description || `Razorpay refused the order (${res.status}).`);
+  }
+  const providerOrderId = responseBody.id;
+
+  await prisma.paymentOrder.create({
+    data: {
+      tenantId: input.tenantId,
+      provider: 'razorpay',
+      providerOrderId,
+      credits: 0,
+      amountMinor,
+      currency: 'INR',
+      status: 'CREATED',
+      breakdown: {
+        kind: 'PLAN_PURCHASE',
+        planId: input.planId,
+        planTier: input.planTier,
+        interval: input.interval,
+        amountUsd: input.amountUsd,
+        usdToInr,
+        baseMinor,
+        gstRatePercent: CASHFREE_PLAN_GST_RATE_PERCENT,
+        gstMinor,
+        totalMinor: amountMinor,
+      },
+    },
+  });
+
+  return {
+    orderId: providerOrderId,
+    provider: 'razorpay',
+    keyId: publicKey,
+    amountMinor,
+    currency: 'INR',
     testMode: provider.testMode,
   };
 }
@@ -382,7 +463,62 @@ export async function confirmPayment(
     return { credited: false, credits: 0, reason: 'The amount paid does not match the order.' };
   }
 
+  const breakdown = order.breakdown as { kind?: string; planId?: string; interval?: 'monthly' | 'annual' } | null;
+  if (breakdown?.kind === 'PLAN_PURCHASE') {
+    return activateRazorpayPlan(prisma, order, args.paymentId, breakdown);
+  }
+
   return grantPaymentCredits(prisma, order, args.paymentId);
+}
+
+async function activateRazorpayPlan(
+  prisma: PrismaClient,
+  order: { id: string; tenantId: string; providerOrderId: string; credits: number },
+  paymentId: string,
+  breakdown: { planId?: string; interval?: 'monthly' | 'annual' },
+): Promise<{ credited: boolean; credits: number; balanceAfter?: number; activated?: boolean; reason?: string }> {
+  if (!breakdown.planId || !breakdown.interval) {
+    await prisma.paymentOrder.update({
+      where: { id: order.id },
+      data: { status: 'FAILED', failureReason: 'Plan purchase details are missing' },
+    });
+    return { credited: false, credits: 0, reason: 'Plan purchase details are missing.' };
+  }
+
+  const plan = await prisma.plan.findUnique({ where: { id: breakdown.planId } });
+  if (!plan || !plan.isActive || !plan.isPublic) {
+    await prisma.paymentOrder.update({
+      where: { id: order.id },
+      data: { status: 'FAILED', failureReason: 'The purchased plan is no longer available' },
+    });
+    return { credited: false, credits: 0, reason: 'The purchased plan is no longer available.' };
+  }
+
+  const planExpiresAt = planTermEnd(new Date(), breakdown.interval);
+
+  const activated = await prisma.$transaction(async (tx) => {
+    const claim = await tx.paymentOrder.updateMany({
+      where: { id: order.id, status: 'CREATED' },
+      data: { status: 'PAID', providerPaymentId: paymentId, creditedAt: new Date() },
+    });
+    if (claim.count !== 1) return false;
+    await tx.tenant.update({
+      where: { id: order.tenantId },
+      data: {
+        planId: plan.id,
+        planExpiresAt,
+        status: 'ACTIVE',
+        isOnTrial: false,
+        trialEndsAt: null,
+        stripeSubId: null,
+      },
+    });
+    return true;
+  });
+
+  return activated
+    ? { credited: true, credits: 0, activated: true, reason: `Plan active until ${planExpiresAt.toISOString()}.` }
+    : { credited: false, credits: 0, reason: 'Already confirmed.' };
 }
 
 async function grantPaymentCredits(
