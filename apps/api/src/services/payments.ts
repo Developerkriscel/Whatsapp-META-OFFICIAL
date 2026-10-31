@@ -16,7 +16,7 @@
  *  - The webhook is the authority. The browser callback is a convenience so the
  *    page can update immediately; a purchase completes without it.
  */
-import type { PrismaClient } from '@prisma/client';
+import type { PrismaClient, Prisma } from '@prisma/client';
 import crypto from 'crypto';
 import { decryptIfPresent } from './credentialEncryption.js';
 import { getCurrencyContext } from './currency.js';
@@ -496,7 +496,7 @@ async function activateRazorpayPlan(
 
   const planExpiresAt = planTermEnd(new Date(), breakdown.interval);
 
-  const activated = await prisma.$transaction(async (tx) => {
+  const activated = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
     const claim = await tx.paymentOrder.updateMany({
       where: { id: order.id, status: 'CREATED' },
       data: { status: 'PAID', providerPaymentId: paymentId, creditedAt: new Date() },
@@ -526,7 +526,7 @@ async function grantPaymentCredits(
   order: { id: string; tenantId: string; providerOrderId: string; credits: number },
   paymentId: string,
 ): Promise<{ credited: boolean; credits: number; balanceAfter?: number; reason?: string }> {
-  const result = await prisma.$transaction(async (tx) => {
+  const result = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
     const claimed = await tx.paymentOrder.updateMany({
       where: { id: order.id, status: 'CREATED' },
       data: { status: 'PAID', providerPaymentId: paymentId, creditedAt: new Date() },
@@ -641,7 +641,7 @@ export async function confirmCashfreeOrder(
 
     const planExpiresAt = planTermEnd(new Date(), breakdown.interval);
 
-    const activated = await prisma.$transaction(async (tx) => {
+    const activated = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
       const claim = await tx.paymentOrder.updateMany({
         where: { id: order.id, status: 'CREATED' },
         data: { status: 'PAID', providerPaymentId: paymentId, creditedAt: new Date() },
